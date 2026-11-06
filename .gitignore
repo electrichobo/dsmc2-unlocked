@@ -1,0 +1,40 @@
+# RED DSMC2 Emulator .gitignore
+# Proprietary firmware, images, and user assets must NEVER be committed
+firmware_store/
+user_firmware/
+*.bin
+*.mem
+*.pkg
+*.dump
+*.preset
+*.r3d
+*.raw
+
+# Build and compilation artifacts
+target/
+build/
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.o
+*.a
+*.so
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env/
+
+# System and logs
+logs/
+*.log
+.system_generated/
+.idea/
+.vscode/
+
+# Research submodule / clone
+research/
