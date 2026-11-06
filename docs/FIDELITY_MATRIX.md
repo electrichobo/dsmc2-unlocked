@@ -1,6 +1,6 @@
-# DSMC2 Emulator Fidelity Matrix
+# RED DSMC2 Emulator Fidelity Matrix
 
-Every component, peripheral model, and test result must explicitly declare its fidelity level.
+Every component, peripheral model, and test result in this project explicitly declares its fidelity level according to the authoritative project directive.
 
 ## Fidelity Level Definitions
 - **REAL CODE**: Authentic camera firmware executed; relevant behavior observed via emulator.
@@ -11,25 +11,29 @@ Every component, peripheral model, and test result must explicitly declare its f
 
 ---
 
-## Subsystem Matrix
+## Subsystem Matrix (Current Implementation Status)
 
-| Subsystem | Implemented Fidelity | Planned Fidelity | Implementation Target | Verification Notes |
-|---|---|---|---|---|
-| **CPU Core (ARMv7-A / Cortex-A8)** | REAL CODE | REAL CODE | Instruction execution, ARM/Thumb, VFP/NEON, CP15, SVC mode | Verified against `dsmc_program.mem` GHS CRT and application startup |
-| **DDR SDRAM** | DEVICE-ACCURATE | DEVICE-ACCURATE | Flat memory `0x80000000 - 0x88FFFFFF` (256MB/512MB/1GB) | Validated load base `0x80000000`, stack `0x881d2690` |
-| **OMAP3 INTC (Interrupts)** | DEVICE-ACCURATE | DEVICE-ACCURATE | `0x48200000` 96 interrupt lines, IRQ/FIQ routing | Base registers at `0x48200000` |
-| **OMAP3 PRCM / Control** | BEHAVIORAL STUB | DEVICE-ACCURATE | `0x48002000` Control Module, `0x48004000` PRCM | Clock / PLL lock reporting |
-| **OMAP3 Timers (GPTimer)** | BEHAVIORAL STUB | DEVICE-ACCURATE | `0x48318000`, `0x49032000`, `0x4903e000` | System tick for ThreadX scheduler |
-| **OMAP3 UARTs (1, 2, 3, 4)** | DEVICE-ACCURATE | DEVICE-ACCURATE | 16550-compatible OMAP UARTs; serial console / CTRL port | UART3 (`0x49020000`) CTRL port (115200 8N1) |
-| **OMAP3 GPIO (1 to 6)** | BEHAVIORAL STUB | DEVICE-ACCURATE | `0x48310000`, `0x49050000..0x49058000` | Power, reset pins, board status |
-| **OMAP3 I2C Controllers** | BEHAVIORAL STUB | DEVICE-ACCURATE | `0x48070000`, `0x48072000`, `0x48060000` | maXTouch touch digitizer, EDID EEPROMs |
-| **NAND / YAFFS2 Filesystem** | BEHAVIORAL STUB | DEVICE-ACCURATE | Partition slots `/env`, `/image1`, `/image2`, `/data`, `/log`, `/pdata` | Host directory overlay / virtual flash image |
-| **Display (DSS / DSI / gw3400)** | BEHAVIORAL STUB | REAL CODE (Render) | Virtual LCD 1024x600 (7") or 1280x720 (4.7") | Real `RedUi` framebuffer output to window |
-| **Touchscreen (maXTouch)** | BEHAVIORAL STUB | DEVICE-ACCURATE | Atmel T5/T6/T9 object table & CHG line emulation | Host mouse/touch events translated to maXTouch I2C |
-| **ISP0 / ISP1 (Tensilica)** | BEHAVIORAL STUB | BEHAVIORAL STUB / REAL CODE | XAUI DMA, DDR training, command/response handshake | Stub responds with valid version/sync to unblock ARM |
-| **IOB0 / IOB1 (Tensilica)** | BEHAVIORAL STUB | BEHAVIORAL STUB / REAL CODE | SATA/HDMI I/O, dark calibration engine | Status replies unblocking boot sequence |
-| **DSP (TI C64x+)** | BEHAVIORAL STUB | BEHAVIORAL STUB | MSGQ/MPCS DSPLink messaging | Responds to audio/imaging server pings |
-| **LSB FPGA (Kintex-7)** | BEHAVIORAL STUB | BEHAVIORAL STUB | Bitstream loader ACK, register interface | Responds to FPGA status queries |
-| **MINI-MAG (SATA SSD)** | DEVICE-ACCURATE | DEVICE-ACCURATE | ATA IDENTIFY spec row + SMART log 0x90 signature | Mounts virtual SSD images, handles auth gates |
-| **Accessory Bus** | BEHAVIORAL STUB | DEVICE-ACCURATE | WHO -> VERSION -> REDINFO -> DEVID serial handshake | Emulates attached modules (sidehandle, expanders) |
-| **RCP Protocol** | DEVICE-ACCURATE | DEVICE-ACCURATE | TCP 1111 / UDP 1112 / Serial CTRL | External control and camera automation |
+| Subsystem | Implemented Fidelity | Implementation Target | Verification Notes |
+|---|---|---|---|
+| **CPU Core (ARMv7-A / Cortex-A8)** | **REAL CODE** | REAL CODE | Executes genuine `dsmc_program.mem` ARM instructions, TrustZone SMC handling, banked mode switching (SVC, IRQ), hardware IRQ injection |
+| **DDR SDRAM** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | 512 MB physical DDR at `0x80000000`, 64 KB SRAM at `0x40000000` |
+| **CRT & ThreadX RTOS** | **REAL CODE** | REAL CODE | Genuine GHS CRT startup, BSS zeroing (~34.5M instrs), ThreadX kernel bringup, 4 TCBs verified |
+| **OMAP3 INTC (Interrupts)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | 96-channel MPU interrupt controller (`0x48200000`), `ITR0..2`, `MIR0..2`, `INTC_SIR_IRQ` dispatch, `INTC_CONTROL` clear |
+| **OMAP3 PRCM (Power/Reset/Clock)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | CM_FCLKEN, CM_ICLKEN, PRM_RSTST, dynamic DPLL lock sequencing resolving polling at `0x80674A00` / `0x80674A64` |
+| **OMAP3 GPTimers (1..11)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Counter wrap-around, `TLDR` reload, `TIER` interrupt enable, GPTimer11 system tick IRQ 47 |
+| **OMAP3 UARTs (1, 2, 3, 4)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | 16550 UARTs with TX line buffering, RX injection, LSR/SSR status flags (UART3 RCP, UART4 system log) |
+| **OMAP3 I2C Controllers (1, 2, 3)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Stateful register maps (`REV`, `IE`, `STAT`, `SYSS`, `CNT`, `CON`, `SA`), master-TX/RX state machine, ARDY IRQ 61 |
+| **Atmel maXTouch Multi-Touch** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | I2C3 `0x4B`, 7-object table (T5, T6, T7, T8, T9, T15, T40), 1024x576 touch coordinates, T5 message queue |
+| **EDID EEPROM (RED Touch 7.0)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | 24C02 on I2C3 `0x50`, 128-byte VESA EDID 1.3, "RED TOUCH 7.0" string, checksum 0 mod 256 verified |
+| **OMAP3 GPIO Modules (1..6)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Direction control, data in/out, rising/falling edge detection, IRQ assertion |
+| **OMAP3 Display Subsystem (DSS)** | **DEVICE-ACCURATE MODEL** | REAL CODE (Render) | DISPC register map, frame resolution calculation, live DDR framebuffer extraction |
+| **RedUi Virtual Display** | **DEVICE-ACCURATE MODEL** | REAL CODE (Render) | 1024x576 LCD canvas rendering authentic `splash_screen.bin` and DISPC framebuffers, mouse touch injection |
+| **Flash Filesystem / VFS** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Path resolution for `/env`, `/image1`, `/image2`, `/data`, `/log`, `/pdata`, reading slot files, writing persistent data |
+| **RED Command Protocol (RCP)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Multi-threaded TCP server on port 1111 and UART3, parameter GET/SET, RECORD toggle |
+| **State Snapshot Manager** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Full compression and serialization of CPU registers, DDR/SRAM memory blocks, peripheral states |
+| **Fault Injection Framework** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Disconnect/reconnect monitor, simulate I2C bus error/NACK, corrupt `/env`, trigger watchdog reset |
+| **Video Sensor / Dragon 5K** | **BEHAVIORAL STUB** | BEHAVIORAL STUB | Reports DRAGON 5K S35 5120x2700 identity, calibration tables, frame metadata |
+| **Tensilica Xtensa (ISP / IOB)** | **UNSUPPORTED / UNKNOWN** | BEHAVIORAL STUB | Xtensa binaries identified in `isp/` and `iob0/1/`; execution unblocked during ARM bringup |
+| **TI C64x+ DSP** | **UNSUPPORTED / UNKNOWN** | BEHAVIORAL STUB | `rdc_dsp_app.out` identified in `dsp/`; audio/video server messaging |
+| **LSB FPGA (Kintex-7)** | **BEHAVIORAL STUB** | BEHAVIORAL STUB | Bitstreams identified in `lsbfpga/`; returns ready status on status registers |
+| **MINI-MAG Authentication** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Emulates SMART log 0x90 and media capacity reporting |

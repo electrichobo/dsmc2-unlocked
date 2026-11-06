@@ -35,6 +35,9 @@ logs/
 .system_generated/
 .idea/
 .vscode/
+persistent_store/
+snapshots/
+*.dsmc2
 
 # Research submodule / clone
 research/

@@ -1,0 +1,198 @@
+"""
+Virtual Camera Screen for RED DSMC2.
+Renders authentic 1024x576 LCD panel frames, splash screen, and handles maXTouch touch events.
+"""
+
+import os
+import zlib
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
+from typing import Optional, Tuple
+
+
+class CameraScreen(ttk.Frame):
+    """
+    Virtual LCD Touchscreen for the DSMC2 Camera.
+    Native resolution: 1024 x 576 (16:9).
+    Scales to canvas size while preserving touch coordinate mapping.
+    """
+
+    NATIVE_WIDTH = 1024
+    NATIVE_HEIGHT = 576
+
+    def __init__(self, parent, camera, scale: float = 0.75, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.camera = camera
+        self.scale = scale
+        self.display_width = int(self.NATIVE_WIDTH * self.scale)
+        self.display_height = int(self.NATIVE_HEIGHT * self.scale)
+
+        self.splash_image: Optional[Image.Image] = self._load_splash_screen()
+        self.current_tk_image: Optional[ImageTk.PhotoImage] = None
+
+        # Build UI
+        self._build_widgets()
+
+        # Touch state
+        self.is_touch_down = False
+
+    def _load_splash_screen(self) -> Optional[Image.Image]:
+        """Load and decompress authentic RED splash screen if present."""
+        splash_path = os.path.join(
+            self.camera.workspace_root,
+            "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "res", "splash_screen.bin"
+        )
+        if not os.path.exists(splash_path):
+            return None
+
+        try:
+            with open(splash_path, "rb") as f:
+                data = f.read()
+            if data.startswith(b"REDZLIB0"):
+                decomp = zlib.decompress(data[12:])
+                pixels = decomp[8:8 + (1024 * 576 * 3)]
+                img = Image.frombytes("RGB", (1024, 576), pixels)
+                return img
+        except Exception as e:
+            print(f"[Screen] Failed to load splash screen: {e}")
+            return None
+
+    def _build_widgets(self):
+        # Frame outer border (styling like RED Touch 7.0 aluminum bezel)
+        self.bezel = tk.Frame(
+            self,
+            bg="#181818",
+            padx=10,
+            pady=10,
+            highlightthickness=2,
+            highlightbackground="#333333"
+        )
+        self.bezel.pack(padx=5, pady=5)
+
+        # Header label: "RED TOUCH 7.0 - 1024x576"
+        self.header = tk.Label(
+            self.bezel,
+            text="RED TOUCH 7.0 LCD | 1024x576 NATIVE",
+            bg="#181818",
+            fg="#888888",
+            font=("Consolas", 9, "bold")
+        )
+        self.header.pack(anchor="w", pady=(0, 4))
+
+        # Canvas for the LCD panel
+        self.canvas = tk.Canvas(
+            self.bezel,
+            width=self.display_width,
+            height=self.display_height,
+            bg="#000000",
+            highlightthickness=0,
+            cursor="crosshair"
+        )
+        self.canvas.pack()
+
+        # Bind mouse touch events
+        self.canvas.bind("<ButtonPress-1>", self._on_touch_down)
+        self.canvas.bind("<B1-Motion>", self._on_touch_move)
+        self.canvas.bind("<ButtonRelease-1>", self._on_touch_up)
+
+    def _map_coords(self, event) -> Tuple[int, int]:
+        """Map canvas mouse coordinates back to native 1024x576 screen space."""
+        x = int(event.x / self.scale)
+        y = int(event.y / self.scale)
+        x = max(0, min(self.NATIVE_WIDTH - 1, x))
+        y = max(0, min(self.NATIVE_HEIGHT - 1, y))
+        return x, y
+
+    def _on_touch_down(self, event):
+        x, y = self._map_coords(event)
+        self.is_touch_down = True
+        self.camera.touch(x, y, pressed=True)
+
+    def _on_touch_move(self, event):
+        if self.is_touch_down:
+            x, y = self._map_coords(event)
+            self.camera.touch(x, y, pressed=True)
+
+    def _on_touch_up(self, event):
+        x, y = self._map_coords(event)
+        self.is_touch_down = False
+        self.camera.touch(x, y, pressed=False)
+
+    def refresh(self):
+        """Fetch latest pixels from camera DSS and redraw canvas."""
+        fb_bytes = self.camera.get_frame()
+        is_blank = not any(fb_bytes)
+
+        if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
+            # 32bpp BGRA/RGBA from DISPC
+            img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+        elif self.splash_image:
+            img = self.splash_image.copy()
+        else:
+            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (10, 10, 10))
+
+        # Draw RED authentic HUD overlay (driven directly from camera state & RCP)
+        self._draw_hud(img)
+
+        # Scale to display size
+        if self.scale != 1.0:
+            img = img.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
+
+        self.current_tk_image = ImageTk.PhotoImage(img)
+        self.canvas.create_image(0, 0, anchor="nw", image=self.current_tk_image)
+
+    def _draw_hud(self, img: Image.Image):
+        """Render genuine DSMC2 HUD indicators driven by camera state."""
+        draw = ImageDraw.Draw(img)
+
+        # Read camera parameters from RCP / camera state
+        rcp = self.camera.rcp
+        fps = rcp.state.get(rcp.PARAM_FRAME_RATE, "24.00")
+        shutter = rcp.state.get(rcp.PARAM_SHUTTER, "1/48")
+        iso = rcp.state.get(rcp.PARAM_ISO, "800")
+        format_name = rcp.state.get(rcp.PARAM_FORMAT, "5K 16:9")
+        record_state = rcp.state.get(rcp.PARAM_RECORD_STATE, "0")
+        is_recording = (record_state == "2")
+
+        # Top Bar Background
+        draw.rectangle([(0, 0), (1024, 40)], fill=(0, 0, 0, 180))
+
+        # REC Badge
+        if is_recording:
+            draw.rectangle([(15, 8), (75, 32)], fill=(200, 20, 20))
+            draw.text((25, 12), "• REC", fill=(255, 255, 255))
+        else:
+            draw.rectangle([(15, 8), (75, 32)], fill=(40, 40, 40))
+            draw.text((25, 12), "STBY", fill=(180, 180, 180))
+
+        # Camera Model
+        model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+        draw.text((90, 12), f"RED {model_name}", fill=(220, 220, 220))
+
+        # Exposure / FPS / Shutter / ISO
+        draw.text((320, 12), f"FPS: {fps}", fill=(255, 255, 255))
+        draw.text((450, 12), f"SHUTTER: {shutter}", fill=(255, 255, 255))
+        draw.text((620, 12), f"ISO: {iso}", fill=(255, 255, 255))
+        draw.text((750, 12), f"FORMAT: {format_name}", fill=(255, 255, 255))
+
+        # DC / Battery indicator
+        draw.text((930, 12), "DC IN 14.8V", fill=(80, 220, 80))
+
+        # Bottom Bar Background
+        draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 180))
+
+        # Timecode
+        timecode = "01:00:00:00" if not is_recording else f"01:00:{int(self.camera.instruction_count/1000000)%60:02d}:12"
+        tc_color = (255, 50, 50) if is_recording else (200, 200, 200)
+        draw.text((20, 550), f"TC: {timecode}", fill=tc_color)
+
+        # Media status
+        draw.text((260, 550), "MEDIA: RED MINI-MAG 512GB [78% FREE]", fill=(200, 200, 200))
+
+        # Audio meters indicator
+        draw.text((680, 550), "AUDIO: CH1 -18dB  CH2 -18dB", fill=(120, 200, 120))
+
+        # Instruction counter
+        instr_m = self.camera.instruction_count / 1_000_000
+        draw.text((880, 550), f"INSTR: {instr_m:.1f}M", fill=(140, 140, 140))

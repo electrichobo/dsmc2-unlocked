@@ -1,0 +1,131 @@
+# RED DSMC2 Full-System Emulator Architecture
+
+This document describes the system architecture, memory map, peripheral models, execution loop, and integration model for the virtual RED DSMC2 camera emulator.
+
+---
+
+## 1. High-Level System Architecture
+
+```
++-----------------------------------------------------------------------------------+
+|                           DSMC2 Desktop Application                               |
+|  +---------------------------------------------+  +----------------------------+  |
+|  |           Virtual RED Camera                |  |  Emulator Developer Tools  |  |
+|  |  - 1024x576 Virtual LCD Screen (RedUi)      |  |  - UART Console Stream     |  |
+|  |  - Atmel maXTouch Touchscreen (I2C3 0x4B)   |  |  - RCP Parameter Control   |  |
+|  |  - Tactile Controls (REC, POWER, NAV, GPIO) |  |  - ThreadX RTOS Inspector  |  |
+|  +---------------------------------------------+  |  - MMIO Diagnostic Browser |  |
+|                                                   |  - Fault Injection Engine  |  |
+|                                                   |  - Snapshot Save / Restore |  |
+|                                                   +----------------------------+  |
++-----------------------------------------------------------------------------------+
+                                         |
+                                         v
++-----------------------------------------------------------------------------------+
+|                             Dsmc2Camera Orchestrator                              |
++-----------------------------------------------------------------------------------+
+        |                       |                         |                 |
+        v                       v                         v                 v
++---------------+     +--------------------+     +----------------+  +--------------+
+|    ArmCpu     |     |     SystemBus      |     |  RCP Protocol  |  | Virtual File |
+| (Cortex-A8 /  |<--->| - 512MB RAM        |<--->|  & TCP Server  |  |    System    |
+|  Unicorn JIT) |     | - SRAM (0x40000000)|     |  (Port 1111)   |  | (/env, /img) |
++---------------+     | - MMIO Router      |     +----------------+  +--------------+
+                      +--------------------+
+                                |
+        +-----------------------+-----------------------+--------------------+
+        |                       |                       |                    |
+        v                       v                       v                    v
++---------------+       +---------------+       +---------------+    +---------------+
+|   OmapIntc    |       |   OmapPrcm    |       |  OmapGPTimer  |    |   OmapUart    |
+|  96-ch INTC   |       | Clock / Reset |       |  Timers 1..11 |    |  UART1..UART4 |
+| (0x48200000)  |       | (0x48004000)  |       | (0x48088000)  |    | (0x49042000)  |
++---------------+       +---------------+       +---------------+    +---------------+
+        |                       |                       |                    |
+        v                       v                       v                    v
++---------------+       +---------------+       +---------------+    +---------------+
+|    OmapI2c    |       |   MaXTouch    |       |   EdidEeprom  |    |    OmapDss    |
+|  I2C1..I2C3   |------>|  Multi-Touch  |------>| RED Touch 7.0 |    |  DISPC / DSS  |
+| (0x48060000)  |       |  (I2C 0x4B)   |       |  (I2C 0x50)   |    | (0x48050000)  |
++---------------+       +---------------+       +---------------+    +---------------+
+```
+
+---
+
+## 2. Memory Map
+
+The emulator models the physical address space of the Texas Instruments DM3725 / OMAP3630 SoC:
+
+| Physical Address Range | Size | Allocation / Description | Backing Mechanism |
+|---|---|---|---|
+| `0x00000000 - 0x3FFFFFFF` | 1 GB | OMAP Reserved / GPMC CS0 | Unmapped / Trapped |
+| `0x40000000 - 0x4000FFFF` | 64 KB | OMAP Internal SRAM (L3) | Physical mapped memory |
+| `0x40010000 - 0x4001BFFF` | 48 KB | OMAP Internal Boot ROM | Read-only memory |
+| `0x48002000 - 0x48002FFF` | 4 KB | OMAP System Control Module (PADCONF) | MMIO Trap / Register Store |
+| `0x48004000 - 0x48005FFF` | 8 KB | OMAP PRCM (Power, Reset, Clock) | `OmapPrcm` Model |
+| `0x48050000 - 0x4805FFFF` | 64 KB | OMAP Display Subsystem (DSS / DISPC) | `OmapDss` Model |
+| `0x48060000 - 0x48061FFF` | 8 KB | OMAP I2C3 Controller | `OmapI2c` Model |
+| `0x4806A000 - 0x4806AFFF` | 4 KB | OMAP UART1 | `OmapUart` Model |
+| `0x4806C000 - 0x4806CFFF` | 4 KB | OMAP UART2 | `OmapUart` Model |
+| `0x48070000 - 0x48071FFF` | 8 KB | OMAP I2C1 Controller | `OmapI2c` Model |
+| `0x48072000 - 0x48073FFF` | 8 KB | OMAP I2C2 Controller | `OmapI2c` Model |
+| `0x48088000 - 0x48088FFF` | 4 KB | OMAP GPTimer11 (System Tick) | `OmapGPTimer` Model |
+| `0x48200000 - 0x48200FFF` | 4 KB | OMAP MPU Interrupt Controller (INTC) | `OmapIntc` Model |
+| `0x48310000 - 0x48310FFF` | 4 KB | OMAP GPIO1 Module | `OmapGpio` Model |
+| `0x49020000 - 0x49020FFF` | 4 KB | OMAP UART3 (CTRL / RCP port) | `OmapUart` Model |
+| `0x49042000 - 0x49042FFF` | 4 KB | OMAP UART4 (Debug System Log) | `OmapUart` Model |
+| `0x49050000 - 0x49059FFF` | 40 KB | OMAP GPIO2..GPIO6 Modules | `OmapGpio` Model |
+| `0x68000000 - 0x6FFFFFFF` | 128 MB | OMAP GPMC (NAND Flash / YAFFS2) | Flash Partition Window |
+| `0x80000000 - 0x9FFFFFFF` | 512 MB | System DDR SDRAM | Physical mapped memory |
+
+---
+
+## 3. Core Subsystem Implementations
+
+### 3.1 ArmCpu (`emulator/core/cpu.py`)
+- **Engine**: Unicorn Engine (libunicorn) JIT emulator configured for `UC_ARCH_ARM`, `UC_MODE_ARM` (Cortex-A8 / ARMv7-A).
+- **Reset Vector**: PC initialized to `0x80829F2C`, SP initialized to `0x881D2690`, CPSR in Supervisor Mode (`0x13 | 0xC0`) with IRQ/FIQ masked.
+- **TrustZone Monitor**: Intercepts OMAP PPA Secure Monitor Calls (`smc #0` at `0x80a294b0` and `0x80a294ac`), returning R0=0 and advancing PC by 4.
+- **Hardware IRQ Injection**: When interrupts are unmasked (`CPSR bit 7 == 0`), the CPU switches CPSR mode to IRQ mode (`0x12`), saves the return address to SPSR/LR_irq, and branches to `0x80829F00` (ARM IRQ vector).
+
+### 3.2 SystemBus (`emulator/core/bus.py`)
+- Interconnect routing physical DDR memory, SRAM, and MMIO peripheral address windows.
+- Installs low-overhead memory hooks across the `0x40000000 - 0x7FFFFFFF` window.
+- Unknown-MMIO tracker: records all accesses to unregistered registers with caller PC, hit count, last value read/written, and access direction.
+
+### 3.3 OmapIntc (`emulator/devices/intc.py`)
+- Models the 96-channel Level-2 MPU Interrupt Controller at `0x48200000`.
+- Manages raw interrupt lines (`ITR0..2`), mask registers (`MIR0..2`, `MIR_CLEAR0..2`, `MIR_SET0..2`), and priority steering (`ILR0..95`).
+- Dispatches active interrupt number via `INTC_SIR_IRQ` (`0x48200040`) and clears/acknowledges via `INTC_CONTROL` (`0x48200048`).
+
+### 3.4 OmapPrcm (`emulator/devices/prcm.py`)
+- Models OMAP3630 Power, Reset, and Clock Management (`0x48004000`).
+- Implements CM_FCLKEN, CM_ICLKEN, and PRM_RSTST (`0x48005010`).
+- Models dynamic DPLL lock/unlock sequencing: returns 0x00 when firmware polls for unlock at `0x80674A00`, and returns 0x01 when polling for lock at `0x80674A64`.
+
+### 3.5 OmapI2c (`emulator/devices/i2c.py`)
+- Models OMAP I2C controllers 1, 2, and 3.
+- Register map: `REV`, `IE`, `STAT`, `SYSS`, `BUF`, `CNT`, `DATA`, `CON`, `SA`.
+- Implements stateful master-transmit and master-receive state machine.
+- Raises ARDY (`0x04`) and triggers IRQ 61, resuming ThreadX semaphore waiters in firmware.
+
+### 3.6 MaXTouchDevice & EdidEeprom (`emulator/devices/i2c_maxtouch.py`, `i2c_eeprom.py`)
+- Attached as virtual slaves on I2C3:
+  - Address `0x4B`: Atmel maXTouch multi-touch controller with 7-object table (T5, T6, T7, T8, T9, T15, T40), providing 1024x576 touch reporting.
+  - Address `0x50`: 24C02 EDID EEPROM with authentic 128-byte VESA EDID 1.3 block identifying "RED TOUCH 7.0".
+  - Satisfies `isMonitorAttached(port)` check at `0x80754dc0`.
+
+### 3.7 OmapDss (`emulator/devices/dss.py`)
+- Models the OMAP Display Subsystem (DSS) and Display Controller (DISPC) at `0x48050000`.
+- Monitors `DISPC_SIZE_LCD` (`0x47C`), `DISPC_GFX_BA0` (`0x480`), and `DISPC_GFX_ATTRIBUTES` (`0x4A0`).
+- Directly extracts live pixel framebuffers from DDR RAM for display by the virtual camera screen.
+
+### 3.8 VirtualFileSystem (`emulator/storage/vfs.py`, `env.py`)
+- Maps virtual camera partitions to host storage:
+  - `/env`: Hardware configuration and calibration properties (Camera Model `0x16`, Sensor DRAGON 5K, Serial Number).
+  - `/image1` and `/image2`: Slot binaries (`dsmc_program.mem`, `cfg`, `res/`, `overlays/`).
+  - `/data`, `/log`, `/pdata`: Persistent host storage trees.
+
+### 3.9 RCP Server (`emulator/rcp/protocol.py`, `server.py`)
+- Implements the RED Command Protocol over TCP port 1111 and UART3.
+- Handles GET, SET, RECORD START/STOP, and STATUS commands for camera control.
