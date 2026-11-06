@@ -5,6 +5,7 @@ Includes Record, Power, Menu, 1:1 Magnify, Nav D-Pad, and User Keys.
 
 import tkinter as tk
 from tkinter import ttk
+from emulator.rcp.protocol import RcpProtocol
 
 
 class PhysicalButtons(ttk.Frame):
@@ -16,6 +17,9 @@ class PhysicalButtons(ttk.Frame):
         super().__init__(parent, **kwargs)
         self.camera = camera
         self.on_action = on_action_callback
+        self._last_state = None
+        self._last_pct = None
+        self._last_rec = None
 
         self._build_widgets()
 
@@ -155,15 +159,7 @@ class PhysicalButtons(ttk.Frame):
 
     def _on_rec_click(self):
         self.camera.press_record()
-        # Update button visual state
-        is_rec = (self.camera.rcp.state.get("RECORD_STATE") == "2")
-        if is_rec:
-            self.rec_btn.config(bg="#FF0000", text="■ STOP")
-            self.camera.log_system("[REC] Recording STARTED -> RED MINI-MAG (R3D 5K 24fps)")
-        else:
-            self.rec_btn.config(bg="#990000", text="● REC")
-            self.camera.log_system("[REC] Recording STOPPED -> File saved safely")
-
+        self.refresh_state()
         if self.on_action:
             self.on_action("record_toggled")
 
@@ -175,33 +171,49 @@ class PhysicalButtons(ttk.Frame):
             self.on_action("power_toggled")
 
     def refresh_state(self):
-        """Synchronize power button and LED with camera power state."""
+        """Synchronize power button, REC button, and LED with camera state."""
         state = self.camera.power_state
-        if state == self.camera.POWER_STANDBY:
-            self.power_led.config(text="[●] STANDBY", fg="#FFAA00")
-            self.power_btn.config(
-                text="POWER ON",
-                bg="#1A401A",
-                fg="#44FF66",
-                state=tk.NORMAL
-            )
-        elif state == self.camera.POWER_BOOTING:
-            pct = int(self.camera.boot_progress * 100)
-            self.power_led.config(text=f"[●] BOOTING {pct}%", fg="#00E5FF")
-            self.power_btn.config(
-                text="BOOTING...",
-                bg="#2B2B2B",
-                fg="#888888",
-                state=tk.DISABLED
-            )
-        else: # POWER_ON
-            self.power_led.config(text="[●] ONLINE", fg="#00FF44")
-            self.power_btn.config(
-                text="POWER OFF\n(STANDBY)",
-                bg="#333333",
-                fg="#CCCCCC",
-                state=tk.NORMAL
-            )
+        pct = int(self.camera.boot_progress * 100) if state == self.camera.POWER_BOOTING else None
+
+        if state != self._last_state or pct != self._last_pct:
+            self._last_state = state
+            self._last_pct = pct
+
+            if state == self.camera.POWER_STANDBY:
+                self.power_led.config(text="[●] STANDBY", fg="#FFAA00")
+                self.power_btn.config(
+                    text="POWER ON",
+                    bg="#1A401A",
+                    fg="#44FF66",
+                    state=tk.NORMAL
+                )
+            elif state == self.camera.POWER_BOOTING:
+                self.power_led.config(text=f"[●] BOOTING {pct}%", fg="#00E5FF")
+                self.power_btn.config(
+                    text="BOOTING...",
+                    bg="#2B2B2B",
+                    fg="#888888",
+                    state=tk.DISABLED
+                )
+            else: # POWER_ON
+                self.power_led.config(text="[●] ONLINE", fg="#00FF44")
+                self.power_btn.config(
+                    text="POWER OFF\n(STANDBY)",
+                    bg="#333333",
+                    fg="#CCCCCC",
+                    state=tk.NORMAL
+                )
+
+        # Synchronize REC button
+        is_rec = (self.camera.rcp.state.get(RcpProtocol.PARAM_RECORD_STATE) == "2")
+        if is_rec != self._last_rec:
+            self._last_rec = is_rec
+            if is_rec:
+                self.rec_btn.config(bg="#FF0000", text="■ STOP")
+                self.camera.log_system("[REC] Recording STARTED -> RED MINI-MAG (R3D 5K 24fps)")
+            else:
+                self.rec_btn.config(bg="#990000", text="● REC")
+                self.camera.log_system("[REC] Recording STOPPED -> File saved safely")
 
     def _press_gpio(self, pin: int):
         pin_names = {

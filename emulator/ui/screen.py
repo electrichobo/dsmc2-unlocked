@@ -35,10 +35,10 @@ class CameraScreen(ttk.Frame):
         # Build UI
         self._build_widgets()
 
-        # Touch state
+        # Touch and frame state
         self.is_touch_down = False
         self.canvas_image_id: Optional[int] = None
-        self.runtime = None
+        self._zero_fb_buf = b"\x00" * (self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4)
 
         # Interactive RedUi Engine
         self.redui = RedUiEngine(self.camera)
@@ -117,36 +117,26 @@ class CameraScreen(ttk.Frame):
             self.is_touch_down = False
             if self.redui.last_touch_pos:
                 x, y = self.redui.last_touch_pos
-                if self.runtime:
-                    self.runtime.submit(self._dispatch_touch, x, y, False, False)
-                else:
-                    self._dispatch_touch(x, y, False, False)
+                self._dispatch_touch(x, y, pressed=False, is_release=True)
+                self.refresh()
 
     def _on_touch_down(self, event):
         x, y = self._map_coords(event)
         self.is_touch_down = True
-        if self.runtime:
-            self.runtime.submit(self._dispatch_touch, x, y, True, False)
-        else:
-            self._dispatch_touch(x, y, True, False)
-            self.refresh()
+        self._dispatch_touch(x, y, pressed=True, is_release=False)
+        self.refresh()
 
     def _on_touch_move(self, event):
         if self.is_touch_down:
             x, y = self._map_coords(event)
-            if self.runtime:
-                self.runtime.submit(self._dispatch_touch, x, y, False, False)
-            else:
-                self._dispatch_touch(x, y, False, False)
+            # Update position for reticle overlay without flooding redraws
+            self.redui.last_touch_pos = (x, y)
 
     def _on_touch_up(self, event):
         x, y = self._map_coords(event)
         self.is_touch_down = False
-        if self.runtime:
-            self.runtime.submit(self._dispatch_touch, x, y, False, True)
-        else:
-            self._dispatch_touch(x, y, False, True)
-            self.refresh()
+        self._dispatch_touch(x, y, pressed=False, is_release=True)
+        self.refresh()
 
     def _dispatch_touch(self, x: int, y: int, pressed: bool, is_release: bool = False):
         self.camera.touch(x, y, pressed=pressed)
@@ -157,39 +147,24 @@ class CameraScreen(ttk.Frame):
             self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
 
     def toggle_menu(self):
-        if self.runtime:
-            self.runtime.submit(self.redui.toggle_menu)
-        else:
-            self.redui.toggle_menu()
-            self.refresh()
+        self.redui.toggle_menu()
+        self.refresh()
 
     def toggle_magnify(self):
-        if self.runtime:
-            self.runtime.submit(self.redui.toggle_magnify)
-        else:
-            self.redui.toggle_magnify()
-            self.refresh()
+        self.redui.toggle_magnify()
+        self.refresh()
 
     def toggle_false_color(self):
-        if self.runtime:
-            self.runtime.submit(self.redui.toggle_false_color)
-        else:
-            self.redui.toggle_false_color()
-            self.refresh()
+        self.redui.toggle_false_color()
+        self.refresh()
 
     def toggle_zebras(self):
-        if self.runtime:
-            self.runtime.submit(self.redui.toggle_zebras)
-        else:
-            self.redui.toggle_zebras()
-            self.refresh()
+        self.redui.toggle_zebras()
+        self.refresh()
 
     def handle_button(self, button_name: str):
-        if self.runtime:
-            self.runtime.submit(self.redui.handle_button_press, button_name)
-        else:
-            self.redui.handle_button_press(button_name)
-            self.refresh()
+        self.redui.handle_button_press(button_name)
+        self.refresh()
 
     def compose_frame(self) -> Image.Image:
         """Compose raw LCD frame with overlays and scale to display size."""
@@ -201,7 +176,7 @@ class CameraScreen(ttk.Frame):
             img = self._render_booting_screen()
         else: # POWER_ON
             fb_bytes = self.camera.get_frame()
-            is_blank = not any(fb_bytes)
+            is_blank = (fb_bytes == self._zero_fb_buf)
 
             if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
                 # 32bpp BGRA/RGBA from DISPC

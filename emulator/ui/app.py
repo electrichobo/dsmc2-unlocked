@@ -13,7 +13,6 @@ from emulator.camera import Dsmc2Camera
 from emulator.ui.screen import CameraScreen
 from emulator.ui.buttons import PhysicalButtons
 from emulator.ui.dashboard import DeveloperDashboard
-from emulator.ui.runtime import EmulatorRuntime
 
 
 class Dsmc2DesktopApp:
@@ -45,22 +44,16 @@ class Dsmc2DesktopApp:
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Background emulator runtime (moves CPU stepping and frame composition off the UI thread)
-        self.runtime = EmulatorRuntime(self.camera, compositor=self.screen.compose_frame)
-        self.screen.runtime = self.runtime
-        self._last_frame_seq = 0
-
-        # Initial power on and start runtime worker
+        # Initial power on and display update
         self.camera.power_on()
-        self.runtime.start()
         self.dashboard.refresh_threads()
         self.dashboard.refresh_rcp()
         self.dashboard.update_logs()
         self.buttons.refresh_state()
         self.screen.refresh()
 
-        # Start UI periodic update loop (~30 FPS)
-        self.root.after(30, self._ui_loop)
+        # Start single-threaded UI update loop (~25 FPS = 40ms interval)
+        self.root.after(40, self._ui_loop)
 
     def _setup_style(self):
         style = ttk.Style(self.root)
@@ -91,7 +84,7 @@ class Dsmc2DesktopApp:
         cam_menu.add_command(label="Power On / Boot", command=self._power_on)
         cam_menu.add_command(label="Power Off / Standby", command=self._power_off)
         cam_menu.add_separator()
-        cam_menu.add_command(label="Toggle Record (REC)", command=self.camera.press_record)
+        cam_menu.add_command(label="Toggle Record (REC)", command=self._toggle_record)
         cam_menu.add_separator()
         cam_menu.add_command(label="Format SSD / Media", command=lambda: self._set_param("MEDIA_FORMAT", "OK"))
         menubar.add_cascade(label="Camera", menu=cam_menu)
@@ -144,29 +137,33 @@ class Dsmc2DesktopApp:
                     self.screen.handle_button(btn_name)
             except Exception:
                 pass
-        elif action == "record_toggled":
-            self.runtime.submit(self.camera.press_record)
-        elif action == "power_toggled":
-            self.runtime.submit(self.camera.toggle_power)
+        elif action in ("record_toggled", "power_toggled"):
+            self.screen.refresh()
 
         self.buttons.refresh_state()
         self.dashboard.update_logs()
 
     def _power_on(self):
-        self.runtime.submit(self.camera.power_on)
-        self.runtime.invalidate()
+        self.camera.power_on()
         self.buttons.refresh_state()
+        self.screen.refresh()
         self.dashboard.update_logs()
 
     def _power_off(self):
-        self.runtime.submit(self.camera.power_off)
-        self.runtime.invalidate()
+        self.camera.power_off()
         self.buttons.refresh_state()
+        self.screen.refresh()
+        self.dashboard.update_logs()
+
+    def _toggle_record(self):
+        self.camera.press_record()
+        self.buttons.refresh_state()
+        self.screen.refresh()
         self.dashboard.update_logs()
 
     def _set_param(self, param: str, val: str):
-        self.runtime.submit(self.camera.rcp.process_command, f"SET / PARAM {param} {val}")
-        self.runtime.invalidate()
+        self.camera.rcp.process_command(f"SET / PARAM {param} {val}")
+        self.screen.refresh()
         self.dashboard.refresh_rcp()
 
     def _open_firmware(self):
@@ -179,7 +176,10 @@ class Dsmc2DesktopApp:
             if os.path.exists(mem_path):
                 self.camera.stop()
                 self.camera.load_firmware(mem_path)
-                self.camera.start()
+                self.camera.power_on()
+                self.buttons.refresh_state()
+                self.screen.refresh()
+                self.dashboard.update_logs()
                 messagebox.showinfo("Firmware Loaded", f"Loaded firmware from:\n{folder}")
             else:
                 messagebox.showerror("Error", "Selected directory does not contain dsmc_program.mem")
@@ -203,22 +203,22 @@ class Dsmc2DesktopApp:
             messagebox.showinfo("Export Complete", f"Boot trace exported to:\n{path}")
 
     def _ui_loop(self):
-        """Periodic UI update loop on main thread (renders blits only)."""
+        """Periodic UI update loop on main thread (~25 FPS)."""
         try:
-            self.runtime.poll_results()
-            seq, img = self.runtime.latest_frame()
-            if seq != self._last_frame_seq and img is not None:
-                self.screen.blit_image(img)
-                self._last_frame_seq = seq
+            # Advance CPU instruction slice when camera is running
+            if self.camera.power_state == self.camera.POWER_ON and self.camera.is_booted:
+                self.camera.step_slice(20_000)
+
+            # Refresh display, buttons, and console logs
+            self.screen.refresh()
             self.buttons.refresh_state()
             self.dashboard.update_logs()
         except Exception:
             pass
         finally:
-            self.root.after(30, self._ui_loop)
+            self.root.after(40, self._ui_loop)
 
     def _on_close(self):
-        self.runtime.stop()
         self.camera.stop()
         try:
             self.root.destroy()

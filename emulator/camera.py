@@ -103,7 +103,6 @@ class Dsmc2Camera:
 
         # Execution & Power Control
         self.is_running = False
-        self.worker_thread: Optional[threading.Thread] = None
         self.instruction_count = 0
         self.is_booted = False
 
@@ -155,8 +154,8 @@ class Dsmc2Camera:
         # Tick hardware timer (GPTimer11 is 100Hz / 1000Hz system tick)
         self.timers[11].tick(steps=100)
 
-    # Upper bound on wall-clock time for one interactive CPU slice.
-    SLICE_TIMEOUT_US = 250_000
+    # Upper bound on wall-clock time for one interactive CPU slice (50ms max).
+    SLICE_TIMEOUT_US = 50_000
 
     def boot(self, initial_instructions: int = 45_000_000, chunk: Optional[int] = None,
              progress_cb: Optional[Callable[[float], None]] = None):
