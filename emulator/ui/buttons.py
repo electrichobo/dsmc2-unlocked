@@ -44,6 +44,7 @@ class PhysicalButtons(ttk.Frame):
             bd=3,
             width=8,
             height=2,
+            cursor="hand2",
             command=self._on_rec_click
         )
         self.rec_btn.pack(side=tk.LEFT, padx=5)
@@ -74,6 +75,7 @@ class PhysicalButtons(ttk.Frame):
             bd=2,
             width=10,
             height=1,
+            cursor="hand2",
             command=self._on_power_click
         )
         self.power_btn.pack(anchor="center")
@@ -87,8 +89,11 @@ class PhysicalButtons(ttk.Frame):
             text="MENU",
             bg="#2B2B2B",
             fg="#CCCCCC",
+            activebackground="#555555",
+            activeforeground="#FFFFFF",
             font=("Helvetica", 9, "bold"),
             width=7,
+            cursor="hand2",
             command=lambda: self._press_gpio(pin=10)
         )
         self.menu_btn.pack(side=tk.LEFT, padx=3)
@@ -98,8 +103,11 @@ class PhysicalButtons(ttk.Frame):
             text="1:1 MAG",
             bg="#2B2B2B",
             fg="#CCCCCC",
+            activebackground="#555555",
+            activeforeground="#FFFFFF",
             font=("Helvetica", 9, "bold"),
             width=7,
+            cursor="hand2",
             command=lambda: self._press_gpio(pin=11)
         )
         self.mag_btn.pack(side=tk.LEFT, padx=3)
@@ -109,8 +117,11 @@ class PhysicalButtons(ttk.Frame):
             text="USER 1",
             bg="#2B2B2B",
             fg="#CCCCCC",
+            activebackground="#555555",
+            activeforeground="#FFFFFF",
             font=("Helvetica", 9, "bold"),
             width=7,
+            cursor="hand2",
             command=lambda: self._press_gpio(pin=14)
         )
         self.u1_btn.pack(side=tk.LEFT, padx=3)
@@ -120,8 +131,11 @@ class PhysicalButtons(ttk.Frame):
             text="USER 2",
             bg="#2B2B2B",
             fg="#CCCCCC",
+            activebackground="#555555",
+            activeforeground="#FFFFFF",
             font=("Helvetica", 9, "bold"),
             width=7,
+            cursor="hand2",
             command=lambda: self._press_gpio(pin=15)
         )
         self.u2_btn.pack(side=tk.LEFT, padx=3)
@@ -132,28 +146,38 @@ class PhysicalButtons(ttk.Frame):
 
         # D-pad grid layout
         tk.Button(
-            nav_box, text="▲", bg="#333333", fg="#FFFFFF", width=3,
+            nav_box, text="▲", bg="#333333", fg="#FFFFFF",
+            activebackground="#555555", activeforeground="#FFFFFF",
+            width=3, cursor="hand2",
             command=lambda: self._press_gpio(pin=20)
         ).grid(row=0, column=1)
 
         tk.Button(
-            nav_box, text="◀", bg="#333333", fg="#FFFFFF", width=3,
+            nav_box, text="◀", bg="#333333", fg="#FFFFFF",
+            activebackground="#555555", activeforeground="#FFFFFF",
+            width=3, cursor="hand2",
             command=lambda: self._press_gpio(pin=21)
         ).grid(row=1, column=0)
 
         tk.Button(
-            nav_box, text="●", bg="#444444", fg="#FFFFFF", width=3,
+            nav_box, text="●", bg="#444444", fg="#FFFFFF",
+            activebackground="#666666", activeforeground="#FFFFFF",
+            width=3, cursor="hand2",
             font=("Helvetica", 8, "bold"),
             command=lambda: self._press_gpio(pin=22)
         ).grid(row=1, column=1)
 
         tk.Button(
-            nav_box, text="▶", bg="#333333", fg="#FFFFFF", width=3,
+            nav_box, text="▶", bg="#333333", fg="#FFFFFF",
+            activebackground="#555555", activeforeground="#FFFFFF",
+            width=3, cursor="hand2",
             command=lambda: self._press_gpio(pin=23)
         ).grid(row=1, column=2)
 
         tk.Button(
-            nav_box, text="▼", bg="#333333", fg="#FFFFFF", width=3,
+            nav_box, text="▼", bg="#333333", fg="#FFFFFF",
+            activebackground="#555555", activeforeground="#FFFFFF",
+            width=3, cursor="hand2",
             command=lambda: self._press_gpio(pin=24)
         ).grid(row=2, column=1)
 

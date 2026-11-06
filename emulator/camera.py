@@ -115,8 +115,9 @@ class Dsmc2Camera:
         self.on_state_change: Optional[Callable[[str], None]] = None
 
     def log_system(self, message: str):
-        """Append an entry to system logs (UART4)."""
+        """Append an entry to system logs (UART4) and terminal stdout."""
         self.uarts[4].completed_lines.append(message)
+        print(message, flush=True)
 
     def load_firmware(self, firmware_path: Optional[str] = None):
         """Load genuine RED DSMC2 program into DDR RAM at 0x80000000."""

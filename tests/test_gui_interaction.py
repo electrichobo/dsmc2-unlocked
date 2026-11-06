@@ -27,6 +27,10 @@ class MockEvent:
 def test_desktop_app_full_interaction():
     """Test full interactive GUI flow programmatically within Tk mainloop."""
     app = Dsmc2DesktopApp(workspace_root=REPO_ROOT)
+    if not app.camera.is_booted:
+        app.camera.power_on()
+        app.buttons.refresh_state()
+        app.screen.refresh()
 
     # 1. Verify initial booted state
     assert app.camera.power_state == app.camera.POWER_ON

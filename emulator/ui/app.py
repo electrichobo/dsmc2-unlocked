@@ -40,20 +40,77 @@ class Dsmc2DesktopApp:
 
         # Track initialization of dashboard tabs
         self._dashboard_initialized = False
+        self._frame_tick = 0
 
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Initial power on and display update
-        self.camera.power_on()
-        self.dashboard.refresh_threads()
-        self.dashboard.refresh_rcp()
-        self.dashboard.update_logs()
+        # Initial display setup
         self.buttons.refresh_state()
         self.screen.refresh()
 
+        # Start non-blocking chunked boot sequence once window is mapped
+        self.root.after(50, self._start_boot_sequence)
+
         # Start single-threaded UI update loop (~25 FPS = 40ms interval)
-        self.root.after(40, self._ui_loop)
+        self.root.after(100, self._ui_loop)
+
+    def _start_boot_sequence(self):
+        """Perform responsive, non-blocking chunked firmware boot with live progress bar."""
+        if self.camera.is_booted:
+            self.dashboard.refresh_threads()
+            self.dashboard.refresh_rcp()
+            self.dashboard.update_logs()
+            self.buttons.refresh_state()
+            self.screen.refresh()
+            return
+
+        self.camera.power_state = self.camera.POWER_BOOTING
+        self.camera.boot_progress = 0.0
+        self.camera.log_system("[PWR] Powering on RED DSMC2 (Cortex-A8 @ 1GHz)...")
+        self.camera.log_system(f"[PWR] Loading firmware from {os.path.basename(self.camera.firmware_slot_dir)} into DDR (0x80000000)...")
+        self.camera.load_firmware()
+        self.camera.log_system("[CRT] Reset vector 0x80829F2C -> Initializing C runtime and clearing BSS...")
+        self.screen.refresh()
+        self.buttons.refresh_state()
+        self.dashboard.update_logs()
+
+        self._boot_total = 45_000_000
+        self._boot_chunk = 5_000_000
+        self._boot_done = 0
+        self.root.after(20, self._boot_step)
+
+    def _boot_step(self):
+        """Execute one chunk of boot instructions and yield to Windows event loop."""
+        if self._boot_done < self._boot_total:
+            n = min(self._boot_chunk, self._boot_total - self._boot_done)
+            self.camera.cpu.run(self.camera.cpu.pc, 0, count=n)
+            self._boot_done += n
+            self.camera.boot_progress = self._boot_done / self._boot_total
+            self.screen.refresh()
+            self.buttons.refresh_state()
+            self.dashboard.update_logs()
+            self.root.after(20, self._boot_step)
+        else:
+            self.camera.instruction_count += self._boot_total
+            self.camera.is_booted = True
+            self.camera.power_state = self.camera.POWER_ON
+            self.camera.boot_progress = 1.0
+            self.camera.rcp_server.start()
+
+            self.camera.log_system("[RTOS] ThreadX RTOS kernel initialized.")
+            for t in self.camera.get_threads():
+                self.camera.log_system(f"[RTOS] Thread [{t['name']}] state={t['state']} prio={t['priority']}")
+            self.camera.log_system("[DSS] OMAP3630 DISPC online: 1024x576 32bpp frame stream ready.")
+            self.camera.log_system("[UI] RED Touch 7.0 online (maXTouch @ 0x4B, EDID @ 0x50).")
+            model = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+            self.camera.log_system(f"[SYS] RED {model} is ONLINE and READY.")
+
+            self.dashboard.refresh_threads()
+            self.dashboard.refresh_rcp()
+            self.dashboard.update_logs()
+            self.buttons.refresh_state()
+            self.screen.refresh()
 
     def _setup_style(self):
         style = ttk.Style(self.root)
@@ -144,10 +201,13 @@ class Dsmc2DesktopApp:
         self.dashboard.update_logs()
 
     def _power_on(self):
-        self.camera.power_on()
-        self.buttons.refresh_state()
-        self.screen.refresh()
-        self.dashboard.update_logs()
+        if not self.camera.is_booted:
+            self._start_boot_sequence()
+        else:
+            self.camera.power_on()
+            self.buttons.refresh_state()
+            self.screen.refresh()
+            self.dashboard.update_logs()
 
     def _power_off(self):
         self.camera.power_off()
@@ -176,10 +236,7 @@ class Dsmc2DesktopApp:
             if os.path.exists(mem_path):
                 self.camera.stop()
                 self.camera.load_firmware(mem_path)
-                self.camera.power_on()
-                self.buttons.refresh_state()
-                self.screen.refresh()
-                self.dashboard.update_logs()
+                self._start_boot_sequence()
                 messagebox.showinfo("Firmware Loaded", f"Loaded firmware from:\n{folder}")
             else:
                 messagebox.showerror("Error", "Selected directory does not contain dsmc_program.mem")
@@ -209,8 +266,13 @@ class Dsmc2DesktopApp:
             if self.camera.power_state == self.camera.POWER_ON and self.camera.is_booted:
                 self.camera.step_slice(20_000)
 
-            # Refresh display, buttons, and console logs
-            self.screen.refresh()
+            # Smart refresh: refresh every frame when recording or interacting;
+            # otherwise refresh at ~5 FPS (every 200ms) to update instruction counter
+            self._frame_tick += 1
+            is_rec = (self.camera.rcp.state.get("record_state") == "2")
+            if is_rec or (self._frame_tick % 5 == 0):
+                self.screen.refresh()
+
             self.buttons.refresh_state()
             self.dashboard.update_logs()
         except Exception:
@@ -230,6 +292,7 @@ class Dsmc2DesktopApp:
 
 
 def launch_gui(workspace_root: str):
+    print("[SYS] Launching RED DSMC2 Virtual Camera GUI...", flush=True)
     app = Dsmc2DesktopApp(workspace_root)
     app.run()
 
