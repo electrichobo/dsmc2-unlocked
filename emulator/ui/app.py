@@ -124,6 +124,20 @@ class Dsmc2DesktopApp:
         self.dashboard.pack(fill=tk.BOTH, expand=True)
 
     def _on_button_action(self, action: str):
+        # Route physical button or GPIO pin to RedUi
+        pin_names = {
+            10: "MENU", 11: "1:1 MAG", 14: "USER 1", 15: "USER 2",
+            20: "NAV UP", 21: "NAV LEFT", 22: "NAV ENTER", 23: "NAV RIGHT", 24: "NAV DOWN"
+        }
+        if action.startswith("gpio_pin_"):
+            try:
+                pin = int(action.split("_")[-1])
+                btn_name = pin_names.get(pin)
+                if btn_name:
+                    self.screen.handle_button(btn_name)
+            except Exception:
+                pass
+
         # Refresh all views immediately on button press
         self.buttons.refresh_state()
         self.screen.refresh()

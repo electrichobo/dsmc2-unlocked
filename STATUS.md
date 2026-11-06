@@ -12,7 +12,7 @@
 
 A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~2.0 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful I2C communication and ARDY interrupt semaphore wake-ups, satisfies monitor presence detection via Atmel maXTouch (`0x4B`) and EDID EEPROM (`0x50`), renders authentic 1024x576 display imagery and overlays, and provides synchronized Desktop GUI and CLI applications sharing the exact same emulator backend state.
 
-All 12 automated unit and regression tests pass cleanly in under 4 seconds.
+All 17 automated unit and regression tests pass cleanly.
 
 ---
 
@@ -26,9 +26,9 @@ All 12 automated unit and regression tests pass cleanly in under 4 seconds.
 | **M3** | ThreadX startup & low-level devices | OMAP INTC (`0x48200000`), PRCM (`0x48004000`), GPTimers 1..11 (`0x48088000`), and UART1..4 (`0x49042000`). Discovers 4 genuine ThreadX threads: `System Timer Thread`, `SystemInitThread`, `QueueDispatcher helper thread`, `log_thread`. | **COMPLETE** |
 | **M4** | Boot and persistent storage | `VirtualFileSystem` and `CameraEnvironment` mapping `/env`, `/image1`, `/image2`, `/data`, `/log`, `/pdata`. Verified path resolution, file reading from `/image2`, and persistent write/append. | **COMPLETE** |
 | **M5** | Firmware-visible peripheral models | Stateful I2C1..3 master controllers; Atmel maXTouch multi-touch controller on `0x4B` with 7-object table; 24C02 EDID EEPROM on `0x50` with authentic "RED TOUCH 7.0" 128-byte block. Satisfies `isMonitorAttached` at `0x80754DC0`. | **COMPLETE** |
-| **M6** | Authentic UI pipeline | Verified 1024x576 native LCD resolution from decompressed `slot/res/splash_screen.bin` (1,769,480 bytes, format REDZLIB0); DISPC DDR framebuffer extraction; Atmel maXTouch T5/T9 packet injection. | **COMPLETE** |
+| **M6** | Authentic UI pipeline | Verified 1024x576 native LCD resolution from decompressed `slot/res/splash_screen.bin` (1,769,480 bytes, format REDZLIB0); DISPC DDR framebuffer extraction; Atmel maXTouch T5/T9 packet injection. Interactive `RedUiEngine` with visual touch feedback reticles, quick-selection dialogs (ISO, FPS, Shutter, Format, Media, Audio), full DSMC2 system menu, and cinema exposure tools (1:1 Mag, False Color LUT, Zebras 95%). | **COMPLETE** |
 | **M7** | Operational virtual camera | Full desktop application (`emulator/ui/app.py`): Virtual RED Camera zone (1024x576 screen + tactile buttons: REC, POWER, MENU, MAG, NAV) and synchronized Developer Dashboard (Console, RCP, ThreadX inspector, MMIO, Faults, Snapshots). | **COMPLETE** |
-| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (12 passed). | **COMPLETE** |
+| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (17 passed). | **COMPLETE** |
 | **M9** | Complete, distributable local product | Authoritative documentation suite complete (`README.md`, `docs/ARCHITECTURE.md`, `docs/BOOT_TRACE.md`, `docs/UI_RESEARCH.md`, `docs/TESTING.md`, `STATUS.md`, `HANDOFF.md`). All proprietary assets untracked. | **COMPLETE** |
 | **M10** | Extended fidelity | Coprocessor stubs identified; multi-model profile foundations prepared in `CameraEnvironment`. | **IN PROGRESS** |
 
@@ -43,14 +43,15 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 12 items
+collected 17 items
 
-tests\test_camera_boot.py ..                                             [ 16%]
-tests\test_fault_injection.py .                                          [ 25%]
-tests\test_peripherals.py ......                                         [ 75%]
+tests\test_camera_boot.py ..                                             [ 11%]
+tests\test_fault_injection.py .                                          [ 17%]
+tests\test_peripherals.py ......                                         [ 52%]
+tests\test_redui.py .....                                                [ 82%]
 tests\test_storage.py ...                                                [100%]
 
-============================= 12 passed in 3.92s ==============================
+============================= 17 passed in 8.78s ==============================
 ```
 
 Command: `python -m emulator.cli test -o test_report.json`

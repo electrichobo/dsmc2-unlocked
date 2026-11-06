@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 from typing import Optional, Tuple
+from emulator.ui.redui import RedUiEngine
 
 
 class CameraScreen(ttk.Frame):
@@ -36,6 +37,9 @@ class CameraScreen(ttk.Frame):
 
         # Touch state
         self.is_touch_down = False
+
+        # Interactive RedUi Engine
+        self.redui = RedUiEngine(self.camera)
 
     def _load_splash_screen(self) -> Optional[Image.Image]:
         """Load and decompress authentic RED splash screen if present."""
@@ -108,18 +112,44 @@ class CameraScreen(ttk.Frame):
         x, y = self._map_coords(event)
         self.is_touch_down = True
         self.camera.touch(x, y, pressed=True)
+        self.redui.handle_touch(x, y, pressed=True)
         self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
+        self.refresh()
 
     def _on_touch_move(self, event):
         if self.is_touch_down:
             x, y = self._map_coords(event)
             self.camera.touch(x, y, pressed=True)
+            self.redui.handle_touch(x, y, pressed=True)
+            self.refresh()
 
     def _on_touch_up(self, event):
         x, y = self._map_coords(event)
         self.is_touch_down = False
         self.camera.touch(x, y, pressed=False)
+        self.redui.handle_touch(x, y, pressed=False)
         self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
+        self.refresh()
+
+    def toggle_menu(self):
+        self.redui.toggle_menu()
+        self.refresh()
+
+    def toggle_magnify(self):
+        self.redui.toggle_magnify()
+        self.refresh()
+
+    def toggle_false_color(self):
+        self.redui.toggle_false_color()
+        self.refresh()
+
+    def toggle_zebras(self):
+        self.redui.toggle_zebras()
+        self.refresh()
+
+    def handle_button(self, button_name: str):
+        self.redui.handle_button_press(button_name)
+        self.refresh()
 
     def refresh(self):
         """Fetch latest pixels from camera DSS and redraw canvas."""
@@ -143,6 +173,9 @@ class CameraScreen(ttk.Frame):
 
             # Draw RED authentic HUD overlay (driven directly from camera state & RCP)
             self._draw_hud(img)
+
+            # Render RedUi interactive layer (Menu, Quick Dialogs, Exposure Tools, Touch Reticle)
+            img = self.redui.render(img)
 
         # Scale to display size
         if self.scale != 1.0:
@@ -212,43 +245,68 @@ class CameraScreen(ttk.Frame):
         is_recording = (record_state == "2")
 
         # Top Bar Background
-        draw.rectangle([(0, 0), (1024, 40)], fill=(0, 0, 0, 180))
+        draw.rectangle([(0, 0), (1024, 40)], fill=(0, 0, 0, 200))
+        draw.line([(0, 40), (1024, 40)], fill=(40, 40, 40), width=1)
 
-        # REC Badge
+        # REC / STBY Touch Button
         if is_recording:
-            draw.rectangle([(15, 8), (75, 32)], fill=(200, 20, 20))
-            draw.text((25, 12), "• REC", fill=(255, 255, 255))
+            draw.rectangle([(12, 6), (82, 34)], fill=(200, 20, 20), outline=(255, 60, 60), width=1)
+            draw.text((22, 11), "• REC", fill=(255, 255, 255))
         else:
-            draw.rectangle([(15, 8), (75, 32)], fill=(40, 40, 40))
-            draw.text((25, 12), "STBY", fill=(180, 180, 180))
+            draw.rectangle([(12, 6), (82, 34)], fill=(32, 32, 32), outline=(70, 70, 70), width=1)
+            draw.text((24, 11), "STBY", fill=(180, 180, 180))
 
-        # Camera Model
+        # Camera Model / Menu Button (Tapping opens DSMC2 Menu)
+        menu_hl = (220, 20, 20) if self.redui.is_menu_open else (60, 60, 60)
+        draw.rectangle([(88, 6), (295, 34)], fill=(28, 28, 28), outline=menu_hl, width=1)
         model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
-        draw.text((90, 12), f"RED {model_name}", fill=(220, 220, 220))
+        draw.text((96, 11), f"RED {model_name} [MENU]", fill=(220, 220, 220))
 
-        # Exposure / FPS / Shutter / ISO
-        draw.text((320, 12), f"FPS: {fps}", fill=(255, 255, 255))
-        draw.text((450, 12), f"SHUTTER: {shutter}", fill=(255, 255, 255))
-        draw.text((620, 12), f"ISO: {iso}", fill=(255, 255, 255))
-        draw.text((750, 12), f"FORMAT: {format_name}", fill=(255, 255, 255))
+        # FPS Touch Button
+        fps_hl = (220, 20, 20) if self.redui.active_dialog == "FPS" else (60, 60, 60)
+        draw.rectangle([(310, 6), (430, 34)], fill=(28, 28, 28), outline=fps_hl, width=1)
+        draw.text((320, 11), f"FPS: {fps}", fill=(255, 255, 255))
+
+        # SHUTTER Touch Button
+        shutter_hl = (220, 20, 20) if self.redui.active_dialog == "SHUTTER" else (60, 60, 60)
+        draw.rectangle([(440, 6), (600, 34)], fill=(28, 28, 28), outline=shutter_hl, width=1)
+        draw.text((450, 11), f"SHUTTER: {shutter}", fill=(255, 255, 255))
+
+        # ISO Touch Button
+        iso_hl = (220, 20, 20) if self.redui.active_dialog == "ISO" else (60, 60, 60)
+        draw.rectangle([(610, 6), (730, 34)], fill=(28, 28, 28), outline=iso_hl, width=1)
+        draw.text((620, 11), f"ISO: {iso}", fill=(255, 255, 255))
+
+        # FORMAT Touch Button
+        fmt_hl = (220, 20, 20) if self.redui.active_dialog == "FORMAT" else (60, 60, 60)
+        draw.rectangle([(740, 6), (910, 34)], fill=(28, 28, 28), outline=fmt_hl, width=1)
+        draw.text((750, 11), f"FORMAT: {format_name}", fill=(255, 255, 255))
 
         # DC / Battery indicator
-        draw.text((930, 12), "DC IN 14.8V", fill=(80, 220, 80))
+        draw.rectangle([(920, 6), (1014, 34)], fill=(20, 35, 20), outline=(0, 180, 60), width=1)
+        draw.text((930, 11), "DC 14.8V", fill=(80, 240, 80))
 
         # Bottom Bar Background
-        draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 180))
+        draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 200))
+        draw.line([(0, 540), (1024, 540)], fill=(40, 40, 40), width=1)
 
-        # Timecode
+        # Timecode Touch Button
         timecode = "01:00:00:00" if not is_recording else f"01:00:{int(self.camera.instruction_count/1000000)%60:02d}:12"
         tc_color = (255, 50, 50) if is_recording else (200, 200, 200)
+        draw.rectangle([(12, 544), (240, 572)], fill=(28, 28, 28), outline=(60, 60, 60), width=1)
         draw.text((20, 550), f"TC: {timecode}", fill=tc_color)
 
-        # Media status
+        # Media status Touch Button
+        media_hl = (220, 20, 20) if self.redui.active_dialog == "MEDIA" else (60, 60, 60)
+        draw.rectangle([(250, 544), (660, 572)], fill=(28, 28, 28), outline=media_hl, width=1)
         draw.text((260, 550), "MEDIA: RED MINI-MAG 512GB [78% FREE]", fill=(200, 200, 200))
 
-        # Audio meters indicator
-        draw.text((680, 550), "AUDIO: CH1 -18dB  CH2 -18dB", fill=(120, 200, 120))
+        # Audio meters Touch Button
+        audio_hl = (220, 20, 20) if self.redui.active_dialog == "AUDIO" else (60, 60, 60)
+        draw.rectangle([(670, 544), (860, 572)], fill=(28, 28, 28), outline=audio_hl, width=1)
+        draw.text((680, 550), "AUDIO: CH1/2 -18dB", fill=(120, 200, 120))
 
         # Instruction counter
         instr_m = self.camera.instruction_count / 1_000_000
+        draw.rectangle([(870, 544), (1014, 572)], fill=(22, 22, 22), outline=(50, 50, 50), width=1)
         draw.text((880, 550), f"INSTR: {instr_m:.1f}M", fill=(140, 140, 140))
