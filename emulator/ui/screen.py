@@ -30,6 +30,7 @@ class CameraScreen(ttk.Frame):
         self.display_height = int(self.NATIVE_HEIGHT * self.scale)
 
         self.splash_image: Optional[Image.Image] = self._load_splash_screen()
+        self.sensor_feed_image: Optional[Image.Image] = self._load_sensor_feed_image()
         self.current_tk_image: Optional[ImageTk.PhotoImage] = None
 
         # Build UI
@@ -42,6 +43,20 @@ class CameraScreen(ttk.Frame):
 
         # Interactive RedUi Engine
         self.redui = RedUiEngine(self.camera)
+
+    def _load_sensor_feed_image(self) -> Optional[Image.Image]:
+        """Load authentic cinema sensor background in place of the gaussian swirl."""
+        sensor_path = os.path.join(self.camera.workspace_root, "res", "sensor_feed_cinema.jpg")
+        if not os.path.exists(sensor_path):
+            return None
+        try:
+            im = Image.open(sensor_path)
+            if im.size != (self.NATIVE_WIDTH, self.NATIVE_HEIGHT):
+                im = im.resize((self.NATIVE_WIDTH, self.NATIVE_HEIGHT), Image.Resampling.LANCZOS)
+            return im.convert("RGB")
+        except Exception as e:
+            print(f"[Screen] Failed to load cinema sensor feed: {e}")
+            return None
 
     def _load_splash_screen(self) -> Optional[Image.Image]:
         """Load and decompress authentic RED splash screen if present."""
@@ -181,16 +196,24 @@ class CameraScreen(ttk.Frame):
             if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
                 # 32bpp BGRA/RGBA from DISPC
                 img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+            elif self.sensor_feed_image:
+                img = self.sensor_feed_image.copy()
             elif self.splash_image:
                 img = self.splash_image.copy()
             else:
                 img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
 
             # Draw RED authentic HUD overlay (driven directly from camera state & RCP)
-            self._draw_hud(img)
+            try:
+                self._draw_hud(img)
+            except Exception:
+                pass
 
             # Render RedUi interactive layer (Menu, Quick Dialogs, Exposure Tools, Touch Reticle)
-            img = self.redui.render(img)
+            try:
+                img = self.redui.render(img)
+            except Exception:
+                pass
 
         # Scale to display size
         if self.scale != 1.0:

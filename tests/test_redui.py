@@ -104,3 +104,80 @@ def test_touch_reticle_feedback(redui):
     # The pixel at reticle ring (500 + 22, 300) should be colored (red outline)
     pixel = rendered.getpixel((522, 300))
     assert pixel[0] > 100  # Red channel active
+
+
+def test_deep_dsmc2_menu_hierarchy_and_breadcrumbs(redui, camera):
+    """Verify navigating through authentic DSMC2 menu branches and breadcrumb controls."""
+    redui.toggle_menu()
+    assert redui.is_menu_open is True
+    assert redui.menu_path == ["Menu"]
+
+    # Drill into SETTINGS
+    redui._handle_menu_item_selected("SETTINGS")
+    assert redui.menu_path == ["Menu", "SETTINGS"]
+
+    # Drill into PROJECT
+    redui._handle_menu_item_selected("PROJECT")
+    assert redui.menu_path == ["Menu", "SETTINGS", "PROJECT"]
+
+    # Drill into Frame Rate
+    redui._handle_menu_item_selected("Frame Rate")
+    assert redui.menu_path == ["Menu", "SETTINGS", "PROJECT", "Frame Rate"]
+
+    # Select 60.00 FPS
+    redui._handle_menu_item_selected("60.00")
+    assert camera.rcp.state[RcpProtocol.PARAM_FPS] == "60.00"
+
+    # Tap Back button (x=870, y=20)
+    redui.handle_touch(870, 20, pressed=True)
+    assert redui.menu_path == ["Menu", "SETTINGS", "PROJECT"]
+
+    # Tap Home [...] button (x=800, y=20)
+    redui.handle_touch(800, 20, pressed=True)
+    assert redui.menu_path == ["Menu"]
+
+    # Tap Close button (x=950, y=20)
+    redui.handle_touch(950, 20, pressed=True)
+    assert redui.is_menu_open is False
+
+
+def test_format_media_progress_bar_zero_used_no_crash(redui, camera):
+    """Verify formatting media with 0% remaining capacity does not cause Pillow ValueError."""
+    if hasattr(camera, "recorder"):
+        camera.recorder.format_media()
+
+    redui._open_dialog("MEDIA")
+    base = Image.new("RGB", (1024, 576), (20, 20, 20))
+    # Must render without crashing: ValueError: x1 must be greater than or equal to x0
+    rendered = redui.render(base)
+    assert rendered.size == (1024, 576)
+
+    # Also test rendering inside the full MEDIA device menu
+    redui.active_dialog = None
+    redui.is_menu_open = True
+    redui.menu_path = ["Menu", "MEDIA", "Device"]
+    rendered_menu = redui.render(base)
+    assert rendered_menu.size == (1024, 576)
+
+
+def test_dsmc2_maintenance_and_calibration(redui, camera):
+    """Verify executing maintenance actions in DSMC2 menu."""
+    redui.is_menu_open = True
+    redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE"]
+
+    # Drill into Calibrate submenu
+    redui._handle_menu_item_selected("Calibrate")
+    assert redui.menu_path == ["Menu", "SETTINGS", "MAINTENANCE", "Calibrate"]
+
+    # Trigger Sensor Calibration
+    redui._handle_menu_item_selected("Black Shading Sensor (T/E)")
+    logs = camera.get_serial_logs()
+    assert any("Black Shading" in l for l in logs)
+
+    # Return to MAINTENANCE and test Save Log
+    redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE"]
+    redui._handle_menu_item_selected("Save Log")
+    assert redui.menu_path == ["Menu", "SETTINGS", "MAINTENANCE", "Save Log"]
+    redui._handle_menu_item_selected("Save Log to Media")
+    logs2 = camera.get_serial_logs()
+    assert any("MAINTENANCE" in l for l in logs2)

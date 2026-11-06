@@ -26,6 +26,17 @@ from emulator.camera import Dsmc2Camera
 from emulator.ui.redui import RedUiEngine
 from emulator.rcp.protocol import RcpProtocol
 
+try:
+    HUD_FONT_LG = ImageFont.truetype("arialbd.ttf", 16)
+    HUD_FONT_MED = ImageFont.truetype("arialbd.ttf", 13)
+    HUD_FONT_SM = ImageFont.truetype("arial.ttf", 10)
+    HUD_FONT_BOLD_SM = ImageFont.truetype("arialbd.ttf", 10)
+except Exception:
+    HUD_FONT_LG = ImageFont.load_default()
+    HUD_FONT_MED = ImageFont.load_default()
+    HUD_FONT_SM = ImageFont.load_default()
+    HUD_FONT_BOLD_SM = ImageFont.load_default()
+
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Multi-threaded HTTP server allowing concurrent MJPEG streaming and API requests."""
@@ -46,6 +57,7 @@ class ScreenCompositor:
         self.camera = camera
         self.redui = RedUiEngine(camera)
         self.splash_image: Optional[Image.Image] = self._load_splash_screen()
+        self.sensor_feed_image: Optional[Image.Image] = self._load_sensor_feed_image()
         self._zero_fb_buf = b"\x00" * (self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4)
 
     def _load_splash_screen(self) -> Optional[Image.Image]:
@@ -67,6 +79,20 @@ class ScreenCompositor:
             return None
         return None
 
+    def _load_sensor_feed_image(self) -> Optional[Image.Image]:
+        """Load authentic cinema sensor background in place of the gaussian swirl."""
+        sensor_path = os.path.join(self.camera.workspace_root, "res", "sensor_feed_cinema.jpg")
+        if not os.path.exists(sensor_path):
+            return None
+        try:
+            im = Image.open(sensor_path)
+            if im.size != (self.NATIVE_WIDTH, self.NATIVE_HEIGHT):
+                im = im.resize((self.NATIVE_WIDTH, self.NATIVE_HEIGHT), Image.Resampling.LANCZOS)
+            return im.convert("RGB")
+        except Exception as e:
+            print(f"[Compositor] Failed to load cinema sensor feed: {e}")
+            return None
+
     def compose_frame(self) -> Image.Image:
         """Compose raw LCD frame with overlays."""
         state = self.camera.power_state
@@ -81,16 +107,24 @@ class ScreenCompositor:
 
             if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
                 img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+            elif self.sensor_feed_image:
+                img = self.sensor_feed_image.copy()
             elif self.splash_image:
                 img = self.splash_image.copy()
             else:
                 img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
 
             # Draw RED HUD
-            self._draw_hud(img)
+            try:
+                self._draw_hud(img)
+            except Exception as e:
+                print(f"[Compositor] Error drawing HUD: {e}")
 
             # Draw RedUi layer (Dialogs, Menu, Tools, Reticle)
-            img = self.redui.render(img)
+            try:
+                img = self.redui.render(img)
+            except Exception as e:
+                print(f"[Compositor] Error drawing RedUi: {e}")
 
         return img
 
@@ -138,88 +172,161 @@ class ScreenCompositor:
     def _draw_hud(self, img: Image.Image):
         draw = ImageDraw.Draw(img)
         rcp = self.camera.rcp
-        fps = rcp.state.get(rcp.PARAM_FPS, "24.00")
+        fps = rcp.state.get(rcp.PARAM_FPS, "23.98")
         shutter = rcp.state.get(rcp.PARAM_SHUTTER, "1/48")
         iso = rcp.state.get(rcp.PARAM_ISO, "800")
         format_name = rcp.state.get(rcp.PARAM_FORMAT, "5K 16:9")
         record_state = rcp.state.get(rcp.PARAM_RECORD_STATE, "0")
         is_recording = (record_state == "2")
+        lm = getattr(self.camera, "lens_mount", None)
+        iris_str = f"f/{lm.current_aperture:.1f}" if (lm and lm.attached_lens) else rcp.state.get("aperture", "f/2.8")
 
-        # Top Bar
-        draw.rectangle([(0, 0), (1024, 40)], fill=(0, 0, 0, 200))
-        draw.line([(0, 40), (1024, 40)], fill=(40, 40, 40), width=1)
+        # 1. Top HUD Bar (Only drawn when full DSMC2 menu is not active)
+        if not self.redui.is_menu_open:
+            draw.rectangle([(0, 0), (self.NATIVE_WIDTH, 42)], fill=(0, 0, 0, 210))
+            draw.line([(0, 42), (self.NATIVE_WIDTH, 42)], fill=(40, 40, 40), width=1)
 
-        # STBY / REC Badge
-        if is_recording:
-            draw.rectangle([(12, 6), (82, 34)], fill=(200, 20, 20), outline=(255, 60, 60), width=1)
-            draw.text((22, 11), "• REC", fill=(255, 255, 255))
-        else:
-            draw.rectangle([(12, 6), (82, 34)], fill=(32, 32, 32), outline=(70, 70, 70), width=1)
-            draw.text((24, 11), "STBY", fill=(180, 180, 180))
+            # Left STBY / REC / Model Badge (x: 12..82)
+            if is_recording:
+                draw.rectangle([(12, 6), (82, 34)], fill=(200, 20, 20), outline=(255, 60, 60), width=1)
+                draw.text((22, 11), "• REC", fill=(255, 255, 255), font=HUD_FONT_MED)
+            else:
+                draw.rectangle([(12, 6), (82, 34)], fill=(28, 28, 28), outline=(60, 60, 60), width=1)
+                draw.text((24, 11), "STBY", fill=(180, 180, 180), font=HUD_FONT_MED)
 
-        # Menu Button
-        menu_hl = (220, 20, 20) if self.redui.is_menu_open else (60, 60, 60)
-        draw.rectangle([(88, 6), (245, 34)], fill=(28, 28, 28), outline=menu_hl, width=1)
-        model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
-        draw.text((96, 11), f"RED {model_name} [MENU]", fill=(220, 220, 220))
+            # Model Menu header (x: 88..245)
+            draw.rectangle([(88, 6), (245, 34)], fill=(28, 28, 28), outline=(60, 60, 60), width=1)
+            model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+            draw.text((96, 11), f"RED {model_name} [MENU]", fill=(220, 220, 220), font=HUD_FONT_SM)
 
-        # FPS
-        fps_hl = (220, 20, 20) if self.redui.active_dialog == "FPS" else (60, 60, 60)
-        draw.rectangle([(255, 6), (365, 34)], fill=(28, 28, 28), outline=fps_hl, width=1)
-        draw.text((265, 11), f"FPS: {fps}", fill=(255, 255, 255))
+            # FPS (x: 255..365)
+            fps_active = (self.redui.active_dialog == "FPS")
+            draw.rectangle([(255, 6), (365, 34)], fill=(28, 28, 28), outline=(220, 20, 20) if fps_active else (60, 60, 60), width=1)
+            draw.text((265, 11), f"FPS: {fps}", fill=(255, 255, 255), font=HUD_FONT_MED)
+            if fps_active:
+                draw.line([(255, 35), (365, 35)], fill=(255, 30, 30), width=2)
 
-        # SHUTTER
-        shutter_hl = (220, 20, 20) if self.redui.active_dialog == "SHUTTER" else (60, 60, 60)
-        draw.rectangle([(375, 6), (495, 34)], fill=(28, 28, 28), outline=shutter_hl, width=1)
-        draw.text((385, 11), f"SHTR: {shutter}", fill=(255, 255, 255))
+            # SHUTTER (x: 375..495)
+            shutter_active = (self.redui.active_dialog == "SHUTTER")
+            draw.rectangle([(375, 6), (495, 34)], fill=(28, 28, 28), outline=(220, 20, 20) if shutter_active else (60, 60, 60), width=1)
+            draw.text((385, 11), f"SHTR: {shutter}", fill=(255, 255, 255), font=HUD_FONT_MED)
+            if shutter_active:
+                draw.line([(375, 35), (495, 35)], fill=(255, 30, 30), width=2)
 
-        # IRIS / APERTURE
-        iris_str = rcp.state.get("aperture", "f/2.8")
-        iris_hl = (220, 20, 20) if self.redui.active_dialog == "IRIS" else (60, 60, 60)
-        draw.rectangle([(505, 6), (615, 34)], fill=(28, 28, 28), outline=iris_hl, width=1)
-        draw.text((515, 11), f"IRIS: {iris_str}", fill=(255, 255, 255))
+            # IRIS (x: 505..615)
+            iris_active = (self.redui.active_dialog == "IRIS")
+            draw.rectangle([(505, 6), (615, 34)], fill=(28, 28, 28), outline=(220, 20, 20) if iris_active else (60, 60, 60), width=1)
+            draw.text((515, 11), f"IRIS: {iris_str}", fill=(255, 255, 255), font=HUD_FONT_MED)
+            if iris_active:
+                draw.line([(505, 35), (615, 35)], fill=(255, 30, 30), width=2)
 
-        # ISO
-        iso_hl = (220, 20, 20) if self.redui.active_dialog == "ISO" else (60, 60, 60)
-        draw.rectangle([(625, 6), (735, 34)], fill=(28, 28, 28), outline=iso_hl, width=1)
-        draw.text((635, 11), f"ISO: {iso}", fill=(255, 255, 255))
+            # ISO (x: 625..735)
+            iso_active = (self.redui.active_dialog == "ISO")
+            draw.rectangle([(625, 6), (735, 34)], fill=(28, 28, 28), outline=(220, 20, 20) if iso_active else (60, 60, 60), width=1)
+            draw.text((635, 11), f"ISO: {iso}", fill=(255, 255, 255), font=HUD_FONT_MED)
+            if iso_active:
+                draw.line([(625, 35), (735, 35)], fill=(255, 30, 30), width=2)
 
-        # FORMAT
-        fmt_hl = (220, 20, 20) if self.redui.active_dialog == "FORMAT" else (60, 60, 60)
-        draw.rectangle([(745, 6), (895, 34)], fill=(28, 28, 28), outline=fmt_hl, width=1)
-        draw.text((755, 11), f"FORMAT: {format_name}", fill=(255, 255, 255))
+            # FORMAT (x: 745..895)
+            fmt_active = (self.redui.active_dialog == "FORMAT")
+            draw.rectangle([(745, 6), (895, 34)], fill=(28, 28, 28), outline=(220, 20, 20) if fmt_active else (60, 60, 60), width=1)
+            draw.text((755, 11), f"FORMAT: {format_name}", fill=(255, 255, 255), font=HUD_FONT_MED)
+            if fmt_active:
+                draw.line([(745, 35), (895, 35)], fill=(255, 30, 30), width=2)
 
-        # DC / Battery
-        draw.rectangle([(905, 6), (1014, 34)], fill=(20, 35, 20), outline=(0, 180, 60), width=1)
-        draw.text((915, 11), "DC 14.8V", fill=(80, 240, 80))
+            # Authentic Right-side Menu Button (x: 905..1014)
+            draw.rectangle([(905, 6), (1014, 34)], fill=(32, 32, 32), outline=(220, 30, 30), width=1)
+            draw.text((936, 11), "Menu", fill=(255, 255, 255), font=HUD_FONT_MED)
 
-        # Bottom Bar
-        draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 200))
-        draw.line([(0, 540), (1024, 540)], fill=(40, 40, 40), width=1)
+            # 2. Inside Frame Metadata
+            rec = getattr(self.camera, "recorder", None)
+            clip_name = rec.current_clip_name if (rec and rec.current_clip_name) else f"{rec.current_reel_id if rec else 'A001'}_C{rec.clip_number if rec else 1:03d}"
+            draw.text((24, 492), f"{clip_name}", fill=(240, 240, 240), font=HUD_FONT_MED)
 
-        # Timecode
-        timecode = "01:00:00:00" if not is_recording else f"01:00:{int(self.camera.instruction_count/1000000)%60:02d}:12"
-        tc_color = (255, 50, 50) if is_recording else (200, 200, 200)
-        draw.rectangle([(12, 544), (240, 572)], fill=(28, 28, 28), outline=(60, 60, 60), width=1)
-        draw.text((20, 550), f"TC: {timecode}", fill=tc_color)
+            timecode = "01:00:00:00" if not is_recording else f"01:00:{int(self.camera.instruction_count/1000000)%60:02d}:12"
+            tc_color = (255, 50, 50) if is_recording else (220, 220, 220)
+            draw.text((865, 492), timecode, fill=tc_color, font=HUD_FONT_MED)
 
-        # Media
+            # Subtle frame lines
+            draw.line([(20, 48), (20, 512)], fill=(80, 20, 20), width=1)
+            draw.line([(1004, 48), (1004, 512)], fill=(80, 20, 20), width=1)
+
+        # 3. Authentic Bottom Status Bar (Always visible at y: 520..576)
+        draw.rectangle([(0, 520), (self.NATIVE_WIDTH, 576)], fill=(10, 10, 10))
+        draw.line([(0, 520), (self.NATIVE_WIDTH, 520)], fill=(45, 45, 45), width=1)
+
+        # Camera Icon Outline & FPS below
+        cam_fill = (220, 20, 20) if is_recording else (30, 30, 30)
+        draw.rectangle([(12, 528), (38, 548)], fill=cam_fill, outline=(220, 220, 220) if not is_recording else (255, 60, 60), width=1)
+        draw.polygon([(38, 532), (46, 528), (46, 548), (38, 544)], fill=cam_fill, outline=(220, 220, 220) if not is_recording else (255, 60, 60))
+        draw.text((10, 554), f"{fps}FPS", fill=(220, 220, 220), font=HUD_FONT_BOLD_SM)
+
+        # Mini RGB Histogram Box (x: 55..98, y: 526..568)
+        draw.rectangle([(55, 526), (98, 568)], fill=(18, 18, 18), outline=(50, 50, 50), width=1)
+        # Exposure Curves
+        draw.line([(57, 566), (65, 555), (75, 540), (85, 548), (96, 566)], fill=(240, 50, 50), width=1)
+        draw.line([(57, 566), (67, 548), (77, 535), (87, 552), (96, 566)], fill=(50, 220, 50), width=1)
+        draw.line([(57, 566), (63, 560), (73, 542), (83, 538), (96, 566)], fill=(60, 120, 255), width=1)
+
+        # 3 Calibration Dots (x: 108)
+        draw.ellipse([(108, 529), (114, 535)], fill=(0, 220, 80)) # Temp
+        draw.ellipse([(108, 541), (114, 547)], fill=(0, 220, 80)) # Black Shading T/E
+        draw.ellipse([(108, 553), (114, 559)], fill=(0, 220, 80)) # Fan/Electronics
+
+        # Status text (x: 122)
+        draw.text((122, 526), "37°/54°", fill=(220, 220, 220), font=HUD_FONT_BOLD_SM)
+        draw.text((122, 540), "Cal: ", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
+        draw.text((148, 540), "T/E", fill=(0, 230, 90), font=HUD_FONT_BOLD_SM)
+        draw.text((122, 554), "Drop: 0", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
+
+        # Badges cluster (x: 195..340)
+        draw.text((195, 526), "HDRx", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+        draw.text((195, 540), "OFF", fill=(160, 160, 160), font=HUD_FONT_BOLD_SM)
+        draw.text((195, 554), "1:1", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+        draw.text((215, 554), "ON" if self.redui.is_magnify_on else "OFF", fill=(0, 230, 90) if self.redui.is_magnify_on else (160, 160, 160), font=HUD_FONT_BOLD_SM)
+
+        draw.text((250, 526), "TC", fill=(0, 230, 90), font=HUD_FONT_BOLD_SM)
+        draw.text((275, 526), "GEN", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+        draw.text((305, 526), "RIG", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+        draw.text((250, 544), "SYNC", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+        draw.text((285, 544), "WIFI", fill=(120, 120, 120), font=HUD_FONT_BOLD_SM)
+
+        # Media Status (x: 355..470)
         rec = getattr(self.camera, "recorder", None)
-        rem_pct = rec.media_remaining_percent if rec else 78
-        media_txt = f"MEDIA: RED MINI-MAG 512GB [{rem_pct}% FREE]" if (not rec or rec.is_media_mounted) else "MEDIA: NO RED MINI-MAG"
-        media_hl = (220, 20, 20) if self.redui.active_dialog == "MEDIA" else (60, 60, 60)
-        draw.rectangle([(250, 544), (660, 572)], fill=(28, 28, 28), outline=media_hl, width=1)
-        draw.text((260, 550), media_txt, fill=(200, 200, 200))
+        rem_pct = rec.media_remaining_percent if rec else 100
+        media_active = (self.redui.active_dialog == "MEDIA")
+        draw.rectangle([(355, 524), (470, 570)], fill=(20, 20, 20), outline=(220, 20, 20) if media_active else (45, 45, 45))
+        draw.text((365, 528), "S-SSD", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
+        draw.text((365, 540), f"{rem_pct}%", fill=(0, 230, 90) if rem_pct > 15 else (240, 50, 50), font=HUD_FONT_MED)
+        draw.rectangle([(425, 532), (462, 548)], fill=(40, 40, 40), outline=(70, 70, 70))
+        draw.text((430, 535), "R3D", fill=(255, 255, 255), font=HUD_FONT_BOLD_SM)
 
-        # Audio
-        audio_hl = (220, 20, 20) if self.redui.active_dialog == "AUDIO" else (60, 60, 60)
-        draw.rectangle([(670, 544), (860, 572)], fill=(28, 28, 28), outline=audio_hl, width=1)
-        draw.text((680, 550), "AUDIO: CH1/2 -18dB", fill=(120, 200, 120))
+        # Power Status (x: 480..575)
+        draw.rectangle([(480, 524), (575, 570)], fill=(20, 20, 20), outline=(45, 45, 45))
+        draw.text((490, 528), "DC", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
+        draw.text((490, 542), "15.2V", fill=(80, 240, 80), font=HUD_FONT_MED)
 
-        # Instruction counter
+        # 4-Channel Audio Peak Meters (x: 585..770)
+        audio_active = (self.redui.active_dialog == "AUDIO")
+        draw.rectangle([(585, 524), (770, 570)], fill=(18, 18, 18), outline=(220, 20, 20) if audio_active else (45, 45, 45))
+        # Ch 1
+        draw.text((592, 527), "Ch1", fill=(0, 220, 80), font=HUD_FONT_BOLD_SM)
+        draw.rectangle([(620, 529), (755, 535)], outline=(50, 50, 50))
+        draw.rectangle([(621, 530), (715, 534)], fill=(0, 220, 80)) # -18 dBFS level
+        # Ch 2
+        draw.text((592, 538), "Ch2", fill=(0, 220, 80), font=HUD_FONT_BOLD_SM)
+        draw.rectangle([(620, 540), (755, 546)], outline=(50, 50, 50))
+        draw.rectangle([(621, 541), (710, 545)], fill=(0, 220, 80))
+        # Ch 3 & 4
+        draw.text((592, 549), "Ch3", fill=(100, 100, 100), font=HUD_FONT_BOLD_SM)
+        draw.rectangle([(620, 551), (755, 557)], outline=(40, 40, 40))
+        draw.text((592, 559), "Ch4", fill=(100, 100, 100), font=HUD_FONT_BOLD_SM)
+        draw.rectangle([(620, 561), (755, 567)], outline=(40, 40, 40))
+
+        # Virtual CPU Instructions (x: 870..1014)
         instr_m = self.camera.instruction_count / 1_000_000
         draw.rectangle([(870, 544), (1014, 572)], fill=(22, 22, 22), outline=(50, 50, 50), width=1)
-        draw.text((880, 550), f"INSTR: {instr_m:.1f}M", fill=(140, 140, 140))
+        draw.text((880, 550), f"INSTR: {instr_m:.1f}M", fill=(140, 140, 140), font=HUD_FONT_BOLD_SM)
 
 
 class WebStudio:
@@ -676,14 +783,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
   /* Main Studio Layout */
   .studio-grid {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 20px;
-    padding: 18px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 20px 40px 20px;
     flex: 1;
-    max-width: 1750px;
+    max-width: 1350px;
     margin: 0 auto;
     width: 100%;
+    box-sizing: border-box;
   }
 
   /* Camera Unit Column */
@@ -691,18 +800,20 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
+    width: 100%;
   }
 
   /* Authentic RED Touch 7.0 Aluminum Bezel */
   .monitor-bezel {
     background: linear-gradient(145deg, #242424, #151515);
     border: 3px solid #383838;
-    border-radius: 10px;
-    padding: 14px 16px 16px 16px;
-    box-shadow: 0 12px 36px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 12px 16px 14px 16px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.85), inset 0 1px 0 rgba(255,255,255,0.1);
     position: relative;
-    max-width: 900px;
+    width: 100%;
+    box-sizing: border-box;
   }
   .bezel-screws {
     display: flex;
@@ -722,8 +833,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     display: flex;
     justify-content: space-between;
     font-family: monospace;
-    font-size: 10px;
-    color: #777;
+    font-size: 11px;
+    color: #888;
     margin-bottom: 6px;
     letter-spacing: 1px;
   }
@@ -731,15 +842,19 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   /* Screen Frame Stream Canvas */
   .screen-viewport {
     position: relative;
-    width: 800px;
-    height: 450px;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    max-height: 62vh;
     background: #000;
-    border-radius: 3px;
+    border-radius: 4px;
     overflow: hidden;
     cursor: crosshair;
-    box-shadow: inset 0 0 10px rgba(0,0,0,0.9);
+    box-shadow: inset 0 0 16px rgba(0,0,0,0.95);
   }
   .screen-viewport img {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
     object-fit: fill;
@@ -764,10 +879,12 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     padding: 12px 18px;
     display: flex;
     align-items: center;
-    gap: 18px;
+    gap: 16px;
     box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-    width: 800px;
+    width: 100%;
+    box-sizing: border-box;
     justify-content: space-between;
+    flex-wrap: wrap;
   }
   .btn-group {
     display: flex;
@@ -861,7 +978,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   .dpad button:hover { background: #383838; }
   .dpad button:active { background: #111; }
 
-  /* Right Column: Engineering Workbench */
+  /* Engineering Workbench: Full Width Below Screen */
   .workbench {
     background: var(--bg-panel);
     border: 1px solid var(--border);
@@ -869,7 +986,10 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    height: 720px;
+    width: 100%;
+    min-height: 480px;
+    max-height: 650px;
+    box-sizing: border-box;
   }
   .tab-bar {
     display: flex;

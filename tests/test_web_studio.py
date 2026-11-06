@@ -151,3 +151,24 @@ def test_web_studio_media_api(web_server):
     data = json.loads(resp.read().decode("utf-8"))
     assert "clips" in data
     assert isinstance(data["clips"], list)
+
+
+def test_web_studio_sensor_feed_cinema(web_server):
+    """Verify compositor loads cinema sensor frame and serves valid frame."""
+    compositor = web_server["studio"].compositor
+    assert compositor.sensor_feed_image is not None
+    assert compositor.sensor_feed_image.size == (1024, 576)
+
+    # Compose frame when camera is powered ON
+    frame = compositor.compose_frame()
+    assert frame.size == (1024, 576)
+
+
+def test_web_studio_responsive_layout(web_server):
+    """Verify HTML serves top-screen layout with responsive 16:9 aspect ratio and full-width workbench."""
+    url = web_server["url"] + "/"
+    resp = urllib.request.urlopen(url)
+    html = resp.read().decode("utf-8")
+    assert "aspect-ratio: 16 / 9" in html
+    assert "tactile-deck" in html
+    assert "workbench" in html

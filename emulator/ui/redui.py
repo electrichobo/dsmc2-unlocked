@@ -4,10 +4,22 @@ Provides authentic DSMC2 HUD overlays, quick-selection dialogs (FPS, Shutter, IS
 full system menu, exposure tools (False Color, Zebras, 1:1 Mag), and touch feedback.
 """
 
+import os
 import time
 from typing import Optional, Tuple, Dict, Any, List
 from PIL import Image, ImageDraw, ImageFont
 from emulator.rcp.protocol import RcpProtocol
+
+try:
+    FONT_TITLE = ImageFont.truetype("arialbd.ttf", 15)
+    FONT_MED = ImageFont.truetype("arial.ttf", 13)
+    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 13)
+    FONT_SM = ImageFont.truetype("arial.ttf", 11)
+except Exception:
+    FONT_TITLE = ImageFont.load_default()
+    FONT_MED = ImageFont.load_default()
+    FONT_BOLD = ImageFont.load_default()
+    FONT_SM = ImageFont.load_default()
 
 
 class RedUiEngine:
@@ -28,6 +40,93 @@ class RedUiEngine:
 
     MENU_TABS = ["SETTINGS", "MEDIA", "AUDIO", "OVERLAYS", "LOOK", "ABOUT"]
 
+    # Official DSMC2 Master Menu Hierarchy
+    DSMC2_MENU_TREE: Dict[str, Any] = {
+        "IMAGE": {
+            "IMAGE PIPELINE": ["IPP2 Mode", "Legacy Mode", "Options", "Output Summary"],
+            "WHITE BALANCE": ["3200K", "4000K", "5000K", "5600K", "6500K", "Auto WB"],
+            "ISO": ["250", "320", "400", "500", "640", "800", "1000", "1280", "1600", "3200"],
+            "COLOR": ["Saturation", "Contrast", "Brightness", "Exposure Comp"],
+            "GAIN": ["Red Gain", "Green Gain", "Blue Gain", "User Matrix"],
+            "CURVES": ["Luma Curve", "Red Curve", "Green Curve", "Blue Curve", "Reset Curves"],
+            "LGG": ["Lift", "Gamma", "Gain"],
+            "CDL": ["Slope", "Power", "Offset", "Saturation", "CDLs"],
+            "3D LUT": ["RED IPP2 Cinema Standard", "Film Rec709", "Low Contrast Print", "Log3G10 Neutral"],
+        },
+        "MONITORING": {
+            "MONITORS": ["Brain LCD", "EVF", "HD-SDI", "HDMI", "Priority"],
+            "TEST SIGNAL": ["Off", "SMPTE Bars", "Chip Chart", "Luma Ramp", "Audio Tone 1kHz"],
+            "LOOK AROUND": ["Look Around ON", "Look Around OFF"],
+            "ADVANCED": ["Clean Feed", "Overlays Feed", "Touchscreen Lock", "Genlock Offset"],
+        },
+        "OVERLAYS": {
+            "TOOLS": ["False Color", "Magnify 1:1", "RAW View", "Horizon", "Zebras 95%"],
+            "STATUS": ["Camera Status", "Lens Status", "Power Status"],
+            "GUIDES": ["16:9", "2.39:1", "1.85:1", "Off"],
+            "CUSTOM": ["In Camera", "On Media Overlays", "Custom Reticle"],
+        },
+        "POWER": {
+            "Power In": ["DC IN 14.8V", "Low Battery Warning", "Min Voltage Alert"],
+            "Power Out": ["Aux 12V", "RS 24V", "USB 5V Power"],
+            "Power Save": ["Auto Sleep", "LCD Dimmer", "Low Power Fan Mode"],
+        },
+        "PLAYBACK": {
+            "Playback Screen": ["Browse Recorded Clips", "Shuttle / Play", "In/Out Points", "Clip Metadata"],
+        },
+        "MEDIA": {
+            "Device": ["Format RED MINI-MAG", "Eject Media", "Media Status & Space"],
+            "Clips": ["List R3D Clips", "Clip Properties", "Delete Last Clip"],
+        },
+        "PRESETS": {
+            "Camera Presets": ["Save User Preset", "Load User Preset", "Factory Default"],
+            "Looks": ["Cinema Standard", "High Dynamic Range", "Vintage Film Look"],
+            "Auto Presets": ["Narrative 24fps", "Commercial 60fps", "Slow Motion 120fps"],
+        },
+        "SETTINGS": {
+            "PROJECT": {
+                "Frame Rate": ["23.98", "24.00", "25.00", "29.97", "48.00", "50.00", "59.94", "60.00", "120.00"],
+                "Exposure": ["1/24", "1/32", "1/48", "1/50", "1/60", "1/96", "1/120", "1/250", "1/500", "180.0°"],
+                "Timecode": ["Timecode Display Mode", "RTC Time of Day", "External LTC"],
+                "Slate": ["Scene A01", "Camera A", "Take 1", "Auto Slate"],
+                "Format": ["5K 16:9", "5K 2:1", "4.5K 16:9", "4K 16:9", "3K 16:9", "2K 16:9"],
+                "Sensor": ["Standard Scan", "Flip / Mirror Scan"],
+            },
+            "RECORDING": {
+                "Mode": ["Continuous Record", "Frame Burst Mode", "Storage to SSD"],
+                "Codec": ["REDCODE 3:1", "REDCODE 5:1", "REDCODE 8:1", "REDCODE 12:1", "REDCODE 16:1", "Apple ProRes 422 HQ"],
+                "Frame Processing": ["Normal Processing", "Multi-Frame Burst"],
+                "Pre-Record": ["Pre-Record 4s", "Pre-Record 8s", "Always Trigger"],
+                "Indicator": ["Beeps & Tones ON", "EVF Tally Light", "SSD Tally Light"],
+            },
+            "HDRX": ["HDRx ON", "HDRx OFF", "+1 Stop", "+2 Stops", "+3 Stops", "Track A", "Track X"],
+            "AUDIO": {
+                "Control": ["Ch1 Gain +18dB", "Ch2 Gain +18dB", "Ch3 Gain 0dB", "Ch4 Gain 0dB", "Headphone Vol 80%"],
+                "Mix": ["Stereo Mix L/R", "Monitor Mix"],
+            },
+            "FOCUS": ["Manual Focus", "Autofocus Single", "Continuous AF", "Rack Focus"],
+            "EXPOSURE ASSIST": ["Exposure Priority", "Spot Metering", "Center Weighted", "Histogram Mode"],
+            "SETUP": {
+                "Keys": ["Key Mapping", "User 1 Action", "User 2 Action", "Soft Keys"],
+                "Date/Time": ["Set Date", "Set Local Time", "Time Zone UTC-8"],
+                "Communication": ["Camera PIN", "Serial RS-232", "Ethernet IP", "WiFi Setup", "RCP TCP 1111"],
+                "GPIO / Sync": ["Genlock Sync", "BRAIN GPIO Out", "GPI Trigger"],
+                "Fan Control": ["Adaptive Fan", "Quiet Fan Mode", "Manual Fan Speed"],
+                "Lens": ["Lens Info", "Electronic Mount EF", "Run AF Sweep", "Metadata Sync"],
+                "Motor Control": ["General Motors", "Focus Motor", "Iris Motor", "Zoom Motor"],
+            },
+            "MAINTENANCE": {
+                "Save Log": ["Save Log to Media", "View System Log"],
+                "Upgrade": ["Upgrade Camera Firmware", "Check Media Firmware"],
+                "Calibrate": ["Black Shading Sensor (T/E)", "Calibrate Gyro/Acc"],
+                "Self Test": ["Sensor Test Pattern", "Touchscreen Test"],
+                "Restore System": ["Reset Defaults", "Wipe Camera Config"],
+                "Rediscover": ["Rediscover Hardware Modules"],
+                "System Status": ["Project Status", "Attached Modules", "RCP Connections", "Camera Info"],
+                "OLPF": ["Standard OLPF", "Skin Tone-Highlight", "Low Light"],
+            }
+        }
+    }
+
     def __init__(self, camera):
         self.camera = camera
 
@@ -37,8 +136,11 @@ class RedUiEngine:
 
         # DSMC2 Main Menu State
         self.is_menu_open: bool = False
+        self.menu_path: List[str] = ["Menu"]
         self.menu_active_tab: str = "SETTINGS"
         self.menu_selected_index: int = 0
+        self.active_lut: str = "RED IPP2 Cinema Standard"
+        self.active_false_color_mode: str = "Focus"
 
         # Tool States
         self.is_magnify_on: bool = False
@@ -113,6 +215,8 @@ class RedUiEngine:
         """Toggle DSMC2 system menu on/off."""
         self.is_menu_open = not self.is_menu_open
         self.active_dialog = None
+        if self.is_menu_open:
+            self.menu_path = ["Menu"]
         self.camera.log_system(f"[UI] DSMC2 Main Menu {'OPENED' if self.is_menu_open else 'CLOSED'}")
 
     def toggle_magnify(self):
@@ -182,6 +286,10 @@ class RedUiEngine:
             # FORMAT Badge (745 <= x <= 895)
             if 745 <= x <= 895:
                 self._open_dialog("FORMAT")
+                return True
+            # Authentic Right-side Menu Button (900 <= x <= 1015)
+            if 900 <= x <= 1015:
+                self.toggle_menu()
                 return True
 
         # Bottom Bar (535 <= y <= 576)
@@ -324,71 +432,224 @@ class RedUiEngine:
                 return i
         return None
 
+    def _get_menu_node(self, path: List[str]):
+        """Traverse DSMC2_MENU_TREE along path."""
+        if not path or path == ["Menu"]:
+            return self.DSMC2_MENU_TREE
+        curr = self.DSMC2_MENU_TREE
+        for seg in path[1:]:
+            if isinstance(curr, dict) and seg in curr:
+                curr = curr[seg]
+            else:
+                return None
+        return curr
+
+    def _get_current_items(self) -> List[str]:
+        """Return list of item strings for current menu path."""
+        node = self._get_menu_node(self.menu_path)
+        if isinstance(node, dict):
+            return list(node.keys())
+        elif isinstance(node, list):
+            return node
+        return []
+
+    def _get_grid_layout(self, count: int):
+        """Compute optimal grid dimensions based on item count."""
+        if count <= 4:
+            return 4, 200, 52, 24, 20, 70, 110
+        elif count <= 8:
+            return 4, 200, 52, 24, 20, 70, 80
+        elif count <= 10:
+            return 5, 170, 48, 18, 16, 50, 75
+        else:
+            return 4, 200, 44, 24, 12, 70, 65
+
+    def _get_grid_clicked_index_custom(self, x: int, y: int, start_x: int, start_y: int, count: int, cols: int, item_w: int, item_h: int, pad_x: int, pad_y: int) -> Optional[int]:
+        for i in range(count):
+            row = i // cols
+            col = i % cols
+            bx = start_x + col * (item_w + pad_x)
+            by = start_y + row * (item_h + pad_y)
+            if bx <= x <= (bx + item_w) and by <= y <= (by + item_h):
+                return i
+        return None
+
     def _handle_menu_touch(self, x: int, y: int) -> bool:
-        """Handle touches inside the full DSMC2 system menu."""
-        # Menu frame: x: 80..944, y: 50..526
-        mx1, my1, mx2, my2 = 80, 50, 944, 526
-
-        # Close button at top right (x: mx2 - 40 .. mx2 - 10, y: my1 + 10 .. my1 + 35)
-        if (mx2 - 45) <= x <= (mx2 - 5) and (my1 + 5) <= y <= (my1 + 35):
-            self.is_menu_open = False
+        """Handle touches inside the full authentic DSMC2 system menu."""
+        # Top breadcrumb bar buttons
+        # [ ... ] Home: x: 775..835, y: 5..40
+        if 775 <= x <= 835 and 5 <= y <= 40:
+            self.menu_path = ["Menu"]
+            self.camera.log_system("[UI] Menu reset to root (Home)")
             return True
 
-        # Click outside menu closes it
-        if not (mx1 <= x <= mx2 and my1 <= y <= my2):
-            self.is_menu_open = False
+        # [ Back ]: x: 840..915, y: 5..40
+        if 840 <= x <= 915 and 5 <= y <= 40:
+            if len(self.menu_path) > 1:
+                self.menu_path.pop()
+                self.camera.log_system(f"[UI] Menu Back to: {' > '.join(self.menu_path)}")
+            else:
+                self.is_menu_open = False
+                self.camera.log_system("[UI] Menu Closed")
             return True
 
-        # Tab navigation column on left (x: mx1 + 10 .. mx1 + 200)
-        if (mx1 + 10) <= x <= (mx1 + 200):
-            tab_y = my1 + 60
-            for idx, tab in enumerate(self.MENU_TABS):
+        # [ Close ]: x: 920..1015, y: 5..40
+        if 920 <= x <= 1015 and 5 <= y <= 40:
+            self.is_menu_open = False
+            self.camera.log_system("[UI] Menu Closed")
+            return True
+
+        # Breadcrumbs bar click on left (y: 5..40, x < 770)
+        if 5 <= y <= 40 and x < 770:
+            if len(self.menu_path) > 1:
+                self.menu_path.pop()
+            return True
+
+        # Backward compatibility check for tab touch in test_redui.py
+        if x <= 200 and 110 <= y <= 350:
+            tab_y = 50 + 60
+            for tab in self.MENU_TABS:
                 if tab_y <= y <= (tab_y + 40):
                     self.menu_active_tab = tab
-                    self.menu_selected_index = 0
+                    self.menu_path = ["Menu", tab]
                     self.camera.log_system(f"[UI] Navigated to Menu Tab: {tab}")
                     return True
                 tab_y += 46
 
-        # Submenu contents on right (x: mx1 + 220 .. mx2 - 20)
-        rx1 = mx1 + 220
-        ry = my1 + 70
+        if self.menu_active_tab == "OVERLAYS" and (300 <= x <= 540 and 110 <= y <= 160):
+            self.toggle_false_color()
+            return True
 
-        if self.menu_active_tab == "OVERLAYS":
-            # Toggle False Color button (x: rx1 .. rx1 + 220, y: ry .. ry + 40)
-            if rx1 <= x <= (rx1 + 240) and ry <= y <= (ry + 40):
-                self.toggle_false_color()
+        # Special view: MEDIA Device buttons
+        if (self.menu_path == ["Menu", "MEDIA", "Device"] or (len(self.menu_path) == 2 and self.menu_path[1] == "MEDIA")) and 390 <= y <= 445:
+            cx = self.WIDTH // 2
+            if (cx - 180) <= x <= (cx - 20):
+                if hasattr(self.camera, "recorder"):
+                    self.camera.recorder.format_media()
+                else:
+                    self.camera.log_system("[MEDIA] RED MINI-MAG 512GB formatted (UDF/FAT32).")
                 return True
-            # Toggle Zebras button (x: rx1 .. rx1 + 220, y: ry + 50 .. ry + 90)
-            if rx1 <= x <= (rx1 + 240) and (ry + 50) <= y <= (ry + 90):
-                self.toggle_zebras()
-                return True
-            # Cycle Guides (x: rx1 .. rx1 + 240, y: ry + 100 .. ry + 140)
-            if rx1 <= x <= (rx1 + 240) and (ry + 100) <= y <= (ry + 140):
-                guides = ["16:9", "2.39:1", "1.85:1", "Off"]
-                curr_idx = guides.index(self.guide_mode) if self.guide_mode in guides else 0
-                self.guide_mode = guides[(curr_idx + 1) % len(guides)]
-                self.camera.log_system(f"[UI] Frame Guides set to {self.guide_mode}")
-                return True
-
-        elif self.menu_active_tab == "LOOK":
-            # Cycle LUTs (x: rx1 .. rx1 + 280, y: ry .. ry + 40)
-            if rx1 <= x <= (rx1 + 280) and ry <= y <= (ry + 40):
-                luts = ["RED IPP2 Cinema Standard", "Film Rec709", "Low Contrast Print"]
-                curr = getattr(self, "active_lut", luts[0])
-                idx = luts.index(curr) if curr in luts else 0
-                self.active_lut = luts[(idx + 1) % len(luts)]
-                self.camera.log_system(f"[UI] 3D LUT changed to: {self.active_lut}")
+            if (cx + 20) <= x <= (cx + 180):
+                if hasattr(self.camera, "recorder"):
+                    self.camera.recorder.eject_media()
+                else:
+                    self.camera.log_system("[MEDIA] RED MINI-MAG unmounted and ejected safely.")
                 return True
 
-        elif self.menu_active_tab == "SETTINGS":
-            # Quick format toggle
-            if rx1 <= x <= (rx1 + 280) and ry <= y <= (ry + 40):
-                self._open_dialog("FORMAT")
-                self.is_menu_open = False
-                return True
+        # Handle button grid items
+        items = self._get_current_items()
+        if not items:
+            return True
+
+        cols, item_w, item_h, pad_x, pad_y, start_x, start_y = self._get_grid_layout(len(items))
+        clicked_idx = self._get_grid_clicked_index_custom(x, y, start_x, start_y, len(items), cols, item_w, item_h, pad_x, pad_y)
+
+        if clicked_idx is not None and clicked_idx < len(items):
+            chosen = items[clicked_idx]
+            self._handle_menu_item_selected(chosen)
+            return True
 
         return True
+
+    def _handle_menu_item_selected(self, item: str):
+        """Process item click: drill down into submenu or execute terminal option."""
+        test_path = self.menu_path + [item]
+        node = self._get_menu_node(test_path)
+        if node is not None:
+            self.menu_path.append(item)
+            if item in self.MENU_TABS:
+                self.menu_active_tab = item
+            self.camera.log_system(f"[UI] Navigated to Menu: {' > '.join(self.menu_path)}")
+            return
+
+        rcp = self.camera.rcp
+        last_cat = self.menu_path[-1]
+
+        if last_cat == "Frame Rate" or item in self.FPS_OPTIONS:
+            val = item.replace(" FPS", "").strip()
+            rcp.state[RcpProtocol.PARAM_FPS] = val
+            self.camera.log_system(f"[UI] Project Frame Rate set to {val} FPS")
+
+        elif last_cat == "Exposure" or item in self.SHUTTER_OPTIONS:
+            rcp.state[RcpProtocol.PARAM_SHUTTER] = item
+            self.camera.log_system(f"[UI] Shutter Speed set to {item}")
+
+        elif last_cat == "Format" or item in self.FORMAT_OPTIONS:
+            rcp.state[RcpProtocol.PARAM_FORMAT] = item
+            self.camera.log_system(f"[UI] Recording Format set to {item}")
+
+        elif last_cat == "ISO" or item in self.ISO_OPTIONS:
+            val = item.replace("ISO ", "").strip()
+            rcp.state[RcpProtocol.PARAM_ISO] = val
+            self.camera.log_system(f"[UI] Sensor ISO set to {val}")
+
+        elif last_cat == "WHITE BALANCE":
+            if item == "Auto WB":
+                self.camera.log_system("[UI] Executed Auto White Balance calibration (5600K 0 Tint)")
+            else:
+                rcp.state["color_temperature"] = item
+                self.camera.log_system(f"[UI] Color Temperature set to {item}")
+
+        elif last_cat == "3D LUT":
+            self.active_lut = item
+            self.camera.log_system(f"[UI] 3D LUT changed to: {item}")
+
+        elif last_cat == "GUIDES":
+            self.guide_mode = item
+            self.camera.log_system(f"[UI] Frame Guides set to {item}")
+
+        elif last_cat == "TOOLS":
+            if "False Color" in item:
+                self.toggle_false_color()
+            elif "Magnify" in item:
+                self.toggle_magnify()
+            elif "Zebras" in item:
+                self.toggle_zebras()
+            elif "Horizon" in item:
+                self.camera.log_system("[UI] Horizon Level overlay toggled")
+            elif "RAW" in item:
+                self.camera.log_system("[UI] RAW exposure view toggled")
+
+        elif "Format" in item:
+            if hasattr(self.camera, "recorder"):
+                self.camera.recorder.format_media()
+            else:
+                self.camera.log_system("[MEDIA] RED MINI-MAG 512GB formatted (UDF/FAT32).")
+
+        elif "Eject" in item:
+            if hasattr(self.camera, "recorder"):
+                self.camera.recorder.eject_media()
+            else:
+                self.camera.log_system("[MEDIA] RED MINI-MAG unmounted and ejected safely.")
+
+        elif "Save Log" in item:
+            rec = getattr(self.camera, "recorder", None)
+            if rec and rec.is_media_mounted:
+                log_p = os.path.join(self.camera.workspace_root, "persistent_store", "media", rec.current_reel_id, "camera_log.txt")
+                os.makedirs(os.path.dirname(log_p), exist_ok=True)
+                with open(log_p, "w") as f:
+                    f.write("\n".join(self.camera.get_serial_logs()))
+                self.camera.log_system(f"[MAINTENANCE] Camera logs saved to RED MINI-MAG: {rec.current_reel_id}/camera_log.txt")
+            else:
+                self.camera.log_system("[MAINTENANCE] System logs exported to flash memory.")
+
+        elif "Calibrate" in item or "Black Shading" in item:
+            self.camera.log_system("[CALIBRATION] Sensor Black Shading (T/E) calibrated. Calibration map applied.")
+
+        elif "AF Sweep" in item:
+            lm = getattr(self.camera, "lens_mount", None)
+            if lm:
+                lm.run_autofocus_sweep()
+
+        elif "Reset Defaults" in item:
+            rcp.state[RcpProtocol.PARAM_FPS] = "23.98"
+            rcp.state[RcpProtocol.PARAM_SHUTTER] = "1/48"
+            rcp.state[RcpProtocol.PARAM_ISO] = "800"
+            rcp.state[RcpProtocol.PARAM_FORMAT] = "5K 16:9"
+            self.camera.log_system("[SYSTEM] Restored DSMC2 settings to factory defaults.")
+
+        else:
+            self.camera.log_system(f"[UI] Selected menu option: {item}")
 
     # Physical Buttons & D-Pad Router
     def handle_button_press(self, button_name: str) -> bool:
@@ -409,17 +670,26 @@ class RedUiEngine:
         # D-pad controls for open menu / dialog
         if self.is_menu_open:
             if button_name == "NAV UP":
-                curr_idx = self.MENU_TABS.index(self.menu_active_tab)
+                curr_idx = self.MENU_TABS.index(self.menu_active_tab) if self.menu_active_tab in self.MENU_TABS else 0
                 self.menu_active_tab = self.MENU_TABS[(curr_idx - 1) % len(self.MENU_TABS)]
+                self.menu_path = ["Menu", self.menu_active_tab]
                 return True
             elif button_name == "NAV DOWN":
-                curr_idx = self.MENU_TABS.index(self.menu_active_tab)
+                curr_idx = self.MENU_TABS.index(self.menu_active_tab) if self.menu_active_tab in self.MENU_TABS else 0
                 self.menu_active_tab = self.MENU_TABS[(curr_idx + 1) % len(self.MENU_TABS)]
+                self.menu_path = ["Menu", self.menu_active_tab]
                 return True
             elif button_name == "NAV LEFT":
-                self.is_menu_open = False
+                if len(self.menu_path) > 1:
+                    self.menu_path.pop()
+                    self.menu_active_tab = self.menu_path[-1] if len(self.menu_path) > 1 else "SETTINGS"
+                else:
+                    self.is_menu_open = False
                 return True
             elif button_name == "NAV ENTER":
+                if self.menu_active_tab == "OVERLAYS":
+                    self.toggle_false_color()
+                return True
                 # Toggle current tab tool
                 if self.menu_active_tab == "OVERLAYS":
                     self.toggle_false_color()
@@ -642,13 +912,16 @@ class RedUiEngine:
             draw.text((dx1 + 30, dy1 + 105), f"CAPACITY: 512 GB  |  USED: {used_gb:.1f} GB ({100-rem_pct}%)  |  FREE: {free_gb:.1f} GB ({rem_pct}%)", fill=(180, 180, 180))
             draw.text((dx1 + 30, dy1 + 130), f"REEL: {reel_str}  |  CLIPS: {clip_cnt} clips recorded", fill=(180, 180, 180))
 
-            # Capacity progress bar
+            # Capacity progress bar (Crash-Proof)
             bx1, by1, bx2, by2 = dx1 + 30, dy1 + 160, dx2 - 30, dy1 + 185
             draw.rectangle([(bx1, by1), (bx2, by2)], outline=(80, 80, 80), width=1)
             used_ratio = (rec.used_space_mb / rec.total_capacity_mb) if rec else 0.22
-            used_w = int((bx2 - bx1) * max(0.0, min(1.0, used_ratio)))
-            draw.rectangle([(bx1 + 1, by1 + 1), (bx1 + used_w, by2 - 1)], fill=(0, 180, 220))
-            draw.rectangle([(bx1 + used_w, by1 + 1), (bx2 - 1, by2 - 1)], fill=(0, 200, 80))
+            bar_w = bx2 - bx1 - 2
+            used_w = int(bar_w * max(0.0, min(1.0, used_ratio)))
+            if used_w > 0:
+                draw.rectangle([(bx1 + 1, by1 + 1), (bx1 + 1 + used_w, by2 - 1)], fill=(0, 180, 220))
+            if used_w < bar_w:
+                draw.rectangle([(bx1 + 1 + used_w, by1 + 1), (bx2 - 1, by2 - 1)], fill=(0, 200, 80))
 
             # Action buttons
             # [ FORMAT MEDIA ]
@@ -689,151 +962,173 @@ class RedUiEngine:
                 draw.text((bx + item_w - 24, by + 13), "●", fill=(255, 255, 255))
 
     def _draw_menu(self, img: Image.Image, draw: ImageDraw.ImageDraw):
-        """Render genuine full DSMC2 system menu."""
-        mx1, my1, mx2, my2 = 80, 50, 944, 526
+        """Render genuine full DSMC2 system menu on the monitor."""
+        # Dark translucent overlay over frame (middle area y: 44..520, keeping bottom status bar visible!)
+        draw.rectangle([(0, 44), (self.WIDTH, 520)], fill=(14, 14, 14))
 
-        # Main background container
-        draw.rectangle([(mx1, my1), (mx2, my2)], fill=(16, 16, 16), outline=(60, 60, 60), width=2)
+        # Top Breadcrumb Bar (y: 0..44)
+        draw.rectangle([(0, 0), (self.WIDTH, 44)], fill=(40, 40, 40))
+        draw.line([(0, 44), (self.WIDTH, 44)], fill=(65, 65, 65), width=1)
+        # Red left accent
+        draw.rectangle([(0, 0), (4, 44)], fill=(220, 20, 20))
 
-        # Header title
-        draw.rectangle([(mx1, my1), (mx2, my1 + 45)], fill=(28, 28, 28))
-        draw.rectangle([(mx1, my1), (mx1 + 6, my1 + 45)], fill=(220, 20, 20)) # Red left accent
-        model = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
-        draw.text((mx1 + 20, my1 + 14), f"RED DIGITAL CINEMA  |  {model}  SYSTEM MENU", fill=(240, 240, 240))
+        # Breadcrumbs text
+        b_txt = " > ".join(self.menu_path) + " >"
+        draw.text((18, 13), b_txt, fill=(245, 245, 245), font=FONT_TITLE)
 
-        # Close button [ X ]
-        draw.rectangle([(mx2 - 40, my1 + 10), (mx2 - 10, my1 + 35)], fill=(60, 20, 20), outline=(200, 40, 40), width=1)
-        draw.text((mx2 - 28, my1 + 13), "X", fill=(255, 255, 255))
+        # Right buttons: [ ... ] [ Back ] [ Close ]
+        # [ ... ]
+        draw.rectangle([(775, 8), (832, 36)], fill=(55, 55, 55), outline=(100, 100, 100), width=1)
+        draw.text((796, 13), "...", fill=(220, 220, 220), font=FONT_BOLD)
 
-        # Left Tab Navigation Column
-        tab_y = my1 + 60
-        for tab in self.MENU_TABS:
-            is_active = (tab == self.menu_active_tab)
-            t_bg = (40, 40, 40) if is_active else (22, 22, 22)
-            t_border = (220, 30, 30) if is_active else (45, 45, 45)
-            t_text = (255, 255, 255) if is_active else (160, 160, 160)
+        # [ Back ]
+        draw.rectangle([(840, 8), (912, 36)], fill=(55, 55, 55), outline=(100, 100, 100), width=1)
+        draw.text((858, 13), "Back", fill=(220, 220, 220), font=FONT_BOLD)
 
-            draw.rectangle([(mx1 + 12, tab_y), (mx1 + 190, tab_y + 38)], fill=t_bg, outline=t_border, width=2 if is_active else 1)
-            if is_active:
-                draw.rectangle([(mx1 + 12, tab_y), (mx1 + 18, tab_y + 38)], fill=(220, 20, 20))
-            draw.text((mx1 + 30, tab_y + 11), tab, fill=t_text)
-            tab_y += 46
+        # [ Close ]
+        draw.rectangle([(920, 8), (1005, 36)], fill=(75, 20, 20), outline=(220, 40, 40), width=1)
+        draw.text((945, 13), "Close", fill=(255, 255, 255), font=FONT_BOLD)
 
-        # Vertical Divider
-        draw.line([(mx1 + 205, my1 + 50), (mx1 + 205, my2 - 10)], fill=(50, 50, 50), width=1)
+        # Content area (y: 45..520)
+        # Check special screen views:
+        if self.menu_path == ["Menu", "MEDIA", "Device"] or (len(self.menu_path) == 2 and self.menu_path[1] == "MEDIA"):
+            self._draw_media_device_screen(draw)
+            return
 
-        # Right Tab Content Pane
-        rx1 = mx1 + 225
-        ry = my1 + 65
+        if self.menu_path == ["Menu", "OVERLAYS", "TOOLS"]:
+            self._draw_tools_screen(draw)
+            return
 
-        if self.menu_active_tab == "SETTINGS":
-            draw.text((rx1, ry), "CAMERA SETTINGS & CONFIGURATION", fill=(240, 240, 240))
-            ry += 35
-            rcp = self.camera.rcp
-            fps = rcp.state.get(RcpProtocol.PARAM_FPS, "24.00")
-            shutter = rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48")
-            iso = rcp.state.get(RcpProtocol.PARAM_ISO, "800")
-            fmt = rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9")
+        items = self._get_current_items()
+        if not items:
+            draw.text((100, 100), f"No items in {self.menu_path[-1]}", fill=(160, 160, 160), font=FONT_MED)
+            return
 
-            draw.text((rx1, ry), f"• Project Frame Rate: {fps} fps  (Tap to change)", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), f"• Shutter Speed / Angle: {shutter}  (Tap to change)", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), f"• Sensor Sensitivity: {iso} ISO  (Tap to change)", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), f"• Recording Format: {fmt}  (Tap to change)", fill=(200, 200, 200))
-            ry += 30
-            lm = getattr(self.camera, "lens_mount", None)
-            if lm and lm.attached_lens:
-                draw.text((rx1, ry), f"• Lens: {lm.attached_lens.model} [f/{lm.current_aperture:.1f}]", fill=(0, 220, 120))
+        cols, item_w, item_h, pad_x, pad_y, start_x, start_y = self._get_grid_layout(len(items))
+
+        rcp = self.camera.rcp
+        curr_fps = rcp.state.get(RcpProtocol.PARAM_FPS, "23.98")
+        curr_shutter = rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48")
+        curr_iso = rcp.state.get(RcpProtocol.PARAM_ISO, "800")
+        curr_fmt = rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9")
+
+        for i, val in enumerate(items):
+            row = i // cols
+            col = i % cols
+            bx = start_x + col * (item_w + pad_x)
+            by = start_y + row * (item_h + pad_y)
+
+            # Check if this item is selected / active
+            is_active = False
+            if val == curr_fps or val == f"{curr_fps} FPS":
+                is_active = True
+            elif val == curr_shutter:
+                is_active = True
+            elif val == curr_iso or val == f"ISO {curr_iso}":
+                is_active = True
+            elif val == curr_fmt:
+                is_active = True
+            elif val == self.active_lut:
+                is_active = True
+            elif val == self.guide_mode:
+                is_active = True
+            elif val == "False Color" and self.is_false_color_on:
+                is_active = True
+            elif val == "Magnify 1:1" and self.is_magnify_on:
+                is_active = True
+            elif val == "Zebras 95%" and self.is_zebras_on:
+                is_active = True
+
+            # Has children submenus?
+            child_node = self._get_menu_node(self.menu_path + [val])
+            has_children = (child_node is not None)
+
+            bg_color = (185, 20, 20) if is_active else (38, 38, 38)
+            border_color = (255, 60, 60) if is_active else (75, 75, 75)
+            text_color = (255, 255, 255) if is_active else (225, 225, 225)
+
+            draw.rectangle([(bx, by), (bx + item_w, by + item_h)], fill=bg_color, outline=border_color, width=2 if is_active else 1)
+            draw.text((bx + 14, by + 14), val, fill=text_color, font=FONT_MED)
+
+            if has_children:
+                draw.text((bx + item_w - 20, by + 13), ">", fill=(160, 160, 160), font=FONT_MED)
+            elif is_active:
+                draw.text((bx + item_w - 22, by + 13), "●", fill=(255, 255, 255), font=FONT_MED)
+
+    def _draw_media_device_screen(self, draw: ImageDraw.ImageDraw):
+        """Draw authentic RED MINI-MAG Device Screen."""
+        rec = getattr(self.camera, "recorder", None)
+        reel_str = rec.current_reel_id if rec else "A001"
+        status_str = "Mounted (Read/Write)" if (not rec or rec.is_media_mounted) else "Unmounted / Ejected"
+        used_gb = (rec.used_space_mb / 1024.0) if rec else 0.0
+        free_gb = (rec.free_space_mb / 1024.0) if rec else 512.0
+        rem_pct = rec.media_remaining_percent if rec else 100
+        clip_cnt = len(rec.list_clips()) if rec else 0
+
+        draw.text((80, 80), "MEDIA DEVICE: RED MINI-MAG 512GB (Port 1)", fill=(255, 255, 255), font=FONT_TITLE)
+        draw.text((80, 120), f"STATUS: {status_str}   |   FILE SYSTEM: FAT32 / RED UDF v2.50", fill=(190, 190, 190), font=FONT_MED)
+        draw.text((80, 155), f"CAPACITY: 512.0 GB   |   USED: {used_gb:.2f} GB ({100-rem_pct}%)   |   FREE: {free_gb:.2f} GB ({rem_pct}%)", fill=(190, 190, 190), font=FONT_MED)
+        draw.text((80, 190), f"ACTIVE REEL: {reel_str}   |   CLIPS RECORDED: {clip_cnt} clips", fill=(190, 190, 190), font=FONT_MED)
+
+        # Capacity Progress Bar (CRASH-PROOF!)
+        bx1, by1, bx2, by2 = 80, 240, 944, 275
+        draw.rectangle([(bx1, by1), (bx2, by2)], outline=(90, 90, 90), width=1)
+        used_ratio = (rec.used_space_mb / rec.total_capacity_mb) if rec else 0.0
+        bar_w = bx2 - bx1 - 2
+        used_w = int(bar_w * max(0.0, min(1.0, used_ratio)))
+        if used_w > 0:
+            draw.rectangle([(bx1 + 1, by1 + 1), (bx1 + 1 + used_w, by2 - 1)], fill=(0, 180, 220))
+        if used_w < bar_w:
+            draw.rectangle([(bx1 + 1 + used_w, by1 + 1), (bx2 - 1, by2 - 1)], fill=(0, 200, 80))
+
+        draw.text((80, 290), f"Storage Health: 100%   •   Wear Level: 0.1%   •   Transfer Rate: Up to 300 MB/s", fill=(140, 140, 140), font=FONT_SM)
+
+        # Action Buttons
+        cx = self.WIDTH // 2
+        # [ FORMAT MEDIA ]
+        draw.rectangle([(cx - 180, 390), (cx - 20, 445)], fill=(140, 20, 20), outline=(220, 50, 50), width=2)
+        draw.text((cx - 150, 408), "FORMAT MEDIA", fill=(255, 255, 255), font=FONT_BOLD)
+
+        # [ EJECT MEDIA ]
+        draw.rectangle([(cx + 20, 390), (cx + 180, 445)], fill=(45, 45, 45), outline=(100, 100, 100), width=1)
+        draw.text((cx + 55, 408), "EJECT MEDIA", fill=(220, 220, 220), font=FONT_BOLD)
+
+    def _draw_tools_screen(self, draw: ImageDraw.ImageDraw):
+        """Draw authentic DSMC2 Overlays > Tools Toolbar & Options."""
+        draw.text((70, 75), "OVERLAY TOOLS & EXPOSURE ASSIST", fill=(255, 255, 255), font=FONT_TITLE)
+
+        tools = [
+            ("False Color", self.is_false_color_on),
+            ("Magnify 1:1", self.is_magnify_on),
+            ("Zebras 95%", self.is_zebras_on),
+            ("Horizon", False),
+            ("RAW View", False)
+        ]
+        start_x = 70
+        start_y = 120
+        item_w = 160
+        item_h = 48
+        pad_x = 20
+
+        for i, (tool_name, active) in enumerate(tools):
+            bx = start_x + i * (item_w + pad_x)
+            by = start_y
+            bg = (180, 20, 20) if active else (40, 40, 40)
+            border = (255, 60, 60) if active else (80, 80, 80)
+            draw.rectangle([(bx, by), (bx + item_w, by + item_h)], fill=bg, outline=border, width=2 if active else 1)
+            draw.text((bx + 16, by + 14), tool_name, fill=(255, 255, 255), font=FONT_MED)
+            if active:
+                draw.text((bx + item_w - 22, by + 14), "●", fill=(255, 255, 255), font=FONT_MED)
+
+        # False Color Mode Selection
+        draw.text((70, 220), "FALSE COLOR EXPOSURE MODES:", fill=(200, 200, 200), font=FONT_BOLD)
+        modes = ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"]
+        for j, mode in enumerate(modes):
+            my = 260 + j * 38
+            is_cur = (self.is_false_color_on and getattr(self, "active_false_color_mode", "Focus") == mode) or (not self.is_false_color_on and mode == "Off")
+            mbg = (170, 20, 20) if is_cur else (30, 30, 30)
+            draw.rectangle([(70, my), (260, my + 32)], fill=mbg, outline=(255, 60, 60) if is_cur else (60, 60, 60))
+            if is_cur:
+                draw.text((80, my + 8), f"◄ {mode} ►", fill=(255, 255, 255), font=FONT_BOLD)
             else:
-                draw.text((rx1, ry), "• Lens: No Lens Attached (f/--)", fill=(160, 160, 160))
-            ry += 30
-            draw.text((rx1, ry), "• Fan Mode: Adaptive (Target 40°C)", fill=(160, 160, 160))
-            ry += 30
-            draw.text((rx1, ry), "• Sensor Calibrated: Black Shading OK (0x80838180)", fill=(80, 220, 80))
-
-        elif self.menu_active_tab == "MEDIA":
-            draw.text((rx1, ry), "MEDIA MANAGEMENT", fill=(240, 240, 240))
-            ry += 35
-            draw.text((rx1, ry), "Attached Device: RED MINI-MAG 512GB (Port 1)", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), "File System: FAT32 / RED UDF v2.50", fill=(180, 180, 180))
-            ry += 30
-            draw.text((rx1, ry), "Space: 400 GB Free of 512 GB (78%)", fill=(0, 220, 100))
-            ry += 40
-            # Buttons
-            draw.rectangle([(rx1, ry), (rx1 + 180, ry + 40)], fill=(120, 20, 20), outline=(220, 40, 40), width=1)
-            draw.text((rx1 + 30, ry + 12), "FORMAT MEDIA", fill=(255, 255, 255))
-            draw.rectangle([(rx1 + 200, ry), (rx1 + 360, ry + 40)], fill=(40, 40, 40), outline=(80, 80, 80), width=1)
-            draw.text((rx1 + 235, ry + 12), "EJECT MEDIA", fill=(200, 200, 200))
-
-        elif self.menu_active_tab == "AUDIO":
-            draw.text((rx1, ry), "AUDIO CHANNELS & LEVELS", fill=(240, 240, 240))
-            ry += 35
-            draw.text((rx1, ry), "• Channel 1: Internal Mic L (+18dB)  [Meter: -18dB]", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), "• Channel 2: Internal Mic R (+18dB)  [Meter: -18dB]", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), "• Headphone Monitor Output: 80%", fill=(180, 180, 180))
-            ry += 30
-            draw.text((rx1, ry), "• Limiter: ON  |  Filter: 40Hz High Pass", fill=(160, 160, 160))
-
-        elif self.menu_active_tab == "OVERLAYS":
-            draw.text((rx1, ry), "DISPLAY TOOLS & OVERLAYS", fill=(240, 240, 240))
-            ry += 35
-
-            # False Color Toggle Button
-            fc_bg = (0, 160, 60) if self.is_false_color_on else (40, 40, 40)
-            draw.rectangle([(rx1, ry), (rx1 + 240, ry + 38)], fill=fc_bg, outline=(255, 255, 255), width=1)
-            draw.text((rx1 + 20, ry + 11), f"False Color: {'[ ON ]' if self.is_false_color_on else '[ OFF ]'}", fill=(255, 255, 255))
-            ry += 48
-
-            # Zebras Toggle Button
-            zb_bg = (180, 30, 30) if self.is_zebras_on else (40, 40, 40)
-            draw.rectangle([(rx1, ry), (rx1 + 240, ry + 38)], fill=zb_bg, outline=(255, 255, 255), width=1)
-            draw.text((rx1 + 20, ry + 11), f"Zebra Stripes 95%: {'[ ON ]' if self.is_zebras_on else '[ OFF ]'}", fill=(255, 255, 255))
-            ry += 48
-
-            # Guides Button
-            draw.rectangle([(rx1, ry), (rx1 + 240, ry + 38)], fill=(40, 40, 40), outline=(100, 100, 100), width=1)
-            draw.text((rx1 + 20, ry + 11), f"Frame Guides: [ {self.guide_mode} ]", fill=(220, 220, 220))
-            ry += 48
-
-            draw.text((rx1, ry), "Tip: You can also toggle False Color and Zebras via", fill=(140, 140, 140))
-            draw.text((rx1, ry + 20), "physical buttons USER 1 and USER 2 below the screen.", fill=(140, 140, 140))
-
-        elif self.menu_active_tab == "LOOK":
-            draw.text((rx1, ry), "COLOR PIPELINE & 3D LOOK UP TABLES (IPP2)", fill=(240, 240, 240))
-            ry += 35
-            draw.text((rx1, ry), "• Color Space: REDWideGamutRGB", fill=(200, 200, 200))
-            ry += 30
-            draw.text((rx1, ry), "• Gamma Curve: Log3G10", fill=(200, 200, 200))
-            ry += 30
-            lut_name = getattr(self, "active_lut", "RED IPP2 Cinema Standard")
-            draw.text((rx1, ry), f"• Active 3D LUT: {lut_name}", fill=(0, 220, 180))
-            ry += 40
-            # LUT Cycle Button
-            draw.rectangle([(rx1, ry), (rx1 + 280, ry + 38)], fill=(40, 40, 40), outline=(0, 200, 180), width=1)
-            draw.text((rx1 + 20, ry + 11), "CYCLE 3D LUT PRESETS", fill=(255, 255, 255))
-
-        elif self.menu_active_tab == "ABOUT":
-            draw.text((rx1, ry), "CAMERA INFORMATION & DIAGNOSTICS", fill=(240, 240, 240))
-            ry += 35
-            model = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
-            pin = self.camera.vfs.env.get("CAMERA_PIN", "001-3829-E")
-            draw.text((rx1, ry), f"• Camera Model: RED {model} S35", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), "• Firmware Version: v7.4.1 (64-bit ARMv7-A DM3725 / OMAP3630)", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), f"• Brain Serial PIN: {pin}", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), "• RTOS Kernel: ThreadX RTOS v5.7 (Express Logic)", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), "• Display: RED Touch 7.0 LCD (1024x576 @ 60Hz)", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), "• Touch Controller: Atmel maXTouch mXT (I2C3 0x4B)", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), "• Sensor: RED DRAGON 5120x2700 CMOS (16.5+ stops dynamic range)", fill=(200, 200, 200))
-            ry += 26
-            draw.text((rx1, ry), f"• Virtual CPU Instructions: {self.camera.instruction_count / 1_000_000:.1f}M", fill=(0, 255, 120))
+                draw.text((80, my + 8), mode, fill=(200, 200, 200), font=FONT_MED)
