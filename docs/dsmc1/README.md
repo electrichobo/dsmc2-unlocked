@@ -23,7 +23,7 @@ they just need different tools.
 
 | You see… | Branch | Firmware |
 |---|---|---|
-| EPIC, SCARLET, or DRAGON badge; takes a MINI-MAG or SSD mag; menu like a DSMC2 | **MX / Dragon** | v2 `.bin`, [fw-crypto](../../tools/fw-crypto) |
+| EPIC, SCARLET, or DRAGON badge; takes a MINI-MAG or REDMAG 1.8; menu like a DSMC2 | **MX / Dragon** | v2 `.bin`, [fw-crypto](../../tools/fw-crypto) |
 | RED ONE badge; CF / RED-DRIVE / RAM media; older boxy body | **RED ONE** | `redone.su`, [redone-su](../../tools/redone-su) |
 
 Unsure from the outside? Check the firmware file the body accepts: a `DSMC`-magic
