@@ -8,12 +8,13 @@ This repository documents *what the platform is*, *what is possible* with it, an
 *how to do it*. It publishes the keys, the methods, the access steps, and working
 tools, so that owners can maintain hardware RED no longer sells.
 
-> **Status (2026-11).** A custom DSMC2 firmware — production and dev images — is **in
-> development**. The platform is fully mapped; what remains is hardening and on-camera
-> verification so the result is safe and recoverable. **Please do not patch or flash your
-> own camera from this material yet** — it is not finished or verified, and an early-boot
-> change applied wrongly can stop a body booting. The build and a clear procedure will be
-> announced here when ready. See [docs/custom-fw/builds.md](docs/custom-fw/builds.md).
+> **Status (2026-11).** A custom DSMC2 firmware — production and dev images — has **booted
+> and run on a camera**. The method is proven on hardware, not just mapped. What remains is
+> the *release*: the hardening and recovery tooling that make a flash safe and reversible
+> for owners who are not the author. **Please do not patch or flash your own camera from
+> this material yet** — a verified build is not the same as a finished one, and an
+> early-boot change applied wrongly can stop a body booting. The safe build and a clear
+> procedure will be announced here when ready. See [docs/custom-fw/builds.md](docs/custom-fw/builds.md).
 
 ## Roadmap & status
 
@@ -23,8 +24,9 @@ tools, so that owners can maintain hardware RED no longer sells.
 - **In progress** — a custom firmware in two flavours: a **production** image (safe,
   repair-positive fixes only) and a **dev** image (engineering tools). See
   [docs/custom-fw/builds.md](docs/custom-fw/builds.md) and [docs/whats-possible.md](docs/whats-possible.md).
-- **Not yet** — do not self-patch from this material; the safe, recoverable build and its
-  procedure are still being finished and verified on hardware.
+- **Not yet** — do not self-patch from this material. A custom image has booted on a body,
+  so the method is verified; the safe, recoverable build and its procedure are still being
+  finished.
 - **Follow it** — a Discord tracks this work and the build's release; for an invite or any
   question, email **radosek@pm.me** (see [Community & contact](#community--contact)).
 
@@ -106,9 +108,10 @@ is a package **signing** key — the camera holds none, so nobody has it — but
 signing is not required for any of the above, because the bootloader does not
 verify the installed image. See [docs/firmware/keys.md](docs/firmware/keys.md).
 
-The one thing still in progress is the **custom firmware build itself** — the research
-is complete, but the shippable, verified, recoverable image is not done yet. Do not
-self-patch from these notes in the meantime; wait for the announced build.
+The one thing still in progress is the **custom firmware build itself** — the research is
+complete and a custom image has booted on a camera, but the shippable, recoverable image an
+owner can flash safely is not done yet. Do not self-patch from these notes in the meantime;
+wait for the announced build.
 
 ## Community & contact
 

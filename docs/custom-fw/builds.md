@@ -1,6 +1,7 @@
 # Custom firmware — status and what is coming
 
-A custom DSMC2 firmware is **in development**. This page states where it stands and what
+A custom DSMC2 firmware **has booted and run on a camera** — the method is proven on
+hardware. The *release* is still in development. This page states where it stands and what
 it will do. It is a status page, **not a build-it-yourself guide** — see the safety note
 at the bottom.
 
@@ -30,15 +31,18 @@ Two flavours over the same base:
 
 The platform is fully mapped: the package format, the loader behaviour, the whole
 application, the capability system, media, calibration, and the injection method are all
-understood — there are no unknowns left in the way of the build. What remains is
-finishing, hardening, and **on-camera verification** so that what ships is safe and
-recoverable by design. The build will be announced here when it is ready.
+understood — there are no unknowns left in the way of the build. **On-camera verification
+has now happened: a custom image booted and ran on a real body.** So the method is proven,
+not theoretical. What remains is **finishing and hardening** — the tooling that makes a
+flash safe and recoverable by design for an owner who is not the author. The build will be
+announced here when it is ready.
 
 ## Please do not patch your own camera yet
 
 This is the important part. **Do not attempt to patch or flash your own body from the
-material in this repository.** The work is not finished and not yet verified end-to-end
-on hardware, and an early-boot change applied the wrong way can leave a camera that will
-not start. The safe, recoverable build — with the tooling that enforces that safety — is
-still in progress. When it is ready it will be published here, with a clear procedure.
-Until then, treat these pages as *what is understood*, not as instructions to run.
+material in this repository.** That a custom image has booted on a camera does not make it
+finished — a proven method is not a safe, recoverable release. An early-boot change applied
+the wrong way can still leave a camera that will not start. The safe, recoverable build —
+with the tooling that enforces that safety — is still in progress. When it is ready it will
+be published here, with a clear procedure. Until then, treat these pages as *what is
+understood*, not as instructions to run.

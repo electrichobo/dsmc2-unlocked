@@ -63,8 +63,9 @@ keys, and tools behind them are in [docs/keys.md](firmware/keys.md),
 A **custom firmware** build is in progress ([builds.md](custom-fw/builds.md)). The platform is
 fully understood — package format, bootloader, the whole application, the capability
 system, media, calibration, and the code-injection method ([code-injection.md](custom-fw/code-injection.md))
-are all mapped, so nothing unknown stands in the way. What remains is finishing,
-hardening, and on-camera verification. Planned additions:
+are all mapped, so nothing unknown stands in the way. A custom image has now **booted and
+run on a camera**, so the method is proven on hardware; what remains is finishing and
+hardening the shippable build. Planned additions:
 
 - **New anamorphic de-squeeze ratios** beyond the stock set.
 - **In-camera IPP2 on original-DRAGON bodies** (e.g. SCARLET-W) — the colour
