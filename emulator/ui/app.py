@@ -25,18 +25,18 @@ class Dsmc2DesktopApp:
         # Initialize root window
         self.root = tk.Tk()
         self.root.title("RED DSMC2 Full-System Emulator — Virtual Camera & Engineering Workbench")
-        self.root.geometry("1400 drainage 900".replace("drainage", "x"))
+        self.root.geometry("1400x900")
         self.root.minsize(1100, 750)
         self.root.configure(bg="#1E1E1E")
 
         # Styling
         self._setup_style()
 
-        # Build Menu Bar
-        self._build_menu()
-
         # Build Main Panels
         self._build_layout()
+
+        # Build Menu Bar
+        self._build_menu()
 
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -66,8 +66,8 @@ class Dsmc2DesktopApp:
         file_menu = tk.Menu(menubar, tearoff=0, bg="#2B2B2B", fg="#FFFFFF")
         file_menu.add_command(label="Open Firmware Slot...", command=self._open_firmware)
         file_menu.add_separator()
-        file_menu.add_command(label="Save Snapshot...", command=self.dashboard._save_snapshot_dialog)
-        file_menu.add_command(label="Restore Snapshot...", command=self.dashboard._restore_snapshot_dialog)
+        file_menu.add_command(label="Save Snapshot...", command=lambda: self.dashboard._save_snapshot_dialog())
+        file_menu.add_command(label="Restore Snapshot...", command=lambda: self.dashboard._restore_snapshot_dialog())
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -82,8 +82,8 @@ class Dsmc2DesktopApp:
 
         # Tools Menu
         tools_menu = tk.Menu(menubar, tearoff=0, bg="#2B2B2B", fg="#FFFFFF")
-        tools_menu.add_command(label="Refresh ThreadX RTOS", command=self.dashboard.refresh_threads)
-        tools_menu.add_command(label="Refresh MMIO Tracker", command=self.dashboard.refresh_mmio)
+        tools_menu.add_command(label="Refresh ThreadX RTOS", command=lambda: self.dashboard.refresh_threads())
+        tools_menu.add_command(label="Refresh MMIO Tracker", command=lambda: self.dashboard.refresh_mmio())
         tools_menu.add_separator()
         tools_menu.add_command(label="Export Boot Trace to JSON...", command=self._export_trace)
         menubar.add_cascade(label="Tools", menu=tools_menu)
