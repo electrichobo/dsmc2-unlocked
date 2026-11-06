@@ -13,6 +13,7 @@ from emulator.camera import Dsmc2Camera
 from emulator.ui.screen import CameraScreen
 from emulator.ui.buttons import PhysicalButtons
 from emulator.ui.dashboard import DeveloperDashboard
+from emulator.ui.runtime import EmulatorRuntime
 
 
 class Dsmc2DesktopApp:
@@ -44,16 +45,22 @@ class Dsmc2DesktopApp:
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Boot camera on startup
+        # Background emulator runtime (moves CPU stepping and frame composition off the UI thread)
+        self.runtime = EmulatorRuntime(self.camera, compositor=self.screen.compose_frame)
+        self.screen.runtime = self.runtime
+        self._last_frame_seq = 0
+
+        # Initial power on and start runtime worker
         self.camera.power_on()
+        self.runtime.start()
         self.dashboard.refresh_threads()
         self.dashboard.refresh_rcp()
         self.dashboard.update_logs()
         self.buttons.refresh_state()
         self.screen.refresh()
 
-        # Start UI periodic update loop (30 FPS)
-        self.root.after(33, self._ui_loop)
+        # Start UI periodic update loop (~30 FPS)
+        self.root.after(30, self._ui_loop)
 
     def _setup_style(self):
         style = ttk.Style(self.root)
@@ -137,31 +144,29 @@ class Dsmc2DesktopApp:
                     self.screen.handle_button(btn_name)
             except Exception:
                 pass
+        elif action == "record_toggled":
+            self.runtime.submit(self.camera.press_record)
+        elif action == "power_toggled":
+            self.runtime.submit(self.camera.toggle_power)
 
-        # Refresh all views immediately on button press
         self.buttons.refresh_state()
-        self.screen.refresh()
-        self.dashboard.refresh_rcp()
-        self.dashboard.refresh_threads()
         self.dashboard.update_logs()
 
     def _power_on(self):
-        self.camera.power_on()
-        self.dashboard.refresh_threads()
-        self.dashboard.refresh_rcp()
-        self.dashboard.update_logs()
+        self.runtime.submit(self.camera.power_on)
+        self.runtime.invalidate()
         self.buttons.refresh_state()
-        self.screen.refresh()
+        self.dashboard.update_logs()
 
     def _power_off(self):
-        self.camera.power_off()
-        self.dashboard.update_logs()
+        self.runtime.submit(self.camera.power_off)
+        self.runtime.invalidate()
         self.buttons.refresh_state()
-        self.screen.refresh()
+        self.dashboard.update_logs()
 
     def _set_param(self, param: str, val: str):
-        self.camera.rcp.process_command(f"SET / PARAM {param} {val}")
-        self.screen.refresh()
+        self.runtime.submit(self.camera.rcp.process_command, f"SET / PARAM {param} {val}")
+        self.runtime.invalidate()
         self.dashboard.refresh_rcp()
 
     def _open_firmware(self):
@@ -198,19 +203,22 @@ class Dsmc2DesktopApp:
             messagebox.showinfo("Export Complete", f"Boot trace exported to:\n{path}")
 
     def _ui_loop(self):
-        """Periodic UI update loop (~25 FPS = 40ms tick)."""
+        """Periodic UI update loop on main thread (renders blits only)."""
         try:
-            if self.camera.power_state == self.camera.POWER_ON:
-                self.camera.step_slice(count=50_000)
-            self.screen.refresh()
+            self.runtime.poll_results()
+            seq, img = self.runtime.latest_frame()
+            if seq != self._last_frame_seq and img is not None:
+                self.screen.blit_image(img)
+                self._last_frame_seq = seq
             self.buttons.refresh_state()
             self.dashboard.update_logs()
         except Exception:
             pass
         finally:
-            self.root.after(40, self._ui_loop)
+            self.root.after(30, self._ui_loop)
 
     def _on_close(self):
+        self.runtime.stop()
         self.camera.stop()
         try:
             self.root.destroy()

@@ -143,9 +143,10 @@ class Dsmc2Camera:
             if self.cpu.are_interrupts_enabled():
                 self.cpu.inject_irq(vector=0x80829F00)
 
-        # Run CPU slice
+        # Run CPU slice. The wall-clock timeout guarantees the call returns even if
+        # the core halts (WFI with no interrupt source) and never retires `count`.
         try:
-            self.cpu.run(self.cpu.pc, 0, count=count)
+            self.cpu.run(self.cpu.pc, 0, count=count, timeout_us=self.SLICE_TIMEOUT_US)
             self.instruction_count += count
         except Exception as e:
             # Check if exception is benign or stop
@@ -154,22 +155,44 @@ class Dsmc2Camera:
         # Tick hardware timer (GPTimer11 is 100Hz / 1000Hz system tick)
         self.timers[11].tick(steps=100)
 
-    def boot(self, initial_instructions: int = 45_000_000):
-        """Perform initial CRT and RTOS thread bringup."""
-        self.cpu.run(self.cpu.pc, 0, count=initial_instructions)
+    # Upper bound on wall-clock time for one interactive CPU slice.
+    SLICE_TIMEOUT_US = 250_000
+
+    def boot(self, initial_instructions: int = 45_000_000, chunk: Optional[int] = None,
+             progress_cb: Optional[Callable[[float], None]] = None):
+        """Perform initial CRT and RTOS thread bringup.
+
+        ``chunk`` splits execution into resumable slices (verified bit-identical to a
+        single run) so callers can report progress via ``progress_cb(fraction)``.
+        """
+        if chunk and chunk < initial_instructions:
+            done = 0
+            while done < initial_instructions:
+                n = min(chunk, initial_instructions - done)
+                self.cpu.run(self.cpu.pc, 0, count=n)
+                done += n
+                self.boot_progress = done / initial_instructions
+                if progress_cb:
+                    progress_cb(self.boot_progress)
+        else:
+            self.cpu.run(self.cpu.pc, 0, count=initial_instructions)
         self.instruction_count += initial_instructions
         self.is_booted = True
         self.power_state = self.POWER_ON
         self.boot_progress = 1.0
 
-    def power_on(self):
+    def power_on(self, progress_cb: Optional[Callable[[float], None]] = None):
         """Power on camera to operational state."""
         if not self.is_booted:
+            self.power_state = self.POWER_BOOTING
+            self.boot_progress = 0.0
+            if progress_cb:
+                progress_cb(0.0)
             self.log_system("[PWR] Powering on RED DSMC2 (Cortex-A8 @ 1GHz)...")
             self.log_system(f"[PWR] Loading firmware from {os.path.basename(self.firmware_slot_dir)} into DDR (0x80000000)...")
             self.load_firmware()
             self.log_system("[CRT] Reset vector 0x80829F2C -> Initializing C runtime and clearing BSS...")
-            self.boot(initial_instructions=45_000_000)
+            self.boot(initial_instructions=45_000_000, chunk=3_000_000, progress_cb=progress_cb)
             self.log_system("[RTOS] ThreadX RTOS kernel initialized.")
             threads = self.get_threads()
             for t in threads:

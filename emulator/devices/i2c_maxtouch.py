@@ -29,8 +29,9 @@ class MaXTouchDevice(I2cSlave):
         self.matrix_y_size = 10
         self.num_objects = 7
 
-        # Message FIFO (Object T5)
-        self.message_queue = deque()
+        # Message FIFO (Object T5). Bounded like the controller's on-chip FIFO so a
+        # long drag can not grow host memory while the firmware is not draining it.
+        self.message_queue = deque(maxlen=64)
 
         # Touch resolution
         self.max_x = 1024

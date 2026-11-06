@@ -38,6 +38,7 @@ class CameraScreen(ttk.Frame):
         # Touch state
         self.is_touch_down = False
         self.canvas_image_id: Optional[int] = None
+        self.runtime = None
 
         # Interactive RedUi Engine
         self.redui = RedUiEngine(self.camera)
@@ -116,53 +117,82 @@ class CameraScreen(ttk.Frame):
             self.is_touch_down = False
             if self.redui.last_touch_pos:
                 x, y = self.redui.last_touch_pos
-                self.camera.touch(x, y, pressed=False)
-                self.redui.handle_touch(x, y, pressed=False)
+                if self.runtime:
+                    self.runtime.submit(self._dispatch_touch, x, y, False, False)
+                else:
+                    self._dispatch_touch(x, y, False, False)
 
     def _on_touch_down(self, event):
         x, y = self._map_coords(event)
         self.is_touch_down = True
-        self.camera.touch(x, y, pressed=True)
-        self.redui.handle_touch(x, y, pressed=True)
-        self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self._dispatch_touch, x, y, True, False)
+        else:
+            self._dispatch_touch(x, y, True, False)
+            self.refresh()
 
     def _on_touch_move(self, event):
         if self.is_touch_down:
             x, y = self._map_coords(event)
-            self.camera.touch(x, y, pressed=True)
-            self.redui.handle_touch(x, y, pressed=False)
+            if self.runtime:
+                self.runtime.submit(self._dispatch_touch, x, y, False, False)
+            else:
+                self._dispatch_touch(x, y, False, False)
 
     def _on_touch_up(self, event):
         x, y = self._map_coords(event)
         self.is_touch_down = False
-        self.camera.touch(x, y, pressed=False)
-        self.redui.handle_touch(x, y, pressed=False)
-        self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self._dispatch_touch, x, y, False, True)
+        else:
+            self._dispatch_touch(x, y, False, True)
+            self.refresh()
+
+    def _dispatch_touch(self, x: int, y: int, pressed: bool, is_release: bool = False):
+        self.camera.touch(x, y, pressed=pressed)
+        self.redui.handle_touch(x, y, pressed=pressed)
+        if pressed:
+            self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
+        elif is_release:
+            self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
 
     def toggle_menu(self):
-        self.redui.toggle_menu()
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self.redui.toggle_menu)
+        else:
+            self.redui.toggle_menu()
+            self.refresh()
 
     def toggle_magnify(self):
-        self.redui.toggle_magnify()
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self.redui.toggle_magnify)
+        else:
+            self.redui.toggle_magnify()
+            self.refresh()
 
     def toggle_false_color(self):
-        self.redui.toggle_false_color()
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self.redui.toggle_false_color)
+        else:
+            self.redui.toggle_false_color()
+            self.refresh()
 
     def toggle_zebras(self):
-        self.redui.toggle_zebras()
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self.redui.toggle_zebras)
+        else:
+            self.redui.toggle_zebras()
+            self.refresh()
 
     def handle_button(self, button_name: str):
-        self.redui.handle_button_press(button_name)
-        self.refresh()
+        if self.runtime:
+            self.runtime.submit(self.redui.handle_button_press, button_name)
+        else:
+            self.redui.handle_button_press(button_name)
+            self.refresh()
 
-    def refresh(self):
-        """Fetch latest pixels from camera DSS and redraw canvas."""
+    def compose_frame(self) -> Image.Image:
+        """Compose raw LCD frame with overlays and scale to display size."""
         state = self.camera.power_state
 
         if state == self.camera.POWER_STANDBY:
@@ -191,11 +221,20 @@ class CameraScreen(ttk.Frame):
         if self.scale != 1.0:
             img = img.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
 
+        return img
+
+    def blit_image(self, img: Image.Image):
+        """Update canvas display with new PhotoImage on Tk thread."""
         self.current_tk_image = ImageTk.PhotoImage(img)
         if self.canvas_image_id is None:
             self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw", image=self.current_tk_image)
         else:
             self.canvas.itemconfig(self.canvas_image_id, image=self.current_tk_image)
+
+    def refresh(self):
+        """Synchronously compose and redraw canvas."""
+        img = self.compose_frame()
+        self.blit_image(img)
 
     def _render_standby_screen(self) -> Image.Image:
         """Render standby / soft-off screen with guidance."""
