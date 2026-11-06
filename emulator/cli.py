@@ -65,14 +65,10 @@ def cmd_boot(args):
 
 
 def cmd_run(args):
-    """Run virtual camera either with GUI or headlessly."""
+    """Run virtual camera either with Web Studio, desktop GUI, or headlessly."""
     workspace = get_workspace_root()
 
-    if not args.headless:
-        # Launch GUI
-        from emulator.ui.app import launch_gui
-        launch_gui(workspace)
-    else:
+    if args.headless:
         # Headless mode
         cam = Dsmc2Camera(workspace)
         cam.load_firmware(args.firmware)
@@ -91,6 +87,15 @@ def cmd_run(args):
             print("\n[*] Stopping virtual camera...")
             cam.stop()
             sys.exit(0)
+    elif getattr(args, "ui", "web") == "tk":
+        from emulator.ui.app import launch_gui
+        launch_gui(workspace)
+    else:
+        # Launch modern Web-Based Virtual Camera Studio (default, freeze-proof)
+        from emulator.ui.web import launch_web_studio
+        web_port = getattr(args, "web_port", 8765)
+        open_browser = not getattr(args, "no_browser", False)
+        launch_web_studio(workspace, host=args.host, port=web_port, open_browser=open_browser)
 
 
 def cmd_inspect(args):
@@ -210,8 +215,11 @@ def main():
     p_run = subparsers.add_parser("run", help="Run virtual camera")
     p_run.add_argument("--headless", action="store_true", help="Run without graphical display")
     p_run.add_argument("-f", "--firmware", type=str, default=None, help="Path to dsmc_program.mem")
-    p_run.add_argument("--host", type=str, default="127.0.0.1", help="RCP server bind host")
-    p_run.add_argument("-p", "--port", type=int, default=1111, help="RCP server port")
+    p_run.add_argument("--host", type=str, default="127.0.0.1", help="Server bind host")
+    p_run.add_argument("-p", "--port", type=int, default=1111, help="RCP TCP server port (default: 1111)")
+    p_run.add_argument("--web-port", type=int, default=8765, help="Web Studio HTTP port (default: 8765)")
+    p_run.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
+    p_run.add_argument("--ui", choices=["web", "tk"], default="web", help="UI interface: web (default) or tk")
     p_run.set_defaults(func=cmd_run)
 
     # Subcommand: inspect

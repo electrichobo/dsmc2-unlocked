@@ -1,0 +1,125 @@
+"""
+Unit and integration tests for RED DSMC2 Web-Based Virtual Camera Studio.
+"""
+
+import json
+import os
+import threading
+import urllib.request
+import pytest
+
+from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture(scope="module")
+def web_server():
+    """Start an isolated WebStudio test server on a dynamic free port."""
+    test_port = find_free_port(8900)
+    studio = WebStudio(REPO_ROOT, host="127.0.0.1", port=test_port)
+    studio.start_camera()
+
+    handler = create_handler(studio)
+    server = ThreadedHTTPServer(("127.0.0.1", test_port), handler)
+    srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    srv_thread.start()
+
+    base_url = f"http://127.0.0.1:{test_port}"
+    yield {"studio": studio, "server": server, "url": base_url}
+
+    server.shutdown()
+    studio.stop()
+
+
+def test_web_studio_serves_html(web_server):
+    """Verify GET / returns authentic RED DSMC2 Web Studio HTML."""
+    url = web_server["url"] + "/"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    html = resp.read().decode("utf-8")
+    assert "DSMC2 VIRTUAL CAMERA STUDIO" in html
+    assert "RED TOUCH 7.0 LCD MONITOR" in html
+    assert "touchCanvas" in html
+
+
+def test_web_studio_serves_frame(web_server):
+    """Verify GET /api/frame returns valid JPEG frame bytes."""
+    url = web_server["url"] + "/api/frame"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    data = resp.read()
+    # JPEG magic bytes
+    assert data[:2] == b"\xff\xd8"
+    assert len(data) > 10_000
+
+
+def test_web_studio_status_api(web_server):
+    """Verify GET /api/status returns live telemetry and camera state."""
+    url = web_server["url"] + "/api/status"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    status = json.loads(resp.read().decode("utf-8"))
+    assert status["power_state"] == "ON"
+    assert "rcp" in status
+    assert "threads" in status
+    assert len(status["threads"]) >= 4
+
+
+def test_web_studio_touch_interaction(web_server):
+    """Verify POST /api/touch dispatches to maXTouch and opens ISO parameter dialog."""
+    studio = web_server["studio"]
+    url = web_server["url"] + "/api/touch"
+
+    # Touch ISO badge at (633, 16)
+    payload = json.dumps({"x": 633, "y": 16, "pressed": True}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req)
+    assert resp.status == 200
+    res_data = json.loads(resp.read().decode("utf-8"))
+    assert res_data["status"] == "ok"
+    assert studio.compositor.redui.active_dialog == "ISO"
+
+    # Touch ISO 1600 inside dialog (x=618, y=283)
+    payload2 = json.dumps({"x": 618, "y": 283, "pressed": True}).encode("utf-8")
+    req2 = urllib.request.Request(url, data=payload2, headers={"Content-Type": "application/json"})
+    resp2 = urllib.request.urlopen(req2)
+    assert resp2.status == 200
+    assert studio.camera.rcp.state["iso"] == "1600"
+    assert studio.compositor.redui.active_dialog is None
+
+
+def test_web_studio_physical_buttons(web_server):
+    """Verify POST /api/button dispatches physical hardware controls."""
+    studio = web_server["studio"]
+    url = web_server["url"] + "/api/button"
+
+    # MENU button
+    assert studio.compositor.redui.is_menu_open is False
+    req = urllib.request.Request(url, data=json.dumps({"button": "MENU"}).encode("utf-8"), headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req)
+    assert studio.compositor.redui.is_menu_open is True
+
+    # 1:1 MAG button
+    req = urllib.request.Request(url, data=json.dumps({"button": "1:1 MAG"}).encode("utf-8"), headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req)
+    assert studio.compositor.redui.is_magnify_on is True
+
+    # REC button
+    req = urllib.request.Request(url, data=json.dumps({"button": "REC"}).encode("utf-8"), headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req)
+    assert studio.camera.rcp.state["record_state"] == "2"
+
+    req2 = urllib.request.Request(url, data=json.dumps({"button": "REC"}).encode("utf-8"), headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req2)
+    assert studio.camera.rcp.state["record_state"] == "0"
+
+
+def test_web_studio_logs_stream(web_server):
+    """Verify GET /api/logs returns completed lines from UART4."""
+    url = web_server["url"] + "/api/logs"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    data = json.loads(resp.read().decode("utf-8"))
+    assert "logs" in data
+    assert len(data["logs"]) > 0

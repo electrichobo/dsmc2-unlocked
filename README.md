@@ -13,13 +13,18 @@ A faithful, full-system hardware and operating system emulator for the **RED DSM
   pip install unicorn pillow pytest
   ```
 
-### Running the Desktop Application (Virtual Camera + Developer Tools)
+### Running the Web-Based Virtual Camera Studio (Freeze-Proof Modern UI)
 ```powershell
 python -m emulator.cli run
 ```
-Or directly via the app module:
+This automatically boots the camera and opens the studio in your default browser at `http://127.0.0.1:8765/`.
+You can customize the port or disable browser auto-launch:
 ```powershell
-python -m emulator.ui.app
+python -m emulator.cli run --web-port 8765 --no-browser
+```
+Or directly via the web module:
+```powershell
+python -m emulator.ui.web
 ```
 
 ### Running Headless Virtual Camera with RCP TCP Server (Port 1111)

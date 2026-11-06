@@ -1,0 +1,1402 @@
+"""
+RED DSMC2 Web-Based Virtual Camera Studio.
+Provides a modern, freeze-proof browser interface running on a dedicated local port (default: 8765).
+Includes:
+- Authentic 1024x576 RED Touch 7.0 LCD frame streaming (MJPEG)
+- Direct touch coordinate mapping to Atmel maXTouch controller & RedUi menu system
+- Physical tactile controls (Record, Power, Menu, 1:1 Mag, User keys, D-Pad)
+- Real-time Developer Workbench (UART4 console, RCP inspector, ThreadX RTOS monitor, Snapshots, Faults)
+"""
+
+import os
+import io
+import json
+import time
+import socket
+import zlib
+import urllib.parse
+import threading
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from typing import Optional, Tuple, Dict, Any, List
+from PIL import Image, ImageDraw, ImageFont
+
+from emulator.camera import Dsmc2Camera
+from emulator.ui.redui import RedUiEngine
+from emulator.rcp.protocol import RcpProtocol
+
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Multi-threaded HTTP server allowing concurrent MJPEG streaming and API requests."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class ScreenCompositor:
+    """
+    Decoupled graphics compositor for RED DSMC2.
+    Produces authentic 1024x576 LCD frames with genuine HUD overlays, splash screen, and RedUi system.
+    """
+
+    NATIVE_WIDTH = 1024
+    NATIVE_HEIGHT = 576
+
+    def __init__(self, camera: Dsmc2Camera):
+        self.camera = camera
+        self.redui = RedUiEngine(camera)
+        self.splash_image: Optional[Image.Image] = self._load_splash_screen()
+        self._zero_fb_buf = b"\x00" * (self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4)
+
+    def _load_splash_screen(self) -> Optional[Image.Image]:
+        splash_path = os.path.join(
+            self.camera.workspace_root,
+            "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "res", "splash_screen.bin"
+        )
+        if not os.path.exists(splash_path):
+            return None
+        try:
+            with open(splash_path, "rb") as f:
+                data = f.read()
+            if data.startswith(b"REDZLIB0"):
+                decomp = zlib.decompress(data[12:])
+                pixels = decomp[8:8 + (1024 * 576 * 3)]
+                return Image.frombytes("RGB", (1024, 576), pixels)
+        except Exception as e:
+            print(f"[Compositor] Failed to load splash screen: {e}")
+            return None
+        return None
+
+    def compose_frame(self) -> Image.Image:
+        """Compose raw LCD frame with overlays."""
+        state = self.camera.power_state
+
+        if state == self.camera.POWER_STANDBY:
+            img = self._render_standby_screen()
+        elif state == self.camera.POWER_BOOTING:
+            img = self._render_booting_screen()
+        else: # POWER_ON
+            fb_bytes = self.camera.get_frame()
+            is_blank = (fb_bytes == self._zero_fb_buf)
+
+            if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
+                img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+            elif self.splash_image:
+                img = self.splash_image.copy()
+            else:
+                img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+
+            # Draw RED HUD
+            self._draw_hud(img)
+
+            # Draw RedUi layer (Dialogs, Menu, Tools, Reticle)
+            img = self.redui.render(img)
+
+        return img
+
+    def get_jpeg_bytes(self, quality: int = 85) -> bytes:
+        """Render current frame to JPEG byte buffer."""
+        img = self.compose_frame()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+
+    def _render_standby_screen(self) -> Image.Image:
+        img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (8, 8, 8))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(10, 10), (1014, 566)], outline=(25, 25, 25), width=2)
+        cx, cy = 512, 288
+        draw.rectangle([(cx - 260, cy - 90), (cx + 260, cy + 90)], fill=(16, 16, 16), outline=(40, 40, 40), width=2)
+        model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+        draw.text((cx - 150, cy - 70), f"RED DIGITAL CINEMA  |  {model_name}", fill=(200, 200, 200))
+        draw.text((cx - 100, cy - 35), "[ SYSTEM IN STANDBY ]", fill=(255, 170, 0))
+        draw.text((cx - 120, cy + 0), "DC IN 14.8V  •  Hardware Ready", fill=(100, 100, 100))
+        draw.text((cx - 165, cy + 40), ">>> CLICK [POWER ON] BUTTON BELOW TO BOOT <<<", fill=(0, 255, 120))
+        return img
+
+    def _render_booting_screen(self) -> Image.Image:
+        if self.splash_image:
+            img = self.splash_image.copy()
+        else:
+            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+        draw = ImageDraw.Draw(img)
+        cx, cy = 512, 288
+        draw.rectangle([(cx - 240, cy - 50), (cx + 240, cy + 50)], fill=(0, 0, 0), outline=(0, 200, 100), width=2)
+        pct = int(self.camera.boot_progress * 100)
+        draw.text((cx - 120, cy - 35), f"BOOTING RED DSMC2... {pct}%", fill=(255, 255, 255))
+        bar_x1, bar_y1 = cx - 200, cy - 5
+        bar_x2, bar_y2 = cx + 200, cy + 15
+        draw.rectangle([(bar_x1, bar_y1), (bar_x2, bar_y2)], outline=(80, 80, 80), width=1)
+        fill_width = int(400 * max(0.0, min(1.0, self.camera.boot_progress)))
+        if fill_width > 0:
+            draw.rectangle([(bar_x1 + 1, bar_y1 + 1), (bar_x1 + fill_width, bar_y2 - 1)], fill=(0, 220, 100))
+        draw.text((cx - 140, cy + 25), "Bringing up Cortex-A8, ThreadX & OMAP3...", fill=(160, 160, 160))
+        return img
+
+    def _draw_hud(self, img: Image.Image):
+        draw = ImageDraw.Draw(img)
+        rcp = self.camera.rcp
+        fps = rcp.state.get(rcp.PARAM_FPS, "24.00")
+        shutter = rcp.state.get(rcp.PARAM_SHUTTER, "1/48")
+        iso = rcp.state.get(rcp.PARAM_ISO, "800")
+        format_name = rcp.state.get(rcp.PARAM_FORMAT, "5K 16:9")
+        record_state = rcp.state.get(rcp.PARAM_RECORD_STATE, "0")
+        is_recording = (record_state == "2")
+
+        # Top Bar
+        draw.rectangle([(0, 0), (1024, 40)], fill=(0, 0, 0, 200))
+        draw.line([(0, 40), (1024, 40)], fill=(40, 40, 40), width=1)
+
+        # STBY / REC Badge
+        if is_recording:
+            draw.rectangle([(12, 6), (82, 34)], fill=(200, 20, 20), outline=(255, 60, 60), width=1)
+            draw.text((22, 11), "• REC", fill=(255, 255, 255))
+        else:
+            draw.rectangle([(12, 6), (82, 34)], fill=(32, 32, 32), outline=(70, 70, 70), width=1)
+            draw.text((24, 11), "STBY", fill=(180, 180, 180))
+
+        # Menu Button
+        menu_hl = (220, 20, 20) if self.redui.is_menu_open else (60, 60, 60)
+        draw.rectangle([(88, 6), (295, 34)], fill=(28, 28, 28), outline=menu_hl, width=1)
+        model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+        draw.text((96, 11), f"RED {model_name} [MENU]", fill=(220, 220, 220))
+
+        # FPS
+        fps_hl = (220, 20, 20) if self.redui.active_dialog == "FPS" else (60, 60, 60)
+        draw.rectangle([(310, 6), (430, 34)], fill=(28, 28, 28), outline=fps_hl, width=1)
+        draw.text((320, 11), f"FPS: {fps}", fill=(255, 255, 255))
+
+        # SHUTTER
+        shutter_hl = (220, 20, 20) if self.redui.active_dialog == "SHUTTER" else (60, 60, 60)
+        draw.rectangle([(440, 6), (600, 34)], fill=(28, 28, 28), outline=shutter_hl, width=1)
+        draw.text((450, 11), f"SHUTTER: {shutter}", fill=(255, 255, 255))
+
+        # ISO
+        iso_hl = (220, 20, 20) if self.redui.active_dialog == "ISO" else (60, 60, 60)
+        draw.rectangle([(610, 6), (730, 34)], fill=(28, 28, 28), outline=iso_hl, width=1)
+        draw.text((620, 11), f"ISO: {iso}", fill=(255, 255, 255))
+
+        # FORMAT
+        fmt_hl = (220, 20, 20) if self.redui.active_dialog == "FORMAT" else (60, 60, 60)
+        draw.rectangle([(740, 6), (910, 34)], fill=(28, 28, 28), outline=fmt_hl, width=1)
+        draw.text((750, 11), f"FORMAT: {format_name}", fill=(255, 255, 255))
+
+        # DC / Battery
+        draw.rectangle([(920, 6), (1014, 34)], fill=(20, 35, 20), outline=(0, 180, 60), width=1)
+        draw.text((930, 11), "DC 14.8V", fill=(80, 240, 80))
+
+        # Bottom Bar
+        draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 200))
+        draw.line([(0, 540), (1024, 540)], fill=(40, 40, 40), width=1)
+
+        # Timecode
+        timecode = "01:00:00:00" if not is_recording else f"01:00:{int(self.camera.instruction_count/1000000)%60:02d}:12"
+        tc_color = (255, 50, 50) if is_recording else (200, 200, 200)
+        draw.rectangle([(12, 544), (240, 572)], fill=(28, 28, 28), outline=(60, 60, 60), width=1)
+        draw.text((20, 550), f"TC: {timecode}", fill=tc_color)
+
+        # Media
+        media_hl = (220, 20, 20) if self.redui.active_dialog == "MEDIA" else (60, 60, 60)
+        draw.rectangle([(250, 544), (660, 572)], fill=(28, 28, 28), outline=media_hl, width=1)
+        draw.text((260, 550), "MEDIA: RED MINI-MAG 512GB [78% FREE]", fill=(200, 200, 200))
+
+        # Audio
+        audio_hl = (220, 20, 20) if self.redui.active_dialog == "AUDIO" else (60, 60, 60)
+        draw.rectangle([(670, 544), (860, 572)], fill=(28, 28, 28), outline=audio_hl, width=1)
+        draw.text((680, 550), "AUDIO: CH1/2 -18dB", fill=(120, 200, 120))
+
+        # Instruction counter
+        instr_m = self.camera.instruction_count / 1_000_000
+        draw.rectangle([(870, 544), (1014, 572)], fill=(22, 22, 22), outline=(50, 50, 50), width=1)
+        draw.text((880, 550), f"INSTR: {instr_m:.1f}M", fill=(140, 140, 140))
+
+
+class WebStudio:
+    """Manages virtual camera execution, HTTP server, and client dispatch."""
+
+    def __init__(self, workspace_root: str, host: str = "127.0.0.1", port: int = 8765):
+        self.workspace_root = os.path.abspath(workspace_root)
+        self.host = host
+        self.port = port
+        self.camera = Dsmc2Camera(self.workspace_root)
+        self.compositor = ScreenCompositor(self.camera)
+
+        self.running = False
+        self.worker_thread: Optional[threading.Thread] = None
+        self.http_server: Optional[ThreadedHTTPServer] = None
+
+        # Lock for thread-safe camera dispatch
+        self.lock = threading.Lock()
+
+    def start_camera(self):
+        """Boot camera and launch CPU stepping thread."""
+        if not self.camera.is_booted:
+            self.camera.power_on()
+        self.running = True
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="Dsmc2CpuWorker")
+        self.worker_thread.start()
+
+    def _worker_loop(self):
+        """Continuously steps CPU instructions when powered on."""
+        while self.running:
+            if self.camera.power_state == self.camera.POWER_ON and self.camera.is_booted:
+                with self.lock:
+                    self.camera.step_slice(25_000)
+            time.sleep(0.015)
+
+    def handle_touch(self, x: int, y: int, pressed: bool):
+        with self.lock:
+            self.camera.touch(x, y, pressed=pressed)
+            self.compositor.redui.handle_touch(x, y, pressed=pressed)
+            if pressed:
+                self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
+            else:
+                self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
+
+    def handle_button(self, btn_name: str):
+        with self.lock:
+            pin_map = {
+                "MENU": 10, "1:1 MAG": 11, "USER 1": 14, "USER 2": 15,
+                "NAV UP": 20, "NAV LEFT": 21, "NAV ENTER": 22, "NAV RIGHT": 23, "NAV DOWN": 24
+            }
+            pin = pin_map.get(btn_name)
+            if pin is not None:
+                self.camera.log_system(f"[KEY] Physical button [{btn_name}] pressed (GPIO pin {pin})")
+                if 1 in self.camera.gpio:
+                    self.camera.gpio[1].set_input_pin(pin, True)
+                    self.camera.gpio[1].set_input_pin(pin, False)
+
+            self.compositor.redui.handle_button_press(btn_name)
+
+    def handle_record(self):
+        with self.lock:
+            self.camera.press_record()
+            is_rec = (self.camera.rcp.state.get(RcpProtocol.PARAM_RECORD_STATE) == "2")
+            if is_rec:
+                self.camera.log_system("[REC] Recording STARTED -> RED MINI-MAG (R3D 5K 24fps)")
+            else:
+                self.camera.log_system("[REC] Recording STOPPED -> File saved safely")
+
+    def handle_power(self):
+        with self.lock:
+            self.camera.toggle_power()
+
+    def stop(self):
+        self.running = False
+        if self.http_server:
+            try:
+                self.http_server.shutdown()
+                self.http_server.server_close()
+            except Exception:
+                pass
+        self.camera.stop()
+
+
+def create_handler(studio: WebStudio):
+    """Factory creating HTTP request handler bound to the studio instance."""
+
+    class StudioHttpHandler(BaseHTTPRequestHandler):
+
+        def log_message(self, format, *args):
+            # Suppress normal HTTP logging to keep terminal output clean for camera logs
+            pass
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+
+            if path == "/" or path == "/index.html":
+                self._serve_studio_html()
+            elif path == "/api/frame":
+                self._serve_single_frame()
+            elif path == "/api/stream":
+                self._serve_mjpeg_stream()
+            elif path == "/api/status":
+                self._serve_status_json()
+            elif path == "/api/logs":
+                self._serve_logs_json(parsed.query)
+            else:
+                self.send_error(404, "Not Found")
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            length = int(self.headers.get("Content-Length", 0))
+            body_bytes = self.rfile.read(length) if length > 0 else b"{}"
+
+            try:
+                data = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+            except Exception:
+                data = {}
+
+            if path == "/api/touch":
+                x = int(data.get("x", 0))
+                y = int(data.get("y", 0))
+                pressed = bool(data.get("pressed", True))
+                studio.handle_touch(x, y, pressed)
+                self._send_json({"status": "ok", "x": x, "y": y, "pressed": pressed})
+
+            elif path == "/api/button":
+                btn = str(data.get("button", ""))
+                if btn == "REC":
+                    studio.handle_record()
+                elif btn == "POWER":
+                    studio.handle_power()
+                else:
+                    studio.handle_button(btn)
+                self._send_json({"status": "ok", "button": btn})
+
+            elif path == "/api/rcp":
+                cmd = str(data.get("command", "")).strip()
+                if cmd:
+                    with studio.lock:
+                        resp = studio.camera.rcp.process_command(cmd)
+                else:
+                    resp = "ERROR"
+                self._send_json({"status": "ok", "command": cmd, "response": resp})
+
+            elif path == "/api/power":
+                studio.handle_power()
+                self._send_json({"status": "ok", "power_state": studio.camera.power_state})
+
+            elif path == "/api/snapshot/save":
+                name = str(data.get("name", f"snapshot_{int(time.time())}.dsmc2"))
+                snap_dir = os.path.join(studio.workspace_root, "snapshots")
+                os.makedirs(snap_dir, exist_ok=True)
+                snap_path = os.path.join(snap_dir, name)
+                with studio.lock:
+                    from emulator.core.snapshot import SnapshotManager
+                    SnapshotManager.save(studio.camera, snap_path, desc=f"Web snapshot {name}")
+                self._send_json({"status": "ok", "file": snap_path})
+
+            elif path == "/api/snapshot/restore":
+                file_name = str(data.get("name", ""))
+                snap_path = os.path.join(studio.workspace_root, "snapshots", file_name)
+                success = False
+                if os.path.exists(snap_path):
+                    with studio.lock:
+                        from emulator.core.snapshot import SnapshotManager
+                        success = SnapshotManager.restore(studio.camera, snap_path)
+                self._send_json({"status": "ok" if success else "error", "restored": success})
+
+            elif path == "/api/fault":
+                fault_type = str(data.get("type", "INTC_IRQ_LOCKUP"))
+                with studio.lock:
+                    from emulator.core.faults import HardwareFaultInjector
+                    inj = HardwareFaultInjector(studio.camera)
+                    res = inj.inject_fault(fault_type)
+                self._send_json({"status": "ok", "result": res})
+
+            else:
+                self.send_error(404, "Unknown API Route")
+
+        def _send_json(self, payload: dict, status: int = 200):
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _serve_single_frame(self):
+            with studio.lock:
+                jpeg_data = studio.compositor.get_jpeg_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(jpeg_data)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(jpeg_data)
+
+        def _serve_mjpeg_stream(self):
+            """Stream multipart MJPEG video directly to browser at ~25 FPS."""
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=--frame")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+
+            try:
+                while studio.running:
+                    with studio.lock:
+                        frame_bytes = studio.compositor.get_jpeg_bytes(quality=80)
+                    self.wfile.write(b"----frame\r\n")
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                    self.wfile.write(f"Content-Length: {len(frame_bytes)}\r\n\r\n".encode("ascii"))
+                    self.wfile.write(frame_bytes)
+                    self.wfile.write(b"\r\n")
+                    time.sleep(0.04) # ~25 FPS
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def _serve_status_json(self):
+            with studio.lock:
+                cam = studio.camera
+                is_rec = (cam.rcp.state.get(RcpProtocol.PARAM_RECORD_STATE) == "2")
+                status = {
+                    "power_state": cam.power_state,
+                    "boot_progress": cam.boot_progress,
+                    "instruction_count": cam.instruction_count,
+                    "is_recording": is_rec,
+                    "active_dialog": studio.compositor.redui.active_dialog,
+                    "is_menu_open": studio.compositor.redui.is_menu_open,
+                    "tools": {
+                        "magnify": studio.compositor.redui.is_magnify_on,
+                        "false_color": studio.compositor.redui.is_false_color_on,
+                        "zebras": studio.compositor.redui.is_zebras_on,
+                        "guide": studio.compositor.redui.guide_mode
+                    },
+                    "rcp": dict(cam.rcp.state),
+                    "threads": cam.get_threads(),
+                    "unknown_mmio_count": len(cam.bus.unknown_mmio)
+                }
+            self._send_json(status)
+
+        def _serve_logs_json(self, query_str: str):
+            since = 0
+            if query_str:
+                params = urllib.parse.parse_qs(query_str)
+                since = int(params.get("since", [0])[0])
+
+            with studio.lock:
+                all_logs = studio.camera.get_serial_logs()
+                new_logs = all_logs[since:]
+
+            self._send_json({"logs": new_logs, "total": len(all_logs)})
+
+        def _serve_studio_html(self):
+            html = STUDIO_HTML.replace("{{HOST}}", studio.host).replace("{{PORT}}", str(studio.port))
+            data = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    return StudioHttpHandler
+
+
+# ---------------------------------------------------------------------------
+# Authentic RED DSMC2 Virtual Camera Studio Web Frontend
+# Single-page application with zero external dependencies (pure HTML5/CSS3/JS)
+# ---------------------------------------------------------------------------
+STUDIO_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RED DSMC2 Virtual Camera Studio — Scarlet-W 5K</title>
+<style>
+  :root {
+    --bg-main: #121212;
+    --bg-panel: #1b1b1b;
+    --bg-card: #222222;
+    --border: #333333;
+    --red-brand: #d11212;
+    --red-bright: #ff2222;
+    --green-led: #00e676;
+    --amber-led: #ffb300;
+    --text-primary: #f0f0f0;
+    --text-muted: #888888;
+    --accent: #007acc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  body {
+    background: var(--bg-main);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+  }
+
+  /* Header */
+  header {
+    background: #0a0a0a;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .red-logo {
+    background: var(--red-brand);
+    color: #fff;
+    font-weight: 900;
+    letter-spacing: 2px;
+    padding: 3px 10px;
+    border-radius: 2px;
+    font-size: 14px;
+  }
+  .brand-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #ddd;
+  }
+  .brand-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: monospace;
+  }
+  .status-cluster {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .led-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: #181818;
+    border: 1px solid #333;
+  }
+  .led-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--amber-led);
+    box-shadow: 0 0 6px var(--amber-led);
+  }
+  .led-dot.online { background: var(--green-led); box-shadow: 0 0 8px var(--green-led); }
+  .led-dot.recording { background: var(--red-bright); box-shadow: 0 0 10px var(--red-bright); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* Main Studio Layout */
+  .studio-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 20px;
+    padding: 18px 24px;
+    flex: 1;
+    max-width: 1750px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  /* Camera Unit Column */
+  .camera-unit {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+
+  /* Authentic RED Touch 7.0 Aluminum Bezel */
+  .monitor-bezel {
+    background: linear-gradient(145deg, #242424, #151515);
+    border: 3px solid #383838;
+    border-radius: 10px;
+    padding: 14px 16px 16px 16px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.1);
+    position: relative;
+    max-width: 900px;
+  }
+  .bezel-screws {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    padding: 0 4px;
+  }
+  .screw {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    box-shadow: inset 0 1px 1px #000;
+  }
+  .bezel-header {
+    display: flex;
+    justify-content: space-between;
+    font-family: monospace;
+    font-size: 10px;
+    color: #777;
+    margin-bottom: 6px;
+    letter-spacing: 1px;
+  }
+
+  /* Screen Frame Stream Canvas */
+  .screen-viewport {
+    position: relative;
+    width: 800px;
+    height: 450px;
+    background: #000;
+    border-radius: 3px;
+    overflow: hidden;
+    cursor: crosshair;
+    box-shadow: inset 0 0 10px rgba(0,0,0,0.9);
+  }
+  .screen-viewport img {
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    display: block;
+    pointer-events: none;
+  }
+  /* Overlay canvas for responsive touch feedback */
+  .touch-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: auto;
+  }
+
+  /* Physical Button Control Deck */
+  .tactile-deck {
+    background: #1a1a1a;
+    border: 2px solid #2f2f2f;
+    border-radius: 8px;
+    padding: 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    width: 800px;
+    justify-content: space-between;
+  }
+  .btn-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Authentic Buttons */
+  button.cam-btn {
+    background: linear-gradient(180deg, #333333, #222222);
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 8px 14px;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+    transition: all 0.08s ease;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  button.cam-btn:hover {
+    background: linear-gradient(180deg, #3e3e3e, #2a2a2a);
+    border-color: #666;
+  }
+  button.cam-btn:active {
+    background: #181818;
+    transform: translateY(1px);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+  }
+
+  /* Primary RED Record Button */
+  button.rec-btn {
+    background: linear-gradient(180deg, #b01010, #7a0000);
+    color: #ffffff;
+    border: 2px solid #ff4444;
+    border-radius: 50%;
+    width: 58px;
+    height: 58px;
+    font-size: 11px;
+    font-weight: 900;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(180, 0, 0, 0.4), inset 0 2px 2px rgba(255,255,255,0.3);
+    transition: all 0.1s;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+  button.rec-btn:hover {
+    background: linear-gradient(180deg, #cf1515, #940505);
+    transform: scale(1.04);
+  }
+  button.rec-btn.recording {
+    background: #ff1111;
+    border-color: #ffffff;
+    box-shadow: 0 0 16px rgba(255, 30, 30, 0.9);
+    animation: recPulse 1.2s infinite;
+  }
+  @keyframes recPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+
+  /* Power Button */
+  button.power-btn {
+    background: linear-gradient(180deg, #1e3a1e, #132413);
+    color: #66ff88;
+    border: 1px solid #2e602e;
+    font-family: monospace;
+  }
+
+  /* D-Pad Container */
+  .dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 28px);
+    grid-template-rows: repeat(3, 28px);
+    gap: 3px;
+  }
+  .dpad button {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: bold;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .dpad button:hover { background: #383838; }
+  .dpad button:active { background: #111; }
+
+  /* Right Column: Engineering Workbench */
+  .workbench {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    height: 720px;
+  }
+  .tab-bar {
+    display: flex;
+    background: #141414;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .tab-btn {
+    padding: 10px 18px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .tab-btn:hover { color: #fff; }
+  .tab-btn.active {
+    color: #fff;
+    border-bottom: 2px solid var(--red-brand);
+    background: #1d1d1d;
+  }
+  .tab-content {
+    flex: 1;
+    overflow: auto;
+    padding: 14px;
+    display: none;
+  }
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  /* Terminal Console */
+  .console-box {
+    background: #080808;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 11.5px;
+    color: #00ff66;
+    padding: 12px;
+    flex: 1;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    line-height: 1.5;
+  }
+  .console-tools {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    align-items: center;
+    font-size: 12px;
+  }
+
+  /* RCP Parameters Grid */
+  table.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  table.data-table th, table.data-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #2c2c2c;
+    text-align: left;
+  }
+  table.data-table th { background: #181818; color: #888; font-weight: 600; }
+  table.data-table tr:hover { background: #222; }
+
+  /* Command Prompt Bar */
+  .cmd-bar {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .cmd-input {
+    flex: 1;
+    background: #0d0d0d;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 13px;
+  }
+  .cmd-input:focus { outline: none; border-color: var(--accent); }
+
+  /* Tip / Hotkeys */
+  .hotkey-badge {
+    background: #252525;
+    border: 1px solid #444;
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    color: #aaa;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="red-logo">RED</div>
+    <div>
+      <div class="brand-title">DSMC2 VIRTUAL CAMERA STUDIO</div>
+      <div class="brand-sub">SCARLET-W 5K • FIRMWARE v7.4.1 • CORTEX-A8 @ 1.0 GHz</div>
+    </div>
+  </div>
+  <div class="status-cluster">
+    <div class="led-badge">
+      <div id="led-dot" class="led-dot"></div>
+      <span id="pwr-text">STANDBY</span>
+    </div>
+    <div class="led-badge">
+      <span>HOST: <strong>{{HOST}}:{{PORT}}</strong></span>
+    </div>
+    <div class="led-badge">
+      <span id="instr-text">0.0M INSTR</span>
+    </div>
+  </div>
+</header>
+
+<div class="studio-grid">
+
+  <!-- Left: Virtual Camera Zone -->
+  <div class="camera-unit">
+    <div class="monitor-bezel">
+      <div class="bezel-screws">
+        <div class="screw"></div><div class="screw"></div>
+      </div>
+      <div class="bezel-header">
+        <span>RED TOUCH 7.0 LCD MONITOR</span>
+        <span>1024 x 576 NATIVE (16:9)</span>
+      </div>
+
+      <div class="screen-viewport" id="viewport">
+        <!-- Live Video Stream -->
+        <img id="stream-img" src="/api/stream" alt="RED DSMC2 LCD Stream" />
+        <!-- Interactive Touch Layer -->
+        <canvas class="touch-overlay" id="touchCanvas" width="1024" height="576"></canvas>
+      </div>
+
+      <div class="bezel-screws" style="margin-top: 8px;">
+        <div class="screw"></div><div class="screw"></div>
+      </div>
+    </div>
+
+    <!-- Tactile Deck: Physical Camera Hardware Buttons -->
+    <div class="tactile-deck">
+      <!-- REC & POWER -->
+      <div class="btn-group">
+        <button id="rec-btn" class="rec-btn" title="Toggle Recording [R]">
+          <span>●</span>
+          <span>REC</span>
+        </button>
+        <button id="pwr-btn" class="cam-btn power-btn" title="Toggle Power / Standby">
+          POWER ON
+        </button>
+      </div>
+
+      <!-- FUNCTION KEYS -->
+      <div class="btn-group">
+        <button class="cam-btn" onclick="sendBtn('MENU')" title="Toggle Menu [M]">
+          MENU <span class="hotkey-badge">M</span>
+        </button>
+        <button class="cam-btn" onclick="sendBtn('1:1 MAG')" title="Toggle 1:1 Magnify [1]">
+          1:1 MAG <span class="hotkey-badge">1</span>
+        </button>
+        <button class="cam-btn" onclick="sendBtn('USER 1')" title="Toggle False Color [U]">
+          USER 1 (FC) <span class="hotkey-badge">U</span>
+        </button>
+        <button class="cam-btn" onclick="sendBtn('USER 2')" title="Toggle Zebras [Z]">
+          USER 2 (ZB) <span class="hotkey-badge">Z</span>
+        </button>
+      </div>
+
+      <!-- D-PAD -->
+      <div class="dpad">
+        <div></div>
+        <button onclick="sendBtn('NAV UP')">▲</button>
+        <div></div>
+        <button onclick="sendBtn('NAV LEFT')">◀</button>
+        <button onclick="sendBtn('NAV ENTER')">●</button>
+        <button onclick="sendBtn('NAV RIGHT')">▶</button>
+        <div></div>
+        <button onclick="sendBtn('NAV DOWN')">▼</button>
+        <div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: Engineering Workbench -->
+  <div class="workbench">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('serial', this)">Console / Serial</button>
+      <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Parameters</button>
+      <button class="tab-btn" onclick="switchTab('threads', this)">ThreadX RTOS</button>
+      <button class="tab-btn" onclick="switchTab('snapshots', this)">Snapshots</button>
+      <button class="tab-btn" onclick="switchTab('faults', this)">Fault Injection</button>
+    </div>
+
+    <!-- Tab 1: Serial Console -->
+    <div id="tab-serial" class="tab-content active">
+      <div class="console-tools">
+        <div>
+          <span>UART4 Serial Stream</span>
+          <span id="log-count" style="color: #666; margin-left: 8px;">(0 lines)</span>
+        </div>
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <label style="cursor: pointer;">
+            <input type="checkbox" id="auto-scroll" checked /> Auto-scroll
+          </label>
+          <button class="cam-btn" style="padding: 4px 10px;" onclick="clearConsole()">Clear Log</button>
+        </div>
+      </div>
+      <div id="console" class="console-box"></div>
+    </div>
+
+    <!-- Tab 2: RCP Parameters -->
+    <div id="tab-rcp" class="tab-content">
+      <div style="margin-bottom: 8px; font-size: 12px; color: #aaa;">
+        Live RED Command Protocol (RCP) Parameter Cache
+      </div>
+      <div style="flex: 1; overflow-y: auto;">
+        <table class="data-table">
+          <thead>
+            <tr><th>Parameter</th><th>Value</th><th>Action</th></tr>
+          </thead>
+          <tbody id="rcp-table-body"></tbody>
+        </table>
+      </div>
+      <div class="cmd-bar">
+        <input id="rcp-cmd-input" class="cmd-input" type="text" placeholder="Send RCP command (e.g. GET iso, SET iso 1600)..." onkeydown="if(event.key==='Enter') sendRcp()" />
+        <button class="cam-btn" onclick="sendRcp()">Send</button>
+      </div>
+    </div>
+
+    <!-- Tab 3: ThreadX RTOS Inspector -->
+    <div id="tab-threads" class="tab-content">
+      <div style="margin-bottom: 8px; font-size: 12px; color: #aaa;">
+        Detected ThreadX RTOS Threads & Schedular State
+      </div>
+      <div style="flex: 1; overflow-y: auto;">
+        <table class="data-table">
+          <thead>
+            <tr><th>Address</th><th>Thread Name</th><th>State</th><th>Priority</th><th>SP</th><th>Stack Range</th></tr>
+          </thead>
+          <tbody id="threads-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Tab 4: Snapshots -->
+    <div id="tab-snapshots" class="tab-content">
+      <div style="margin-bottom: 12px; font-size: 12px; color: #aaa;">
+        Full-system state snapshot save and instantaneous restoration.
+      </div>
+      <div style="display: flex; gap: 10px; margin-bottom: 16px;">
+        <input id="snap-name-input" class="cmd-input" type="text" placeholder="snapshot_01.dsmc2" />
+        <button class="cam-btn" onclick="saveSnapshot()">Save Snapshot</button>
+      </div>
+      <div id="snap-result" style="font-family: monospace; font-size: 12px; color: #00ff66;"></div>
+    </div>
+
+    <!-- Tab 5: Hardware Faults -->
+    <div id="tab-faults" class="tab-content">
+      <div style="margin-bottom: 12px; font-size: 12px; color: #aaa;">
+        Inject hardware faults to verify firmware resilience and exception handlers.
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <button class="cam-btn" onclick="injectFault('INTC_IRQ_LOCKUP')">Inject INTC IRQ Lockup (IRQ 58 Touch Storm)</button>
+        <button class="cam-btn" onclick="injectFault('DDR_ECC_CORRUPT')">Inject DDR ECC Single-Bit Memory Corruption</button>
+        <button class="cam-btn" onclick="injectFault('GPTIMER_DRIFT')">Inject GPTimer System Clock Drift (+15%)</button>
+      </div>
+      <div id="fault-result" style="font-family: monospace; font-size: 12px; color: #ffaa00; margin-top: 14px;"></div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+  let lastLogIndex = 0;
+  let isTouching = false;
+  const canvas = document.getElementById('touchCanvas');
+  const ctx = canvas.getContext('2d');
+  const viewport = document.getElementById('viewport');
+
+  // Map mouse/touch pointer to native 1024x576 coordinates
+  function getNativeCoords(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    const x = Math.round((clientX - rect.left) * (1024 / rect.width));
+    const y = Math.round((clientY - rect.top) * (576 / rect.height));
+    return {
+      x: Math.max(0, Math.min(1023, x)),
+      y: Math.max(0, Math.min(575, y))
+    };
+  }
+
+  // Draw local high-responsiveness touch reticle
+  function drawReticle(x, y) {
+    ctx.clearRect(0, 0, 1024, 576);
+    ctx.strokeStyle = '#ff3333';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, 22, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function clearReticle() {
+    ctx.clearRect(0, 0, 1024, 576);
+  }
+
+  // Touch Event Listeners
+  canvas.addEventListener('mousedown', (e) => {
+    isTouching = true;
+    const {x, y} = getNativeCoords(e);
+    drawReticle(x, y);
+    sendTouch(x, y, true);
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isTouching) return;
+    const {x, y} = getNativeCoords(e);
+    drawReticle(x, y);
+    sendTouch(x, y, true);
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!isTouching) return;
+    isTouching = false;
+    const {x, y} = getNativeCoords(e);
+    sendTouch(x, y, false);
+    setTimeout(clearReticle, 200);
+  });
+
+  // Mobile / Touchscreen Support
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    isTouching = true;
+    const {x, y} = getNativeCoords(e);
+    drawReticle(x, y);
+    sendTouch(x, y, true);
+  }, {passive: false});
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!isTouching) return;
+    const {x, y} = getNativeCoords(e);
+    drawReticle(x, y);
+    sendTouch(x, y, true);
+  }, {passive: false});
+
+  canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    isTouching = false;
+    clearReticle();
+  });
+
+  // API Dispatchers
+  function sendTouch(x, y, pressed) {
+    fetch('/api/touch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({x, y, pressed})
+    }).catch(() => {});
+  }
+
+  function sendBtn(name) {
+    fetch('/api/button', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({button: name})
+    }).catch(() => {});
+  }
+
+  document.getElementById('rec-btn').addEventListener('click', () => sendBtn('REC'));
+  document.getElementById('pwr-btn').addEventListener('click', () => {
+    fetch('/api/power', {method: 'POST'}).catch(() => {});
+  });
+
+  // Keyboard Shortcuts
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const key = e.key.toUpperCase();
+    if (key === 'M') sendBtn('MENU');
+    else if (key === 'R') sendBtn('REC');
+    else if (key === '1') sendBtn('1:1 MAG');
+    else if (key === 'U') sendBtn('USER 1');
+    else if (key === 'Z') sendBtn('USER 2');
+    else if (e.key === 'ArrowUp') sendBtn('NAV UP');
+    else if (e.key === 'ArrowDown') sendBtn('NAV DOWN');
+    else if (e.key === 'ArrowLeft') sendBtn('NAV LEFT');
+    else if (e.key === 'ArrowRight') sendBtn('NAV RIGHT');
+    else if (e.key === 'Enter') sendBtn('NAV ENTER');
+  });
+
+  // Tab switching
+  function switchTab(name, btn) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${name}`).classList.add('active');
+  }
+
+  function clearConsole() {
+    document.getElementById('console').textContent = '';
+  }
+
+  // Periodic Polling Loop for Logs & Camera Telemetry
+  async function pollStatus() {
+    try {
+      // 1. Status telemetry
+      const res = await fetch('/api/status');
+      const data = await res.json();
+
+      // Power state
+      const pwrText = document.getElementById('pwr-text');
+      const pwrBtn = document.getElementById('pwr-btn');
+      const ledDot = document.getElementById('led-dot');
+      const recBtn = document.getElementById('rec-btn');
+
+      if (data.power_state === 'STANDBY') {
+        pwrText.textContent = 'STANDBY';
+        pwrBtn.textContent = 'POWER ON';
+        pwrBtn.style.color = '#66ff88';
+        ledDot.className = 'led-dot';
+      } else if (data.power_state === 'BOOTING') {
+        const pct = Math.round(data.boot_progress * 100);
+        pwrText.textContent = `BOOTING ${pct}%`;
+        pwrBtn.textContent = 'BOOTING...';
+        ledDot.className = 'led-dot';
+      } else {
+        pwrText.textContent = 'ONLINE';
+        pwrBtn.textContent = 'POWER OFF';
+        pwrBtn.style.color = '#ccc';
+        ledDot.className = 'led-dot online';
+      }
+
+      // Recording badge & button state
+      if (data.is_recording) {
+        recBtn.classList.add('recording');
+        recBtn.innerHTML = '<span>■</span><span>STOP</span>';
+        ledDot.className = 'led-dot recording';
+      } else {
+        recBtn.classList.remove('recording');
+        recBtn.innerHTML = '<span>●</span><span>REC</span>';
+      }
+
+      // Instruction counter
+      const instrM = (data.instruction_count / 1000000).toFixed(1);
+      document.getElementById('instr-text').textContent = `${instrM}M INSTR`;
+
+      // Render RCP table
+      renderRcp(data.rcp);
+
+      // Render Threads table
+      renderThreads(data.threads);
+
+    } catch (e) {}
+
+    // 2. Serial logs
+    try {
+      const res = await fetch(`/api/logs?since=${lastLogIndex}`);
+      const data = await res.json();
+      if (data.logs && data.logs.length > 0) {
+        const box = document.getElementById('console');
+        box.textContent += data.logs.join('\n') + '\n';
+        lastLogIndex = data.total;
+        document.getElementById('log-count').textContent = `(${data.total} lines)`;
+        if (document.getElementById('auto-scroll').checked) {
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+    } catch (e) {}
+
+    setTimeout(pollStatus, 250);
+  }
+
+  function renderRcp(rcp) {
+    const tbody = document.getElementById('rcp-table-body');
+    if (!tbody || !rcp) return;
+    let html = '';
+    for (const [key, val] of Object.entries(rcp)) {
+      html += `<tr>
+        <td style="color: #66b3ff;">${key}</td>
+        <td style="color: #fff; font-weight: bold;">${val}</td>
+        <td><button class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="promptSetRcp('${key}', '${val}')">Edit</button></td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+  }
+
+  function promptSetRcp(param, curr) {
+    const newVal = prompt(`Enter new value for ${param}:`, curr);
+    if (newVal !== null) {
+      fetch('/api/rcp', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: `SET ${param} ${newVal}`})
+      });
+    }
+  }
+
+  function renderThreads(threads) {
+    const tbody = document.getElementById('threads-table-body');
+    if (!tbody || !threads) return;
+    let html = '';
+    for (const t of threads) {
+      const stateColor = (t.state === 'READY') ? '#00e676' : '#ffb300';
+      html += `<tr>
+        <td>${t.address}</td>
+        <td style="color: #fff; font-weight: bold;">${t.name}</td>
+        <td style="color: ${stateColor}; font-weight: bold;">${t.state}</td>
+        <td>${t.priority}</td>
+        <td>${t.sp}</td>
+        <td style="color: #888;">${t.stack_range}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+  }
+
+  function sendRcp() {
+    const input = document.getElementById('rcp-cmd-input');
+    const cmd = input.value.trim();
+    if (!cmd) return;
+    fetch('/api/rcp', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd})
+    }).then(r => r.json()).then(res => {
+      input.value = '';
+    });
+  }
+
+  function saveSnapshot() {
+    const name = document.getElementById('snap-name-input').value.trim() || undefined;
+    fetch('/api/snapshot/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    }).then(r => r.json()).then(res => {
+      document.getElementById('snap-result').textContent = `Snapshot saved: ${res.file}`;
+    });
+  }
+
+  function injectFault(type) {
+    fetch('/api/fault', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type})
+    }).then(r => r.json()).then(res => {
+      document.getElementById('fault-result').textContent = `Fault injected [${type}]: ${JSON.stringify(res.result)}`;
+    });
+  }
+
+  // Start telemetry loop
+  pollStatus();
+</script>
+</body>
+</html>
+"""
+
+
+def find_free_port(start_port: int = 8765, max_attempts: int = 20) -> int:
+    """Find a free TCP port starting from start_port."""
+    for port in range(start_port, start_port + max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return start_port
+
+
+def launch_web_studio(workspace_root: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True):
+    """Launch the Web-Based RED DSMC2 Virtual Camera Studio."""
+    free_port = find_free_port(port)
+    studio = WebStudio(workspace_root, host=host, port=free_port)
+
+    # Start camera worker
+    studio.start_camera()
+
+    # Create multi-threaded HTTP server
+    handler_class = create_handler(studio)
+    studio.http_server = ThreadedHTTPServer((host, free_port), handler_class)
+
+    url = f"http://{host}:{free_port}/"
+    print("\n" + "=" * 70, flush=True)
+    print(f"  RED DSMC2 VIRTUAL CAMERA STUDIO ONLINE", flush=True)
+    print(f"  URL: {url}", flush=True)
+    print(f"  Platform: Standard Library Web Studio (Port {free_port})", flush=True)
+    print(f"  Firmware: RED SCARLET-W 5K (v7.4.1)", flush=True)
+    print(f"  Ready for interactive touchscreen, physical buttons & RCP control.", flush=True)
+    print("=" * 70 + "\n", flush=True)
+
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    try:
+        studio.http_server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[*] Stopping Virtual Camera Studio...", flush=True)
+    finally:
+        studio.stop()
+
+
+if __name__ == "__main__":
+    root_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    launch_web_studio(root_dir)
