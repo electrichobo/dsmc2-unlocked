@@ -38,12 +38,19 @@ class Dsmc2DesktopApp:
         # Build Menu Bar
         self._build_menu()
 
+        # Track initialization of dashboard tabs
+        self._dashboard_initialized = False
+
         # Window closing handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Boot camera and start frame update loop
-        self.camera.load_firmware()
-        self.camera.start()
+        # Boot camera on startup
+        self.camera.power_on()
+        self.dashboard.refresh_threads()
+        self.dashboard.refresh_rcp()
+        self.dashboard.update_logs()
+        self.buttons.refresh_state()
+        self.screen.refresh()
 
         # Start UI periodic update loop (30 FPS)
         self.root.after(33, self._ui_loop)
@@ -74,8 +81,10 @@ class Dsmc2DesktopApp:
 
         # Camera Menu
         cam_menu = tk.Menu(menubar, tearoff=0, bg="#2B2B2B", fg="#FFFFFF")
+        cam_menu.add_command(label="Power On / Boot", command=self._power_on)
+        cam_menu.add_command(label="Power Off / Standby", command=self._power_off)
+        cam_menu.add_separator()
         cam_menu.add_command(label="Toggle Record (REC)", command=self.camera.press_record)
-        cam_menu.add_command(label="Power / Standby", command=lambda: self.camera.inject_fault("watchdog_reset"))
         cam_menu.add_separator()
         cam_menu.add_command(label="Format SSD / Media", command=lambda: self._set_param("MEDIA_FORMAT", "OK"))
         menubar.add_cascade(label="Camera", menu=cam_menu)
@@ -115,9 +124,26 @@ class Dsmc2DesktopApp:
         self.dashboard.pack(fill=tk.BOTH, expand=True)
 
     def _on_button_action(self, action: str):
-        # Refresh screen immediately on button press
+        # Refresh all views immediately on button press
+        self.buttons.refresh_state()
         self.screen.refresh()
         self.dashboard.refresh_rcp()
+        self.dashboard.refresh_threads()
+        self.dashboard.update_logs()
+
+    def _power_on(self):
+        self.camera.power_on()
+        self.dashboard.refresh_threads()
+        self.dashboard.refresh_rcp()
+        self.dashboard.update_logs()
+        self.buttons.refresh_state()
+        self.screen.refresh()
+
+    def _power_off(self):
+        self.camera.power_off()
+        self.dashboard.update_logs()
+        self.buttons.refresh_state()
+        self.screen.refresh()
 
     def _set_param(self, param: str, val: str):
         self.camera.rcp.process_command(f"SET / PARAM {param} {val}")
@@ -160,9 +186,12 @@ class Dsmc2DesktopApp:
     def _ui_loop(self):
         """Periodic UI update loop."""
         try:
+            if self.camera.power_state == self.camera.POWER_ON:
+                self.camera.step_slice(count=50_000)
             self.screen.refresh()
+            self.buttons.refresh_state()
             self.dashboard.update_logs()
-        except Exception as e:
+        except Exception:
             pass
 
         # Schedule next tick (~30 FPS = 33ms)

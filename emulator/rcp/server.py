@@ -22,15 +22,21 @@ class RcpServer:
         self.clients = []
 
     def start(self):
-        self.running = True
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(5)
-        self.server_socket.settimeout(0.5)
+        if self.running:
+            return
+        try:
+            self.running = True
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            self.server_socket.settimeout(0.5)
 
-        self.thread = threading.Thread(target=self._accept_loop, daemon=True, name="RcpServer")
-        self.thread.start()
+            self.thread = threading.Thread(target=self._accept_loop, daemon=True, name="RcpServer")
+            self.thread.start()
+        except Exception as e:
+            self.running = False
+            self.server_socket = None
 
     def stop(self):
         self.running = False
@@ -39,12 +45,16 @@ class RcpServer:
                 self.server_socket.close()
             except Exception:
                 pass
+            self.server_socket = None
         for client in self.clients:
             try:
                 client.close()
             except Exception:
                 pass
         self.clients.clear()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.6)
+            self.thread = None
 
     def _accept_loop(self):
         while self.running:

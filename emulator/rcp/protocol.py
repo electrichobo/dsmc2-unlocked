@@ -12,9 +12,11 @@ class RcpProtocol:
     # Standard DSMC2 Parameter IDs
     PARAM_RECORD_STATE = "record_state"
     PARAM_FPS = "frame_rate"
+    PARAM_FRAME_RATE = "frame_rate"
     PARAM_ISO = "iso"
     PARAM_COLOR_TEMP = "color_temperature"
     PARAM_SHUTTER = "shutter_angle"
+    PARAM_SHUTTER_ANGLE = "shutter_angle"
     PARAM_RESOLUTION = "resolution"
     PARAM_FORMAT = "record_format"
     PARAM_BATTERY_PERCENT = "battery_percent"

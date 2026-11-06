@@ -101,11 +101,23 @@ class Dsmc2Camera:
         self.rcp = RcpProtocol()
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
 
-        # Execution Control
+        # Execution & Power Control
         self.is_running = False
         self.worker_thread: Optional[threading.Thread] = None
         self.instruction_count = 0
         self.is_booted = False
+
+        # Power Lifecycle (STANDBY, BOOTING, ON)
+        self.POWER_STANDBY = "STANDBY"
+        self.POWER_BOOTING = "BOOTING"
+        self.POWER_ON = "ON"
+        self.power_state = self.POWER_STANDBY
+        self.boot_progress = 0.0
+        self.on_state_change: Optional[Callable[[str], None]] = None
+
+    def log_system(self, message: str):
+        """Append an entry to system logs (UART4)."""
+        self.uarts[4].completed_lines.append(message)
 
     def load_firmware(self, firmware_path: Optional[str] = None):
         """Load genuine RED DSMC2 program into DDR RAM at 0x80000000."""
@@ -147,29 +159,62 @@ class Dsmc2Camera:
         self.cpu.run(self.cpu.pc, 0, count=initial_instructions)
         self.instruction_count += initial_instructions
         self.is_booted = True
+        self.power_state = self.POWER_ON
+        self.boot_progress = 1.0
+
+    def power_on(self):
+        """Power on camera to operational state."""
+        if not self.is_booted:
+            self.log_system("[PWR] Powering on RED DSMC2 (Cortex-A8 @ 1GHz)...")
+            self.log_system(f"[PWR] Loading firmware from {os.path.basename(self.firmware_slot_dir)} into DDR (0x80000000)...")
+            self.load_firmware()
+            self.log_system("[CRT] Reset vector 0x80829F2C -> Initializing C runtime and clearing BSS...")
+            self.boot(initial_instructions=45_000_000)
+            self.log_system("[RTOS] ThreadX RTOS kernel initialized.")
+            threads = self.get_threads()
+            for t in threads:
+                self.log_system(f"[RTOS] Thread [{t['name']}] state={t['state']} prio={t['priority']}")
+            self.log_system("[DSS] OMAP3630 DISPC online: 1024x576 32bpp frame stream ready.")
+            self.log_system("[UI] RED Touch 7.0 online (maXTouch @ 0x4B, EDID @ 0x50).")
+            self.log_system(f"[SYS] RED {self.vfs.env.get('CAMERA_NAME', 'SCARLET-W 5K')} is ONLINE and READY.")
+        else:
+            self.log_system("[PWR] Resuming camera from standby -> Display & Sensors active.")
+
+        self.power_state = self.POWER_ON
+        self.is_booted = True
+        self.boot_progress = 1.0
+        self.rcp_server.start()
+        if self.on_state_change:
+            self.on_state_change(self.power_state)
+
+    def power_off(self):
+        """Power down camera to standby state."""
+        self.log_system("[PWR] Entering standby mode -> Display & Sensors sleeping...")
+        self.power_state = self.POWER_STANDBY
+        self.rcp_server.stop()
+        if self.on_state_change:
+            self.on_state_change(self.power_state)
+
+    def toggle_power(self):
+        """Toggle power between Standby and On."""
+        if self.power_state == self.POWER_STANDBY:
+            self.power_on()
+        else:
+            self.power_off()
 
     def start(self):
         """Start autonomous background execution."""
         if not self.is_booted:
             self.boot()
 
+        self.power_state = self.POWER_ON
         self.is_running = True
         self.rcp_server.start()
-
-        def _run():
-            while self.is_running:
-                self.step_slice(count=200_000)
-                time.sleep(0.001)
-
-        self.worker_thread = threading.Thread(target=_run, daemon=True, name="DSMC2Emulator")
-        self.worker_thread.start()
 
     def stop(self):
         """Stop emulator execution."""
         self.is_running = False
         self.rcp_server.stop()
-        if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=1.0)
 
     # Input and Control API
     def touch(self, x: int, y: int, pressed: bool):

@@ -108,6 +108,7 @@ class CameraScreen(ttk.Frame):
         x, y = self._map_coords(event)
         self.is_touch_down = True
         self.camera.touch(x, y, pressed=True)
+        self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
 
     def _on_touch_move(self, event):
         if self.is_touch_down:
@@ -118,22 +119,30 @@ class CameraScreen(ttk.Frame):
         x, y = self._map_coords(event)
         self.is_touch_down = False
         self.camera.touch(x, y, pressed=False)
+        self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
 
     def refresh(self):
         """Fetch latest pixels from camera DSS and redraw canvas."""
-        fb_bytes = self.camera.get_frame()
-        is_blank = not any(fb_bytes)
+        state = self.camera.power_state
 
-        if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
-            # 32bpp BGRA/RGBA from DISPC
-            img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
-        elif self.splash_image:
-            img = self.splash_image.copy()
-        else:
-            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (10, 10, 10))
+        if state == self.camera.POWER_STANDBY:
+            img = self._render_standby_screen()
+        elif state == self.camera.POWER_BOOTING:
+            img = self._render_booting_screen()
+        else: # POWER_ON
+            fb_bytes = self.camera.get_frame()
+            is_blank = not any(fb_bytes)
 
-        # Draw RED authentic HUD overlay (driven directly from camera state & RCP)
-        self._draw_hud(img)
+            if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
+                # 32bpp BGRA/RGBA from DISPC
+                img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+            elif self.splash_image:
+                img = self.splash_image.copy()
+            else:
+                img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+
+            # Draw RED authentic HUD overlay (driven directly from camera state & RCP)
+            self._draw_hud(img)
 
         # Scale to display size
         if self.scale != 1.0:
@@ -142,13 +151,60 @@ class CameraScreen(ttk.Frame):
         self.current_tk_image = ImageTk.PhotoImage(img)
         self.canvas.create_image(0, 0, anchor="nw", image=self.current_tk_image)
 
+    def _render_standby_screen(self) -> Image.Image:
+        """Render standby / soft-off screen with guidance."""
+        img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (8, 8, 8))
+        draw = ImageDraw.Draw(img)
+
+        # Ambient border
+        draw.rectangle([(10, 10), (1014, 566)], outline=(25, 25, 25), width=2)
+
+        # Center Standby Card
+        cx, cy = 512, 288
+        draw.rectangle([(cx - 260, cy - 90), (cx + 260, cy + 90)], fill=(16, 16, 16), outline=(40, 40, 40), width=2)
+
+        model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
+        draw.text((cx - 150, cy - 70), f"RED DIGITAL CINEMA  |  {model_name}", fill=(200, 200, 200))
+        draw.text((cx - 100, cy - 35), "[ SYSTEM IN STANDBY ]", fill=(255, 170, 0))
+        draw.text((cx - 120, cy + 0), "DC IN 14.8V  •  Hardware Ready", fill=(100, 100, 100))
+        draw.text((cx - 165, cy + 40), ">>> CLICK [POWER ON] BUTTON BELOW TO BOOT <<<", fill=(0, 255, 120))
+        return img
+
+    def _render_booting_screen(self) -> Image.Image:
+        """Render splash screen with animated boot progress bar."""
+        if self.splash_image:
+            img = self.splash_image.copy()
+        else:
+            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+        draw = ImageDraw.Draw(img)
+
+        # Progress Box
+        cx, cy = 512, 288
+        draw.rectangle([(cx - 240, cy - 50), (cx + 240, cy + 50)], fill=(0, 0, 0, 210), outline=(0, 200, 100), width=2)
+
+        pct = int(self.camera.boot_progress * 100)
+        draw.text((cx - 120, cy - 35), f"BOOTING RED DSMC2... {pct}%", fill=(255, 255, 255))
+
+        # Bar outline
+        bar_x1, bar_y1 = cx - 200, cy - 5
+        bar_x2, bar_y2 = cx + 200, cy + 15
+        draw.rectangle([(bar_x1, bar_y1), (bar_x2, bar_y2)], outline=(80, 80, 80), width=1)
+
+        # Bar fill
+        fill_width = int(400 * max(0.0, min(1.0, self.camera.boot_progress)))
+        if fill_width > 0:
+            draw.rectangle([(bar_x1 + 1, bar_y1 + 1), (bar_x1 + fill_width, bar_y2 - 1)], fill=(0, 220, 100))
+
+        draw.text((cx - 140, cy + 25), "Bringing up Cortex-A8, ThreadX & OMAP3...", fill=(160, 160, 160))
+        return img
+
     def _draw_hud(self, img: Image.Image):
         """Render genuine DSMC2 HUD indicators driven by camera state."""
         draw = ImageDraw.Draw(img)
 
         # Read camera parameters from RCP / camera state
         rcp = self.camera.rcp
-        fps = rcp.state.get(rcp.PARAM_FRAME_RATE, "24.00")
+        fps = rcp.state.get(rcp.PARAM_FPS, "24.00")
         shutter = rcp.state.get(rcp.PARAM_SHUTTER, "1/48")
         iso = rcp.state.get(rcp.PARAM_ISO, "800")
         format_name = rcp.state.get(rcp.PARAM_FORMAT, "5K 16:9")

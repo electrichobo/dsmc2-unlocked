@@ -44,20 +44,35 @@ class PhysicalButtons(ttk.Frame):
         )
         self.rec_btn.pack(side=tk.LEFT, padx=5)
 
+        # Power Controls Box (LED + Button)
+        power_box = tk.Frame(left_box, bg="#202020")
+        power_box.pack(side=tk.LEFT, padx=5)
+
+        self.power_led = tk.Label(
+            power_box,
+            text="[●] STANDBY",
+            bg="#202020",
+            fg="#FFAA00",
+            font=("Consolas", 8, "bold")
+        )
+        self.power_led.pack(anchor="center", pady=(0, 2))
+
         # Power / Standby Button
         self.power_btn = tk.Button(
-            left_box,
-            text="POWER\nSTANDBY",
-            bg="#333333",
-            fg="#DDDDDD",
-            font=("Helvetica", 8, "bold"),
+            power_box,
+            text="POWER ON",
+            bg="#1A401A",
+            fg="#44FF66",
+            activebackground="#2E7D32",
+            activeforeground="#FFFFFF",
+            font=("Helvetica", 9, "bold"),
             relief=tk.RAISED,
             bd=2,
-            width=8,
-            height=2,
+            width=10,
+            height=1,
             command=self._on_power_click
         )
-        self.power_btn.pack(side=tk.LEFT, padx=5)
+        self.power_btn.pack(anchor="center")
 
         # Middle Section: Standard Function Keys (MENU, 1:1 MAG, USER1, USER2)
         mid_box = tk.Frame(panel, bg="#202020")
@@ -144,19 +159,57 @@ class PhysicalButtons(ttk.Frame):
         is_rec = (self.camera.rcp.state.get("RECORD_STATE") == "2")
         if is_rec:
             self.rec_btn.config(bg="#FF0000", text="■ STOP")
+            self.camera.log_system("[REC] Recording STARTED -> RED MINI-MAG (R3D 5K 24fps)")
         else:
             self.rec_btn.config(bg="#990000", text="● REC")
+            self.camera.log_system("[REC] Recording STOPPED -> File saved safely")
 
         if self.on_action:
             self.on_action("record_toggled")
 
     def _on_power_click(self):
-        # Trigger PRM reset
-        self.camera.inject_fault("watchdog_reset")
+        """Toggle camera power state between Standby and On."""
+        self.camera.toggle_power()
+        self.refresh_state()
         if self.on_action:
-            self.on_action("power_reset")
+            self.on_action("power_toggled")
+
+    def refresh_state(self):
+        """Synchronize power button and LED with camera power state."""
+        state = self.camera.power_state
+        if state == self.camera.POWER_STANDBY:
+            self.power_led.config(text="[●] STANDBY", fg="#FFAA00")
+            self.power_btn.config(
+                text="POWER ON",
+                bg="#1A401A",
+                fg="#44FF66",
+                state=tk.NORMAL
+            )
+        elif state == self.camera.POWER_BOOTING:
+            pct = int(self.camera.boot_progress * 100)
+            self.power_led.config(text=f"[●] BOOTING {pct}%", fg="#00E5FF")
+            self.power_btn.config(
+                text="BOOTING...",
+                bg="#2B2B2B",
+                fg="#888888",
+                state=tk.DISABLED
+            )
+        else: # POWER_ON
+            self.power_led.config(text="[●] ONLINE", fg="#00FF44")
+            self.power_btn.config(
+                text="POWER OFF\n(STANDBY)",
+                bg="#333333",
+                fg="#CCCCCC",
+                state=tk.NORMAL
+            )
 
     def _press_gpio(self, pin: int):
+        pin_names = {
+            10: "MENU", 11: "1:1 MAG", 14: "USER 1", 15: "USER 2",
+            20: "NAV UP", 21: "NAV LEFT", 22: "NAV ENTER", 23: "NAV RIGHT", 24: "NAV DOWN"
+        }
+        key_name = pin_names.get(pin, f"PIN_{pin}")
+        self.camera.log_system(f"[KEY] Physical button [{key_name}] pressed (GPIO pin {pin})")
         # Pulse GPIO pin high then low
         if 1 in self.camera.gpio:
             self.camera.gpio[1].set_input_pin(pin, True)
