@@ -198,7 +198,7 @@ class Dsmc2DesktopApp:
             messagebox.showinfo("Export Complete", f"Boot trace exported to:\n{path}")
 
     def _ui_loop(self):
-        """Periodic UI update loop."""
+        """Periodic UI update loop (~25 FPS = 40ms tick)."""
         try:
             if self.camera.power_state == self.camera.POWER_ON:
                 self.camera.step_slice(count=50_000)
@@ -207,13 +207,15 @@ class Dsmc2DesktopApp:
             self.dashboard.update_logs()
         except Exception:
             pass
-
-        # Schedule next tick (~30 FPS = 33ms)
-        self.root.after(33, self._ui_loop)
+        finally:
+            self.root.after(40, self._ui_loop)
 
     def _on_close(self):
         self.camera.stop()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()

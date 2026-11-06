@@ -37,6 +37,7 @@ class CameraScreen(ttk.Frame):
 
         # Touch state
         self.is_touch_down = False
+        self.canvas_image_id: Optional[int] = None
 
         # Interactive RedUi Engine
         self.redui = RedUiEngine(self.camera)
@@ -91,7 +92,7 @@ class CameraScreen(ttk.Frame):
             height=self.display_height,
             bg="#000000",
             highlightthickness=0,
-            cursor="crosshair"
+            cursor="hand2"
         )
         self.canvas.pack()
 
@@ -99,6 +100,7 @@ class CameraScreen(ttk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_touch_down)
         self.canvas.bind("<B1-Motion>", self._on_touch_move)
         self.canvas.bind("<ButtonRelease-1>", self._on_touch_up)
+        self.canvas.bind("<Leave>", self._on_leave)
 
     def _map_coords(self, event) -> Tuple[int, int]:
         """Map canvas mouse coordinates back to native 1024x576 screen space."""
@@ -107,6 +109,15 @@ class CameraScreen(ttk.Frame):
         x = max(0, min(self.NATIVE_WIDTH - 1, x))
         y = max(0, min(self.NATIVE_HEIGHT - 1, y))
         return x, y
+
+    def _on_leave(self, event):
+        """Cleanly release touch if mouse dragged outside the virtual screen."""
+        if self.is_touch_down:
+            self.is_touch_down = False
+            if self.redui.last_touch_pos:
+                x, y = self.redui.last_touch_pos
+                self.camera.touch(x, y, pressed=False)
+                self.redui.handle_touch(x, y, pressed=False)
 
     def _on_touch_down(self, event):
         x, y = self._map_coords(event)
@@ -120,8 +131,7 @@ class CameraScreen(ttk.Frame):
         if self.is_touch_down:
             x, y = self._map_coords(event)
             self.camera.touch(x, y, pressed=True)
-            self.redui.handle_touch(x, y, pressed=True)
-            self.refresh()
+            self.redui.handle_touch(x, y, pressed=False)
 
     def _on_touch_up(self, event):
         x, y = self._map_coords(event)
@@ -182,7 +192,10 @@ class CameraScreen(ttk.Frame):
             img = img.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
 
         self.current_tk_image = ImageTk.PhotoImage(img)
-        self.canvas.create_image(0, 0, anchor="nw", image=self.current_tk_image)
+        if self.canvas_image_id is None:
+            self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw", image=self.current_tk_image)
+        else:
+            self.canvas.itemconfig(self.canvas_image_id, image=self.current_tk_image)
 
     def _render_standby_screen(self) -> Image.Image:
         """Render standby / soft-off screen with guidance."""

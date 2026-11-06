@@ -52,8 +52,10 @@ class RedUiEngine:
         self.is_touching: bool = False
         self.focus_point: Optional[Tuple[int, int]] = (512, 288)
 
-        # Build False Color LUT
+        # Build False Color LUT and flat palette
         self._false_color_lut = self._build_false_color_lut()
+        self._false_color_palette = self._build_false_color_palette()
+        self._zebra_pattern = self._build_zebra_pattern()
 
     def _build_false_color_lut(self) -> List[Tuple[int, int, int]]:
         """
@@ -89,6 +91,22 @@ class RedUiEngine:
             else:
                 lut.append((i, i, i))        # Neutral monochrome
         return lut
+
+    def _build_false_color_palette(self) -> List[int]:
+        """Flat 768-entry palette for C-accelerated PIL palette conversion."""
+        palette = []
+        for r, g, b in self._false_color_lut:
+            palette.extend([r, g, b])
+        return palette
+
+    def _build_zebra_pattern(self) -> Image.Image:
+        """Pre-rendered diagonal zebra stripe overlay for zero-allocation blitting."""
+        pattern = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(pattern)
+        for d in range(-self.HEIGHT, self.WIDTH, 12):
+            draw.line([(d, 0), (d + self.HEIGHT, self.HEIGHT)], fill=(255, 255, 255, 220), width=3)
+            draw.line([(d + 3, 0), (d + self.HEIGHT + 3, self.HEIGHT)], fill=(220, 20, 20, 220), width=3)
+        return pattern
 
     def toggle_menu(self):
         """Toggle DSMC2 system menu on/off."""
@@ -442,28 +460,18 @@ class RedUiEngine:
         return img
 
     def _apply_false_color(self, img: Image.Image) -> Image.Image:
-        """Apply false color exposure map based on pixel luminance."""
+        """Apply false color exposure map based on pixel luminance (C-accelerated palette)."""
         gray = img.convert("L")
-        pixels = list(gray.getdata())
-        fc_pixels = [self._false_color_lut[p] for p in pixels]
-        fc_img = Image.new("RGB", img.size)
-        fc_img.putdata(fc_pixels)
-        return fc_img
+        gray.putpalette(self._false_color_palette)
+        return gray.convert("RGB")
 
     def _apply_zebras(self, img: Image.Image) -> Image.Image:
-        """Draw diagonal zebra stripes on highlights > 95% IRE (luminance > 240)."""
+        """Draw diagonal zebra stripes on highlights > 95% IRE (luminance > 240) using fast mask composite."""
         gray = img.convert("L")
-        pixels = gray.load()
-        draw = ImageDraw.Draw(img)
-        w, h = img.size
-        # Draw diagonal hatching across hot pixels
-        step = 8
-        for y in range(0, h, step):
-            for x in range(0, w, step):
-                if pixels[x, y] > 235:
-                    draw.line([(x, y), (min(w - 1, x + 6), min(h - 1, y + 6))], fill=(255, 0, 0), width=2)
-                    draw.line([(min(w - 1, x + 3), y), (min(w - 1, x + 9), min(h - 1, y + 6))], fill=(255, 255, 255), width=1)
-        return img
+        mask = gray.point(lambda p: 255 if p > 235 else 0, mode="1")
+        res = img.copy()
+        res.paste(self._zebra_pattern, (0, 0), mask)
+        return res
 
     def _draw_guides(self, draw: ImageDraw.ImageDraw):
         """Draw authentic cinema frame lines."""

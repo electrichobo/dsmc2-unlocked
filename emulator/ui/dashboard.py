@@ -270,8 +270,7 @@ class DeveloperDashboard(ttk.Notebook):
         logs = self.camera.get_serial_logs()
         if len(logs) > self._last_log_count:
             new_lines = logs[self._last_log_count:]
-            for line in new_lines:
-                self.log_text.insert(tk.END, line + "\n")
+            self.log_text.insert(tk.END, "\n".join(new_lines) + "\n")
             self._last_log_count = len(logs)
             if self.auto_scroll_var.get():
                 self.log_text.see(tk.END)
