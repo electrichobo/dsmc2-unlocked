@@ -123,3 +123,31 @@ def test_web_studio_logs_stream(web_server):
     data = json.loads(resp.read().decode("utf-8"))
     assert "logs" in data
     assert len(data["logs"]) > 0
+
+
+def test_web_studio_lens_api(web_server):
+    """Verify GET /api/lens and POST /api/lens/aperture controls."""
+    url = web_server["url"] + "/api/lens"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    data = json.loads(resp.read().decode("utf-8"))
+    assert "status" in data
+    assert "catalog" in data
+    assert data["status"]["attached"] is True
+
+    # Adjust aperture via POST /api/lens/aperture
+    set_url = web_server["url"] + "/api/lens/aperture"
+    req = urllib.request.Request(set_url, data=json.dumps({"aperture": 4.0}).encode("utf-8"), headers={"Content-Type": "application/json"})
+    resp2 = urllib.request.urlopen(req)
+    assert resp2.status == 200
+    assert web_server["studio"].camera.lens_mount.current_aperture == 4.0
+
+
+def test_web_studio_media_api(web_server):
+    """Verify GET /api/media/clips returns clip history."""
+    url = web_server["url"] + "/api/media/clips"
+    resp = urllib.request.urlopen(url)
+    assert resp.status == 200
+    data = json.loads(resp.read().decode("utf-8"))
+    assert "clips" in data
+    assert isinstance(data["clips"], list)

@@ -24,6 +24,7 @@ class RedUiEngine:
     SHUTTER_OPTIONS = ["1/24", "1/32", "1/48", "1/50", "1/60", "1/96", "1/120", "1/250", "1/500", "180.0°"]
     ISO_OPTIONS = ["250", "320", "400", "500", "640", "800", "1000", "1280", "1600", "3200"]
     FORMAT_OPTIONS = ["5K 16:9", "5K 2:1", "4.5K 16:9", "4K 16:9", "3K 16:9", "2K 16:9"]
+    IRIS_OPTIONS = ["1.4", "1.8", "2.0", "2.8", "4.0", "5.6", "8.0", "11.0", "16.0", "22.0"]
 
     MENU_TABS = ["SETTINGS", "MEDIA", "AUDIO", "OVERLAYS", "LOOK", "ABOUT"]
 
@@ -154,28 +155,32 @@ class RedUiEngine:
         # 3. Handle Normal HUD Touch Regions
         # Top Bar (0 <= y <= 40)
         if 0 <= y <= 40:
-            # STBY / REC Badge (15 <= x <= 75)
-            if 15 <= x <= 85:
+            # STBY / REC Badge (12 <= x <= 82)
+            if 12 <= x <= 82:
                 self.camera.press_record()
                 return True
-            # Menu Button / Model Header (88 <= x <= 290)
-            if 88 <= x <= 290:
+            # Menu Button / Model Header (88 <= x <= 245)
+            if 88 <= x <= 245:
                 self.toggle_menu()
                 return True
-            # FPS Badge (310 <= x <= 430)
-            if 310 <= x <= 430:
+            # FPS Badge (255 <= x <= 365)
+            if 255 <= x <= 365:
                 self._open_dialog("FPS")
                 return True
-            # SHUTTER Badge (440 <= x <= 600)
-            if 440 <= x <= 600:
+            # SHUTTER Badge (375 <= x <= 495)
+            if 375 <= x <= 495:
                 self._open_dialog("SHUTTER")
                 return True
-            # ISO Badge (610 <= x <= 730)
-            if 610 <= x <= 730:
+            # IRIS Badge (505 <= x <= 615)
+            if 505 <= x <= 615:
+                self._open_dialog("IRIS")
+                return True
+            # ISO Badge (625 <= x <= 735)
+            if 625 <= x <= 735:
                 self._open_dialog("ISO")
                 return True
-            # FORMAT Badge (740 <= x <= 910)
-            if 740 <= x <= 910:
+            # FORMAT Badge (745 <= x <= 895)
+            if 745 <= x <= 895:
                 self._open_dialog("FORMAT")
                 return True
 
@@ -245,6 +250,23 @@ class RedUiEngine:
                 self.active_dialog = None
                 return True
 
+        elif self.active_dialog == "IRIS":
+            lm = getattr(self.camera, "lens_mount", None)
+            if lm and lm.attached_lens:
+                stops = lm.get_available_aperture_stops()
+                items = [f"{s:.1f}" for s in stops]
+            else:
+                items = self.IRIS_OPTIONS
+            clicked_idx = self._get_grid_clicked_index(x, y, dx1 + 30, dy1 + 60, len(items), cols=5, item_w=120, item_h=45)
+            if clicked_idx is not None and clicked_idx < len(items):
+                val_f = float(items[clicked_idx])
+                if lm:
+                    lm.set_aperture(val_f)
+                else:
+                    rcp.state["aperture"] = f"f/{val_f:.1f}"
+                self.active_dialog = None
+                return True
+
         elif self.active_dialog == "ISO":
             items = self.ISO_OPTIONS
             clicked_idx = self._get_grid_clicked_index(x, y, dx1 + 30, dy1 + 60, len(items), cols=5, item_w=120, item_h=45)
@@ -268,13 +290,18 @@ class RedUiEngine:
         elif self.active_dialog == "MEDIA":
             # Check Format SSD button: x: cx - 180 .. cx - 20, y: dy2 - 55 .. dy2 - 15
             if (cx - 180) <= x <= (cx - 20) and (dy2 - 55) <= y <= (dy2 - 15):
-                self.camera.log_system("[MEDIA] Formatting RED MINI-MAG 512GB (R3D FAT32/UDF)...")
-                self.camera.log_system("[MEDIA] Format completed successfully. Reel A001 initialized.")
+                if hasattr(self.camera, "recorder"):
+                    self.camera.recorder.format_media()
+                else:
+                    self.camera.log_system("[MEDIA] Formatting RED MINI-MAG 512GB (R3D FAT32/UDF)...")
                 self.active_dialog = None
                 return True
             # Check Eject Media button: x: cx + 20 .. cx + 180, y: dy2 - 55 .. dy2 - 15
             if (cx + 20) <= x <= (cx + 180) and (dy2 - 55) <= y <= (dy2 - 15):
-                self.camera.log_system("[MEDIA] RED MINI-MAG unmounted and ejected safely.")
+                if hasattr(self.camera, "recorder"):
+                    self.camera.recorder.eject_media()
+                else:
+                    self.camera.log_system("[MEDIA] RED MINI-MAG unmounted and ejected safely.")
                 self.active_dialog = None
                 return True
 
@@ -577,6 +604,20 @@ class RedUiEngine:
             curr_val = rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48")
             self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=5, item_w=120, item_h=45, unit="")
 
+        elif self.active_dialog == "IRIS":
+            lm = getattr(self.camera, "lens_mount", None)
+            if lm and lm.attached_lens:
+                stops = lm.get_available_aperture_stops()
+                items = [f"{s:.1f}" for s in stops]
+                curr_val = f"{lm.current_aperture:.1f}"
+                lens_desc = f"{lm.attached_lens.model} ({lm.mount_type})"
+            else:
+                items = self.IRIS_OPTIONS
+                curr_val = "2.8"
+                lens_desc = "Standard Lens Scale"
+            draw.text((dx1 + 30, dy1 + 42), f"LENS: {lens_desc}", fill=(180, 180, 180))
+            self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=5, item_w=120, item_h=45, unit="f/")
+
         elif self.active_dialog == "ISO":
             items = self.ISO_OPTIONS
             curr_val = rcp.state.get(RcpProtocol.PARAM_ISO, "800")
@@ -588,16 +629,24 @@ class RedUiEngine:
             self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=3, item_w=200, item_h=45, unit="")
 
         elif self.active_dialog == "MEDIA":
-            # Media info details
+            rec = getattr(self.camera, "recorder", None)
+            reel_str = rec.current_reel_id if rec else "A001"
+            status_str = "Mounted (Read/Write)" if (not rec or rec.is_media_mounted) else "Unmounted / Ejected"
+            used_gb = (rec.used_space_mb / 1024.0) if rec else 112.0
+            free_gb = (rec.free_space_mb / 1024.0) if rec else 400.0
+            rem_pct = rec.media_remaining_percent if rec else 78
+            clip_cnt = len(rec.list_clips()) if rec else 14
+
             draw.text((dx1 + 30, dy1 + 55), "MEDIA DEVICE: RED MINI-MAG 512GB", fill=(255, 255, 255))
-            draw.text((dx1 + 30, dy1 + 80), "STATUS: Mounted (Read/Write)  |  FORMAT: FAT32 / UDF", fill=(180, 180, 180))
-            draw.text((dx1 + 30, dy1 + 105), "CAPACITY: 512 GB  |  USED: 112 GB (22%)  |  FREE: 400 GB (78%)", fill=(180, 180, 180))
-            draw.text((dx1 + 30, dy1 + 130), "REEL: A001  |  CLIPS: 14 clips recorded", fill=(180, 180, 180))
+            draw.text((dx1 + 30, dy1 + 80), f"STATUS: {status_str}  |  FORMAT: FAT32 / UDF v2.50", fill=(180, 180, 180))
+            draw.text((dx1 + 30, dy1 + 105), f"CAPACITY: 512 GB  |  USED: {used_gb:.1f} GB ({100-rem_pct}%)  |  FREE: {free_gb:.1f} GB ({rem_pct}%)", fill=(180, 180, 180))
+            draw.text((dx1 + 30, dy1 + 130), f"REEL: {reel_str}  |  CLIPS: {clip_cnt} clips recorded", fill=(180, 180, 180))
 
             # Capacity progress bar
             bx1, by1, bx2, by2 = dx1 + 30, dy1 + 160, dx2 - 30, dy1 + 185
             draw.rectangle([(bx1, by1), (bx2, by2)], outline=(80, 80, 80), width=1)
-            used_w = int((bx2 - bx1) * 0.22)
+            used_ratio = (rec.used_space_mb / rec.total_capacity_mb) if rec else 0.22
+            used_w = int((bx2 - bx1) * max(0.0, min(1.0, used_ratio)))
             draw.rectangle([(bx1 + 1, by1 + 1), (bx1 + used_w, by2 - 1)], fill=(0, 180, 220))
             draw.rectangle([(bx1 + used_w, by1 + 1), (bx2 - 1, by2 - 1)], fill=(0, 200, 80))
 
@@ -693,6 +742,12 @@ class RedUiEngine:
             draw.text((rx1, ry), f"• Sensor Sensitivity: {iso} ISO  (Tap to change)", fill=(200, 200, 200))
             ry += 30
             draw.text((rx1, ry), f"• Recording Format: {fmt}  (Tap to change)", fill=(200, 200, 200))
+            ry += 30
+            lm = getattr(self.camera, "lens_mount", None)
+            if lm and lm.attached_lens:
+                draw.text((rx1, ry), f"• Lens: {lm.attached_lens.model} [f/{lm.current_aperture:.1f}]", fill=(0, 220, 120))
+            else:
+                draw.text((rx1, ry), "• Lens: No Lens Attached (f/--)", fill=(160, 160, 160))
             ry += 30
             draw.text((rx1, ry), "• Fan Mode: Adaptive (Target 40°C)", fill=(160, 160, 160))
             ry += 30

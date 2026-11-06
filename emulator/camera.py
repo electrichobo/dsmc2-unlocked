@@ -21,8 +21,10 @@ from emulator.devices.i2c_eeprom import EdidEeprom
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
 from emulator.devices.dss import OmapDss
 from emulator.storage.vfs import VirtualFileSystem
+from emulator.storage.r3d_recorder import R3dClipRecorder
 from emulator.rcp.protocol import RcpProtocol
 from emulator.rcp.server import RcpServer
+from emulator.devices.lens_mount import LensMount
 from emulator.core.snapshot import SnapshotManager
 
 
@@ -98,8 +100,15 @@ class Dsmc2Camera:
         self.bus.register_device(OmapDss.BASE_ADDR, OmapDss.SIZE, self.dss)
 
         # 11. RCP Protocol & Server
-        self.rcp = RcpProtocol()
+        self.rcp = RcpProtocol(camera=self)
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
+
+        # 12. Smart Electronic Lens Mount
+        lens_dir = os.path.join(self.firmware_slot_dir, "lens")
+        self.lens_mount = LensMount(self, lens_database_dir=lens_dir)
+
+        # 13. REDCODE R3D Media Recorder
+        self.recorder = R3dClipRecorder(self, storage_root=self.workspace_root)
 
         # Execution & Power Control
         self.is_running = False
@@ -199,6 +208,10 @@ class Dsmc2Camera:
                 self.log_system(f"[RTOS] Thread [{t['name']}] state={t['state']} prio={t['priority']}")
             self.log_system("[DSS] OMAP3630 DISPC online: 1024x576 32bpp frame stream ready.")
             self.log_system("[UI] RED Touch 7.0 online (maXTouch @ 0x4B, EDID @ 0x50).")
+            if self.lens_mount and self.lens_mount.attached_lens:
+                self.log_system(f"[MOUNT] {self.lens_mount.mount_type} online: {self.lens_mount.attached_lens.model} ({self.lens_mount.attached_lens.serial})")
+            if hasattr(self, "recorder") and self.recorder:
+                self.log_system(f"[MEDIA] RED MINI-MAG 512GB online: Reel {self.recorder.current_reel_id} ({self.recorder.media_remaining_percent}% free)")
             self.log_system(f"[SYS] RED {self.vfs.env.get('CAMERA_NAME', 'SCARLET-W 5K')} is ONLINE and READY.")
         else:
             self.log_system("[PWR] Resuming camera from standby -> Display & Sensors active.")
@@ -244,14 +257,23 @@ class Dsmc2Camera:
         """Deliver touchscreen event to Atmel maXTouch controller."""
         self.maxtouch.inject_touch(x, y, pressed)
 
-    def press_record(self):
-        """Toggle camera recording state."""
-        current = self.rcp.state[RcpProtocol.PARAM_RECORD_STATE]
-        new_state = "0" if current == "2" else "2"
-        self.rcp.state[RcpProtocol.PARAM_RECORD_STATE] = new_state
-        # Also signal physical GPIO pin for REC
+    def start_recording(self) -> bool:
+        """Start active clip recording."""
         self.gpio[1].set_input_pin(12, True)
         self.gpio[1].set_input_pin(12, False)
+        return self.recorder.start_recording()
+
+    def stop_recording(self) -> bool:
+        """Stop active clip recording."""
+        self.gpio[1].set_input_pin(12, True)
+        self.gpio[1].set_input_pin(12, False)
+        return self.recorder.stop_recording()
+
+    def press_record(self):
+        """Toggle camera recording state."""
+        self.gpio[1].set_input_pin(12, True)
+        self.gpio[1].set_input_pin(12, False)
+        self.recorder.toggle_recording()
 
     def get_frame(self) -> bytes:
         """Fetch current live pixels from Display Subsystem."""

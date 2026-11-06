@@ -126,6 +126,31 @@ The emulator models the physical address space of the Texas Instruments DM3725 /
   - `/image1` and `/image2`: Slot binaries (`dsmc_program.mem`, `cfg`, `res/`, `overlays/`).
   - `/data`, `/log`, `/pdata`: Persistent host storage trees.
 
-### 3.9 RCP Server (`emulator/rcp/protocol.py`, `server.py`)
+### 3.9 RCP Server & External Client Bridge (`emulator/rcp/protocol.py`, `server.py`)
 - Implements the RED Command Protocol over TCP port 1111 and UART3.
-- Handles GET, SET, RECORD START/STOP, and STATUS commands for camera control.
+- Supports multi-client TCP control with asynchronous state change notifications (`NOTIFY <param> <val>`).
+- Supports canonical parameter aliasing (`iris` -> `aperture`, `shutter` -> `shutter_angle`, `fps` -> `frame_rate`, `rcp_param_iso` -> `iso`).
+- Handles `GET`, `SET`, `RECORD START/STOP/TOGGLE`, `AF`, `STATUS`, `HELP`/`PARAMS`, and keepalive `PING`/`PONG` commands.
+- Connects directly with third-party remote apps (e.g., RED Control iOS/Android).
+
+### 3.10 Smart Lens Mount Subsystem (`emulator/devices/lens_mount.py`)
+- Models DSMC2 Canon EF, Nikon F, and PL Intelligent (/i) lens mount hardware interfaces.
+- Parses 230+ authentic manufacturer lens configurations from firmware store (`slot/lens/canon_mount/*.cfg` and `slot/lens/nikon_mount/*.cfg`).
+- Electronic 1/3 EV aperture / iris stepping (e.g. f/1.2 through f/22) with boundary validation.
+- Zoom ring focal length tracking and ultrasonic/stepper focus distance motor simulation.
+- Contrast AF sweep simulation with reticle phase-lock calculation.
+- Synchronizes optical metadata directly with camera state and RCP (`PARAM_APERTURE`, `PARAM_FOCAL_LENGTH`, `PARAM_FOCUS_DIST`, `PARAM_LENS_NAME`, `PARAM_LENS_SERIAL`).
+
+### 3.11 REDCODE R3D Media Recording Subsystem (`emulator/storage/r3d_recorder.py`)
+- Models authentic RED MINI-MAG high-speed solid-state media storage in `persistent_store/media/`.
+- Implements authentic RED DSMC2 naming and reel progression: `A001_C001_0101AB_001.RDC/`.
+- Generates binary-authentic `.R3D` ISO container files with `ftyp` box (`RED2`), `rdxm` metadata atom, and `mdat` frame packets.
+- Generates authentic `.RMD` XML metadata sidecars recording clip name, camera model, reel, frame rate, compression ratio, ISO, shutter, color temp, timecode start/end, and attached lens metadata.
+- Models media remaining space decrement, reel formatting, and media eject/mount lifecycle.
+
+### 3.12 Web-Based Virtual Camera Studio (`emulator/ui/web.py`)
+- Runs a multi-threaded HTTP server on default port `8765`.
+- Decoupled `ScreenCompositor` generating authentic 1024x576 JPEG frames from live framebuffer and splash assets.
+- Real-time MJPEG video stream (`/api/stream`) at ~25 FPS with zero OS mouse/keyboard lockups.
+- Interactive HUD overlays: Iris aperture badge and quick-selection dialog, FPS, Shutter, ISO, Format, and False Color tools.
+- Engineering Workbench with live tabs: Console/Serial, RCP Parameters, Lens & Optics, Media & Clips, ThreadX RTOS, Snapshots, and Fault Injection.

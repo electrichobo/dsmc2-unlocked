@@ -159,33 +159,39 @@ class ScreenCompositor:
 
         # Menu Button
         menu_hl = (220, 20, 20) if self.redui.is_menu_open else (60, 60, 60)
-        draw.rectangle([(88, 6), (295, 34)], fill=(28, 28, 28), outline=menu_hl, width=1)
+        draw.rectangle([(88, 6), (245, 34)], fill=(28, 28, 28), outline=menu_hl, width=1)
         model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
         draw.text((96, 11), f"RED {model_name} [MENU]", fill=(220, 220, 220))
 
         # FPS
         fps_hl = (220, 20, 20) if self.redui.active_dialog == "FPS" else (60, 60, 60)
-        draw.rectangle([(310, 6), (430, 34)], fill=(28, 28, 28), outline=fps_hl, width=1)
-        draw.text((320, 11), f"FPS: {fps}", fill=(255, 255, 255))
+        draw.rectangle([(255, 6), (365, 34)], fill=(28, 28, 28), outline=fps_hl, width=1)
+        draw.text((265, 11), f"FPS: {fps}", fill=(255, 255, 255))
 
         # SHUTTER
         shutter_hl = (220, 20, 20) if self.redui.active_dialog == "SHUTTER" else (60, 60, 60)
-        draw.rectangle([(440, 6), (600, 34)], fill=(28, 28, 28), outline=shutter_hl, width=1)
-        draw.text((450, 11), f"SHUTTER: {shutter}", fill=(255, 255, 255))
+        draw.rectangle([(375, 6), (495, 34)], fill=(28, 28, 28), outline=shutter_hl, width=1)
+        draw.text((385, 11), f"SHTR: {shutter}", fill=(255, 255, 255))
+
+        # IRIS / APERTURE
+        iris_str = rcp.state.get("aperture", "f/2.8")
+        iris_hl = (220, 20, 20) if self.redui.active_dialog == "IRIS" else (60, 60, 60)
+        draw.rectangle([(505, 6), (615, 34)], fill=(28, 28, 28), outline=iris_hl, width=1)
+        draw.text((515, 11), f"IRIS: {iris_str}", fill=(255, 255, 255))
 
         # ISO
         iso_hl = (220, 20, 20) if self.redui.active_dialog == "ISO" else (60, 60, 60)
-        draw.rectangle([(610, 6), (730, 34)], fill=(28, 28, 28), outline=iso_hl, width=1)
-        draw.text((620, 11), f"ISO: {iso}", fill=(255, 255, 255))
+        draw.rectangle([(625, 6), (735, 34)], fill=(28, 28, 28), outline=iso_hl, width=1)
+        draw.text((635, 11), f"ISO: {iso}", fill=(255, 255, 255))
 
         # FORMAT
         fmt_hl = (220, 20, 20) if self.redui.active_dialog == "FORMAT" else (60, 60, 60)
-        draw.rectangle([(740, 6), (910, 34)], fill=(28, 28, 28), outline=fmt_hl, width=1)
-        draw.text((750, 11), f"FORMAT: {format_name}", fill=(255, 255, 255))
+        draw.rectangle([(745, 6), (895, 34)], fill=(28, 28, 28), outline=fmt_hl, width=1)
+        draw.text((755, 11), f"FORMAT: {format_name}", fill=(255, 255, 255))
 
         # DC / Battery
-        draw.rectangle([(920, 6), (1014, 34)], fill=(20, 35, 20), outline=(0, 180, 60), width=1)
-        draw.text((930, 11), "DC 14.8V", fill=(80, 240, 80))
+        draw.rectangle([(905, 6), (1014, 34)], fill=(20, 35, 20), outline=(0, 180, 60), width=1)
+        draw.text((915, 11), "DC 14.8V", fill=(80, 240, 80))
 
         # Bottom Bar
         draw.rectangle([(0, 540), (1024, 576)], fill=(0, 0, 0, 200))
@@ -198,9 +204,12 @@ class ScreenCompositor:
         draw.text((20, 550), f"TC: {timecode}", fill=tc_color)
 
         # Media
+        rec = getattr(self.camera, "recorder", None)
+        rem_pct = rec.media_remaining_percent if rec else 78
+        media_txt = f"MEDIA: RED MINI-MAG 512GB [{rem_pct}% FREE]" if (not rec or rec.is_media_mounted) else "MEDIA: NO RED MINI-MAG"
         media_hl = (220, 20, 20) if self.redui.active_dialog == "MEDIA" else (60, 60, 60)
         draw.rectangle([(250, 544), (660, 572)], fill=(28, 28, 28), outline=media_hl, width=1)
-        draw.text((260, 550), "MEDIA: RED MINI-MAG 512GB [78% FREE]", fill=(200, 200, 200))
+        draw.text((260, 550), media_txt, fill=(200, 200, 200))
 
         # Audio
         audio_hl = (220, 20, 20) if self.redui.active_dialog == "AUDIO" else (60, 60, 60)
@@ -317,6 +326,15 @@ def create_handler(studio: WebStudio):
                 self._serve_status_json()
             elif path == "/api/logs":
                 self._serve_logs_json(parsed.query)
+            elif path == "/api/lens":
+                with studio.lock:
+                    lm = studio.camera.lens_mount
+                    catalog = [l.to_dict() for l in lm.lens_database]
+                    self._send_json({"status": lm.get_status(), "catalog": catalog})
+            elif path == "/api/media/clips":
+                with studio.lock:
+                    clips = studio.camera.recorder.list_clips()
+                    self._send_json({"clips": clips})
             else:
                 self.send_error(404, "Not Found")
 
@@ -389,6 +407,69 @@ def create_handler(studio: WebStudio):
                     res = inj.inject_fault(fault_type)
                 self._send_json({"status": "ok", "result": res})
 
+            elif path == "/api/lens/attach":
+                name = str(data.get("name", ""))
+                idx = data.get("index")
+                with studio.lock:
+                    lm = studio.camera.lens_mount
+                    target = None
+                    if idx is not None and 0 <= int(idx) < len(lm.lens_database):
+                        target = lm.lens_database[int(idx)]
+                    elif name:
+                        target = next((l for l in lm.lens_database if l.model.lower() == name.lower()), None)
+                    if target:
+                        lm.attach_lens(target)
+                self._send_json({"status": "ok", "attached": target.model if target else None})
+
+            elif path == "/api/lens/mount":
+                mount_name = str(data.get("mount", "Canon EF"))
+                with studio.lock:
+                    studio.camera.lens_mount.set_mount_type(mount_name)
+                self._send_json({"status": "ok", "mount": mount_name})
+
+            elif path == "/api/lens/aperture":
+                val = data.get("aperture")
+                step = data.get("step")
+                with studio.lock:
+                    lm = studio.camera.lens_mount
+                    if step is not None:
+                        lm.step_aperture(int(step))
+                    elif val is not None:
+                        lm.set_aperture(float(val))
+                self._send_json({"status": "ok", "aperture": studio.camera.lens_mount.current_aperture})
+
+            elif path == "/api/lens/focal":
+                f_mm = float(data.get("focal_length", 50.0))
+                with studio.lock:
+                    studio.camera.lens_mount.set_focal_length(f_mm)
+                self._send_json({"status": "ok", "focal_length": studio.camera.lens_mount.current_focal_length})
+
+            elif path == "/api/lens/focus":
+                dist = float(data.get("distance", 2.5))
+                with studio.lock:
+                    studio.camera.lens_mount.set_focus_distance(dist)
+                self._send_json({"status": "ok", "focus_distance": studio.camera.lens_mount.current_focus_distance})
+
+            elif path == "/api/lens/af":
+                with studio.lock:
+                    res = studio.camera.lens_mount.trigger_autofocus()
+                self._send_json({"status": "ok", "result": res, "distance": studio.camera.lens_mount.current_focus_distance})
+
+            elif path == "/api/media/format":
+                with studio.lock:
+                    res = studio.camera.recorder.format_media()
+                self._send_json({"status": "ok", "formatted": res})
+
+            elif path == "/api/media/eject":
+                with studio.lock:
+                    res = studio.camera.recorder.eject_media()
+                self._send_json({"status": "ok", "ejected": res})
+
+            elif path == "/api/media/mount":
+                with studio.lock:
+                    res = studio.camera.recorder.mount_media()
+                self._send_json({"status": "ok", "mounted": res})
+
             else:
                 self.send_error(404, "Unknown API Route")
 
@@ -437,11 +518,28 @@ def create_handler(studio: WebStudio):
             with studio.lock:
                 cam = studio.camera
                 is_rec = (cam.rcp.state.get(RcpProtocol.PARAM_RECORD_STATE) == "2")
+                lm_status = cam.lens_mount.get_status() if hasattr(cam, "lens_mount") else None
+                rec_status = {
+                    "is_recording": cam.recorder.is_recording,
+                    "is_mounted": cam.recorder.is_media_mounted,
+                    "reel_id": cam.recorder.current_reel_id,
+                    "clip_number": cam.recorder.clip_number,
+                    "capacity_gb": cam.recorder.MEDIA_CAPACITY_GB,
+                    "used_mb": round(cam.recorder.used_space_mb, 1),
+                    "free_mb": round(cam.recorder.free_space_mb, 1),
+                    "remaining_percent": cam.recorder.media_remaining_percent,
+                    "current_clip": cam.recorder.current_clip_name,
+                    "clips_count": len(cam.recorder.list_clips())
+                } if hasattr(cam, "recorder") else None
+
                 status = {
                     "power_state": cam.power_state,
                     "boot_progress": cam.boot_progress,
                     "instruction_count": cam.instruction_count,
                     "is_recording": is_rec,
+                    "rcp_clients_count": cam.rcp_server.get_client_count() if hasattr(cam, "rcp_server") else 0,
+                    "lens": lm_status,
+                    "media": rec_status,
                     "active_dialog": studio.compositor.redui.active_dialog,
                     "is_menu_open": studio.compositor.redui.is_menu_open,
                     "tools": {
@@ -888,6 +986,9 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <span id="pwr-text">STANDBY</span>
     </div>
     <div class="led-badge">
+      <span>RCP: <strong id="rcp-clients">0 clients</strong> (Port 1111)</span>
+    </div>
+    <div class="led-badge">
       <span>HOST: <strong>{{HOST}}:{{PORT}}</strong></span>
     </div>
     <div class="led-badge">
@@ -970,6 +1071,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('serial', this)">Console / Serial</button>
       <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Parameters</button>
+      <button class="tab-btn" onclick="switchTab('lens', this)">Lens & Optics</button>
+      <button class="tab-btn" onclick="switchTab('media', this)">Media & Clips</button>
       <button class="tab-btn" onclick="switchTab('threads', this)">ThreadX RTOS</button>
       <button class="tab-btn" onclick="switchTab('snapshots', this)">Snapshots</button>
       <button class="tab-btn" onclick="switchTab('faults', this)">Fault Injection</button>
@@ -1008,6 +1111,121 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <div class="cmd-bar">
         <input id="rcp-cmd-input" class="cmd-input" type="text" placeholder="Send RCP command (e.g. GET iso, SET iso 1600)..." onkeydown="if(event.key==='Enter') sendRcp()" />
         <button class="cam-btn" onclick="sendRcp()">Send</button>
+      </div>
+    </div>
+
+    <!-- Tab: Lens & Optics -->
+    <div id="tab-lens" class="tab-content">
+      <div style="margin-bottom: 12px; font-size: 12px; color: #aaa;">
+        Electronic Lens Mount Interface & Authentic Firmware Lens Database
+      </div>
+      
+      <!-- Attached Lens Card -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 14px; font-weight: bold; color: #00e676;" id="lens-model-txt">Canon EF 24-70mm f/2.8L II USM</span>
+          <span style="font-family: monospace; font-size: 11px; color: #888;" id="lens-mount-txt">Canon EF</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; font-size: 12px; font-family: monospace; color: #bbb;">
+          <div>Brand: <strong id="lens-brand-txt" style="color: #fff;">Canon</strong></div>
+          <div>Serial: <strong id="lens-serial-txt" style="color: #fff;">CN-748921</strong></div>
+          <div>Focal Range: <strong id="lens-range-txt" style="color: #fff;">24-70mm</strong></div>
+          <div>Current Focal: <strong id="lens-focal-txt" style="color: #ffaa00;">50mm</strong></div>
+          <div>Current Iris: <strong id="lens-iris-txt" style="color: #00ff66;">f/2.8</strong></div>
+          <div>Focus Dist: <strong id="lens-dist-txt" style="color: #66b3ff;">2.50m</strong></div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 14px;">
+        <div style="font-weight: 600; font-size: 12px; color: #ddd; margin-bottom: 8px;">Electronic Iris / Aperture Stepping (1/3 EV)</div>
+        <div id="lens-stops-container" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;"></div>
+        <div style="display: flex; gap: 8px;">
+          <button class="cam-btn" onclick="stepAperture(-1)">◄ Open Up (-1/3 Stop)</button>
+          <button class="cam-btn" onclick="stepAperture(1)">Close Down (+1/3 Stop) ►</button>
+        </div>
+      </div>
+
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 14px;">
+        <div style="font-weight: 600; font-size: 12px; color: #ddd; margin-bottom: 8px;">Zoom & Focus Motors</div>
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label style="font-size: 12px; width: 90px; color: #aaa;">Focal Length:</label>
+            <input id="focal-slider" type="range" min="24" max="70" value="50" style="flex: 1;" oninput="onFocalSlider(this.value)" />
+            <span id="focal-val-lbl" style="font-family: monospace; font-size: 12px; width: 50px;">50mm</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label style="font-size: 12px; width: 90px; color: #aaa;">Focus Dist:</label>
+            <input id="focus-slider" type="range" min="0.3" max="50.0" step="0.1" value="2.5" style="flex: 1;" oninput="onFocusSlider(this.value)" />
+            <span id="focus-val-lbl" style="font-family: monospace; font-size: 12px; width: 50px;">2.5m</span>
+            <button class="cam-btn" style="padding: 4px 10px;" onclick="triggerAf()">Trigger AF</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mount Swapper & Catalog -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+        <div style="font-weight: 600; font-size: 12px; color: #ddd; margin-bottom: 8px;">Mount Hardware & Authentic Lens Catalog (230+ Models)</div>
+        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+          <select id="mount-select" class="cmd-input" style="flex: 1;" onchange="onMountChange(this.value)">
+            <option value="Canon EF">Canon EF Smart Mount</option>
+            <option value="Nikon F">Nikon F Electronic Mount</option>
+            <option value="PL Mount (/i)">PL Intelligent Mount (/i)</option>
+          </select>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <select id="catalog-select" class="cmd-input" style="flex: 1;"></select>
+          <button class="cam-btn" onclick="attachSelectedLens()">Attach Lens</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Media & Clips -->
+    <div id="tab-media" class="tab-content">
+      <div style="margin-bottom: 12px; font-size: 12px; color: #aaa;">
+        RED MINI-MAG High-Speed Solid State Media & Authentic .R3D / .RMD Clips
+      </div>
+
+      <!-- Media Card -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-bottom: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 14px; font-weight: bold; color: #fff;">RED MINI-MAG 512GB (Port SATA0)</span>
+          <span id="media-status-badge" style="font-family: monospace; font-size: 11px; padding: 2px 6px; border-radius: 3px; background: #1b3d1b; color: #00ff66;">MOUNTED</span>
+        </div>
+        <div style="font-size: 12px; font-family: monospace; color: #bbb; margin-bottom: 8px;">
+          Reel: <strong id="media-reel-txt" style="color: #fff;">A001</strong> | Filesystem: <strong style="color: #fff;">FAT32 / RED UDF v2.50</strong>
+        </div>
+        <!-- Progress bar -->
+        <div style="height: 14px; background: #252525; border-radius: 3px; overflow: hidden; margin-bottom: 6px; border: 1px solid #444;">
+          <div id="media-used-bar" style="height: 100%; width: 22%; background: #00b0ff; transition: width 0.3s;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px; font-family: monospace; color: #888;">
+          <span id="media-used-txt">Used: 112.0 GB</span>
+          <span id="media-free-txt" style="color: #00e676;">Free: 400.0 GB (78%)</span>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+          <button class="cam-btn" onclick="formatMedia()" style="background: #4a1515; border-color: #aa2222; color: #fff;">Format Media</button>
+          <button id="media-eject-btn" class="cam-btn" onclick="toggleMediaMount()">Eject Media</button>
+        </div>
+      </div>
+
+      <!-- Clips Table -->
+      <div style="flex: 1; overflow-y: auto; background: #141414; border: 1px solid #2a2a2a; border-radius: 4px;">
+        <table class="data-table">
+          <thead>
+            <tr><th>Clip Container (.RDC)</th><th>Size</th><th>R3D Format</th><th>Action</th></tr>
+          </thead>
+          <tbody id="clips-table-body"></tbody>
+        </table>
+      </div>
+
+      <!-- RMD Viewer Box -->
+      <div id="rmd-viewer-container" style="display: none; margin-top: 10px; background: #0a0a0a; border: 1px solid #444; border-radius: 4px; padding: 10px; max-height: 180px; overflow-y: auto;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-size: 11px; color: #aaa; font-weight: bold;">RED Metadata XML Sidecar (.RMD)</span>
+          <button class="cam-btn" style="padding: 1px 6px; font-size: 10px;" onclick="closeRmdViewer()">Close</button>
+        </div>
+        <pre id="rmd-viewer-content" style="font-family: monospace; font-size: 11px; color: #ffaa00; white-space: pre-wrap; margin: 0;"></pre>
       </div>
     </div>
 
@@ -1239,11 +1457,27 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       const instrM = (data.instruction_count / 1000000).toFixed(1);
       document.getElementById('instr-text').textContent = `${instrM}M INSTR`;
 
+      // RCP Connected Clients
+      if (document.getElementById('rcp-clients')) {
+        const cCount = data.rcp_clients_count || 0;
+        document.getElementById('rcp-clients').textContent = `${cCount} client${cCount === 1 ? '' : 's'}`;
+      }
+
       // Render RCP table
       renderRcp(data.rcp);
 
       // Render Threads table
       renderThreads(data.threads);
+
+      // Render Lens Telemetry
+      if (data.lens) {
+        renderLens(data.lens);
+      }
+
+      // Render Media Telemetry
+      if (data.media) {
+        renderMedia(data.media);
+      }
 
     } catch (e) {}
 
@@ -1341,6 +1575,187 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       document.getElementById('fault-result').textContent = `Fault injected [${type}]: ${JSON.stringify(res.result)}`;
     });
   }
+
+  function renderLens(lens) {
+    if (!document.getElementById('lens-model-txt')) return;
+    document.getElementById('lens-model-txt').textContent = lens.attached ? lens.lens.model : 'NO LENS DETECTED';
+    document.getElementById('lens-mount-txt').textContent = lens.mount_type;
+    document.getElementById('lens-brand-txt').textContent = lens.attached ? lens.lens.brand : 'None';
+    document.getElementById('lens-serial-txt').textContent = lens.attached ? lens.lens.serial : 'N/A';
+    document.getElementById('lens-range-txt').textContent = lens.attached ? lens.lens.focal_display : '--';
+    document.getElementById('lens-focal-txt').textContent = lens.focal_display;
+    document.getElementById('lens-iris-txt').textContent = lens.aperture_display;
+    document.getElementById('lens-dist-txt').textContent = lens.focus_display;
+
+    // Render aperture stops buttons if changed
+    const stopsBox = document.getElementById('lens-stops-container');
+    if (stopsBox && lens.available_stops && stopsBox.dataset.lastCount != lens.available_stops.length) {
+      stopsBox.dataset.lastCount = lens.available_stops.length;
+      let html = '';
+      for (const s of lens.available_stops) {
+        const isCur = Math.abs(s - lens.current_aperture) < 0.05;
+        const bg = isCur ? '#b01010' : '#2a2a2a';
+        const col = isCur ? '#fff' : '#ccc';
+        html += `<button class="cam-btn" style="padding: 3px 8px; font-size: 11px; background: ${bg}; color: ${col};" onclick="setAperture(${s})">f/${s.toFixed(1)}</button>`;
+      }
+      stopsBox.innerHTML = html;
+    }
+
+    // Sync sliders if not focused
+    const fSlider = document.getElementById('focal-slider');
+    if (fSlider && document.activeElement !== fSlider && lens.attached) {
+      fSlider.min = lens.lens.focal_min;
+      fSlider.max = lens.lens.focal_max;
+      fSlider.value = lens.current_focal_length;
+      document.getElementById('focal-val-lbl').textContent = `${Math.round(lens.current_focal_length)}mm`;
+    }
+  }
+
+  function renderMedia(media) {
+    if (!document.getElementById('media-reel-txt')) return;
+    document.getElementById('media-reel-txt').textContent = media.reel_id;
+    document.getElementById('media-used-bar').style.width = `${100 - media.remaining_percent}%`;
+    document.getElementById('media-used-txt').textContent = `Used: ${(media.used_mb / 1024).toFixed(1)} GB`;
+    document.getElementById('media-free-txt').textContent = `Free: ${(media.free_mb / 1024).toFixed(1)} GB (${media.remaining_percent}%)`;
+    
+    const badge = document.getElementById('media-status-badge');
+    const ejectBtn = document.getElementById('media-eject-btn');
+    if (media.is_mounted) {
+      badge.textContent = 'MOUNTED';
+      badge.style.background = '#1b3d1b';
+      badge.style.color = '#00ff66';
+      ejectBtn.textContent = 'Eject Media';
+    } else {
+      badge.textContent = 'EJECTED';
+      badge.style.background = '#4a1515';
+      badge.style.color = '#ff6666';
+      ejectBtn.textContent = 'Mount Media';
+    }
+  }
+
+  function setAperture(val) {
+    fetch('/api/lens/aperture', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({aperture: val})
+    });
+  }
+
+  function stepAperture(step) {
+    fetch('/api/lens/aperture', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({step})
+    });
+  }
+
+  function onFocalSlider(val) {
+    document.getElementById('focal-val-lbl').textContent = `${val}mm`;
+    fetch('/api/lens/focal', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({focal_length: parseFloat(val)})
+    });
+  }
+
+  function onFocusSlider(val) {
+    document.getElementById('focus-val-lbl').textContent = `${parseFloat(val).toFixed(1)}m`;
+    fetch('/api/lens/focus', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({distance: parseFloat(val)})
+    });
+  }
+
+  function triggerAf() {
+    fetch('/api/lens/af', {method: 'POST'});
+  }
+
+  function onMountChange(mount) {
+    fetch('/api/lens/mount', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mount})
+    }).then(() => loadLensCatalog());
+  }
+
+  function attachSelectedLens() {
+    const sel = document.getElementById('catalog-select');
+    if (!sel || sel.selectedIndex < 0) return;
+    const name = sel.value;
+    fetch('/api/lens/attach', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+  }
+
+  let catalogLoaded = false;
+  function loadLensCatalog() {
+    fetch('/api/lens').then(r => r.json()).then(res => {
+      const sel = document.getElementById('catalog-select');
+      if (!sel || !res.catalog) return;
+      sel.innerHTML = '';
+      const currMount = document.getElementById('mount-select').value;
+      const filtered = res.catalog.filter(l => l.mount === currMount || currMount === 'All');
+      filtered.forEach((l, idx) => {
+        const opt = document.createElement('option');
+        opt.value = l.model;
+        opt.textContent = `${l.model} (${l.brand})`;
+        sel.appendChild(opt);
+      });
+      catalogLoaded = true;
+    });
+  }
+
+  function formatMedia() {
+    if (!confirm('Format RED MINI-MAG 512GB? All clips on the current reel will be cleared.')) return;
+    fetch('/api/media/format', {method: 'POST'}).then(() => loadClips());
+  }
+
+  function toggleMediaMount() {
+    const badge = document.getElementById('media-status-badge');
+    const isMounted = badge.textContent === 'MOUNTED';
+    fetch(isMounted ? '/api/media/eject' : '/api/media/mount', {method: 'POST'}).then(() => loadClips());
+  }
+
+  function loadClips() {
+    fetch('/api/media/clips').then(r => r.json()).then(res => {
+      const tbody = document.getElementById('clips-table-body');
+      if (!tbody || !res.clips) return;
+      if (res.clips.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: #666; text-align: center; padding: 20px;">No R3D clips recorded on current reel.</td></tr>';
+        return;
+      }
+      let html = '';
+      window._cachedClips = res.clips;
+      res.clips.forEach((c, idx) => {
+        html += `<tr>
+          <td style="color: #fff; font-weight: bold;">${c.clip_name}.RDC</td>
+          <td style="color: #ffaa00;">${c.size_mb} MB</td>
+          <td style="color: #66b3ff;">REDCODE RAW 5K</td>
+          <td><button class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="viewRmd(${idx})">View RMD</button></td>
+        </tr>`;
+      });
+      tbody.innerHTML = html;
+    });
+  }
+
+  function viewRmd(idx) {
+    if (!window._cachedClips || !window._cachedClips[idx]) return;
+    const clip = window._cachedClips[idx];
+    document.getElementById('rmd-viewer-content').textContent = clip.rmd_metadata || 'No metadata available.';
+    document.getElementById('rmd-viewer-container').style.display = 'block';
+  }
+
+  function closeRmdViewer() {
+    document.getElementById('rmd-viewer-container').style.display = 'none';
+  }
+
+  // Load initial lens catalog and media clips on startup
+  loadLensCatalog();
+  loadClips();
+  setInterval(loadClips, 2000);
 
   // Start telemetry loop
   pollStatus();
