@@ -8,21 +8,21 @@ This document describes the system architecture, memory map, peripheral models, 
 
 ```
 +-----------------------------------------------------------------------------------+
-|                           DSMC2 Desktop Application                               |
+|               RED DSMC2 Web-Based Virtual Camera Studio (Port 8765)               |
 |  +---------------------------------------------+  +----------------------------+  |
 |  |           Virtual RED Camera                |  |  Emulator Developer Tools  |  |
-|  |  - 1024x576 Virtual LCD Screen (RedUi)      |  |  - UART Console Stream     |  |
-|  |  - Atmel maXTouch Touchscreen (I2C3 0x4B)   |  |  - RCP Parameter Control   |  |
+|  |  - 1024x576 Virtual LCD Stream (MJPEG/Canvas|  |  - Live UART4 Serial Log   |  |
+|  |  - Atmel maXTouch Multi-Touch Digitizer     |  |  - Live RCP Parameter Grid |  |
 |  |  - Tactile Controls (REC, POWER, NAV, GPIO) |  |  - ThreadX RTOS Inspector  |  |
-|  +---------------------------------------------+  |  - MMIO Diagnostic Browser |  |
-|                                                   |  - Fault Injection Engine  |  |
+|  |  - RedUi Interactive Dialogs & Menu System  |  |  - MMIO Diagnostic Browser |  |
+|  +---------------------------------------------+  |  - Fault Injection Engine  |  |
 |                                                   |  - Snapshot Save / Restore |  |
 |                                                   +----------------------------+  |
 +-----------------------------------------------------------------------------------+
-                                         |
+                                         |  (HTTP REST / WebSocket / MJPEG Stream)
                                          v
 +-----------------------------------------------------------------------------------+
-|                             Dsmc2Camera Orchestrator                              |
+|                  WebStudio Server & Dsmc2Camera Orchestrator                      |
 +-----------------------------------------------------------------------------------+
         |                       |                         |                 |
         v                       v                         v                 v
