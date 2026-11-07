@@ -346,6 +346,15 @@ class WebStudio:
         # Lock for thread-safe camera dispatch
         self.lock = threading.Lock()
 
+        # Firmware Staging & Baseline Configuration
+        self.confirmed_baseline_name = "SCARLET-W 5K (v7.4.1)"
+        self.confirmed_baseline_file = "dsmc_program.mem"
+        self.active_firmware_name = "SCARLET-W 5K (v7.4.1)"
+        self.active_firmware_file = "dsmc_program.mem"
+        self.active_firmware_size = 18972672
+        self.active_firmware_is_custom = False
+        self.custom_firmware_path: Optional[str] = None
+
     def start_camera(self):
         """Boot camera and launch CPU stepping thread."""
         if not self.camera.is_booted:
@@ -442,6 +451,18 @@ def create_handler(studio: WebStudio):
                 with studio.lock:
                     clips = studio.camera.recorder.list_clips()
                     self._send_json({"clips": clips})
+            elif path == "/api/firmware/status":
+                with studio.lock:
+                    info = {
+                        "status": "ok",
+                        "active_name": studio.active_firmware_name,
+                        "active_file": studio.active_firmware_file,
+                        "active_size": studio.active_firmware_size,
+                        "is_custom": studio.active_firmware_is_custom,
+                        "baseline_name": studio.confirmed_baseline_name,
+                        "slot_mounted": studio.camera.recorder.is_media_mounted if hasattr(studio.camera, "recorder") else True
+                    }
+                self._send_json(info)
             else:
                 self.send_error(404, "Not Found")
 
@@ -577,6 +598,51 @@ def create_handler(studio: WebStudio):
                     res = studio.camera.recorder.mount_media()
                 self._send_json({"status": "ok", "mounted": res})
 
+            elif path == "/api/firmware/upload":
+                import base64
+                filename = str(data.get("filename", "custom_firmware.bin"))
+                filename = os.path.basename(filename)
+                b64_data = data.get("data", "")
+                if "," in b64_data:
+                    b64_data = b64_data.split(",", 1)[1]
+                file_bytes = base64.b64decode(b64_data)
+
+                custom_dir = os.path.join(studio.workspace_root, "firmware_store", "custom")
+                os.makedirs(custom_dir, exist_ok=True)
+                dest_path = os.path.join(custom_dir, filename)
+                with open(dest_path, "wb") as f:
+                    f.write(file_bytes)
+
+                with studio.lock:
+                    studio.active_firmware_name = f"Custom: {filename}"
+                    studio.active_firmware_file = filename
+                    studio.active_firmware_size = len(file_bytes)
+                    studio.active_firmware_is_custom = True
+                    studio.custom_firmware_path = dest_path
+                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG: Custom firmware image loaded: {filename} ({len(file_bytes)} bytes)")
+                    studio.camera.log_system("[FIRMWARE-LOADER] Target ready for DSMC2 firmware verification & staging.")
+
+                self._send_json({
+                    "status": "ok",
+                    "active_name": studio.active_firmware_name,
+                    "filename": filename,
+                    "size": len(file_bytes)
+                })
+
+            elif path == "/api/firmware/reset":
+                with studio.lock:
+                    studio.active_firmware_name = studio.confirmed_baseline_name
+                    studio.active_firmware_file = studio.confirmed_baseline_file
+                    studio.active_firmware_size = 18972672
+                    studio.active_firmware_is_custom = False
+                    studio.custom_firmware_path = None
+                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG slot reset to confirmed working baseline: {studio.confirmed_baseline_name} ({studio.confirmed_baseline_file})")
+                self._send_json({
+                    "status": "ok",
+                    "active_name": studio.active_firmware_name,
+                    "baseline_name": studio.confirmed_baseline_name
+                })
+
             else:
                 self.send_error(404, "Unknown API Route")
 
@@ -656,6 +722,13 @@ def create_handler(studio: WebStudio):
                         "guide": studio.compositor.redui.guide_mode
                     },
                     "rcp": dict(cam.rcp.state),
+                    "firmware": {
+                        "active_name": studio.active_firmware_name,
+                        "active_file": studio.active_firmware_file,
+                        "active_size": studio.active_firmware_size,
+                        "is_custom": studio.active_firmware_is_custom,
+                        "baseline_name": studio.confirmed_baseline_name
+                    },
                     "threads": cam.get_threads(),
                     "unknown_mmio_count": len(cam.bus.unknown_mmio)
                 }
@@ -839,10 +912,235 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     letter-spacing: 1px;
   }
 
+  /* Screen & MINI-MAG Flex Container */
+  .screen-and-mag-container {
+    display: flex;
+    flex-direction: row;
+    gap: 14px;
+    width: 100%;
+    align-items: stretch;
+    justify-content: center;
+  }
+
+  /* RED MINI-MAG Vertical Slot Bay */
+  .minimag-slot-bay {
+    width: 175px;
+    min-width: 175px;
+    flex-shrink: 0;
+    background: linear-gradient(180deg, #1c1c1c 0%, #121212 100%);
+    border: 2px solid #333333;
+    border-radius: 6px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.8), 0 4px 10px rgba(0,0,0,0.5);
+    box-sizing: border-box;
+  }
+  .mag-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #2a2a2a;
+    padding-bottom: 6px;
+  }
+  .mag-brand {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .mag-logo-red {
+    background: var(--red-brand);
+    color: #fff;
+    font-weight: 900;
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 2px;
+    letter-spacing: 1px;
+  }
+  .mag-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #ddd;
+    letter-spacing: 0.5px;
+  }
+  .mag-slot-tag {
+    font-family: monospace;
+    font-size: 9px;
+    color: #777;
+  }
+
+  /* Physical Cartridge Visual */
+  .mag-cartridge {
+    background: linear-gradient(135deg, #a81010 0%, #680000 100%);
+    border: 1px solid #ff3333;
+    border-radius: 4px;
+    padding: 8px 10px;
+    box-shadow: inset 0 1px 2px rgba(255,255,255,0.3), 0 4px 8px rgba(0,0,0,0.6);
+    position: relative;
+    overflow: hidden;
+  }
+  .mag-grip {
+    position: absolute;
+    right: 4px;
+    top: 4px;
+    bottom: 4px;
+    width: 6px;
+    background: repeating-linear-gradient(180deg, #440000, #440000 2px, #881111 2px, #881111 4px);
+    border-radius: 1px;
+  }
+  .mag-cartridge-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mag-cartridge-title {
+    font-size: 11px;
+    font-weight: 900;
+    color: #ffffff;
+    letter-spacing: 1px;
+  }
+  .mag-cartridge-cap {
+    font-size: 15px;
+    font-weight: 900;
+    color: #ffffff;
+    font-family: monospace;
+  }
+  .mag-cartridge-sub {
+    font-size: 8.5px;
+    color: #ffcccc;
+    font-family: monospace;
+    letter-spacing: 0.5px;
+  }
+  .mag-led-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+  }
+  .mag-led {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green-led);
+    box-shadow: 0 0 6px var(--green-led);
+  }
+  .mag-led.custom {
+    background: #00b0ff;
+    box-shadow: 0 0 8px #00b0ff;
+  }
+  .mag-led.ejected {
+    background: #555;
+    box-shadow: none;
+  }
+  .mag-led-text {
+    font-family: monospace;
+    font-size: 9.5px;
+    font-weight: bold;
+    color: #eee;
+  }
+
+  /* Firmware Card */
+  .mag-fw-card {
+    background: #181818;
+    border: 1px solid #2e2e2e;
+    border-radius: 4px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .fw-card-label {
+    font-size: 9px;
+    font-weight: 700;
+    color: #777;
+    letter-spacing: 0.5px;
+  }
+  .fw-card-name {
+    font-size: 10.5px;
+    font-weight: bold;
+    color: #00e676;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .fw-card-status {
+    font-size: 9.5px;
+    color: #aaa;
+  }
+  .fw-card-details {
+    font-family: monospace;
+    font-size: 9px;
+    color: #666;
+  }
+
+  /* Dropzone */
+  .mag-dropzone {
+    border: 1.5px dashed #444;
+    border-radius: 4px;
+    padding: 10px 6px;
+    text-align: center;
+    cursor: pointer;
+    background: #141414;
+    transition: all 0.15s ease;
+  }
+  .mag-dropzone:hover, .mag-dropzone.dragover {
+    border-color: var(--red-brand);
+    background: #1e1414;
+  }
+  .dropzone-icon {
+    font-size: 16px;
+    color: #888;
+    margin-bottom: 2px;
+  }
+  .dropzone-text {
+    font-size: 10px;
+    color: #ccc;
+    line-height: 1.3;
+  }
+  .dropzone-hint {
+    font-size: 8.5px;
+    color: #777;
+    margin-top: 3px;
+  }
+
+  /* Controls */
+  .mag-controls {
+    display: flex;
+    gap: 6px;
+    margin-top: auto;
+  }
+  .mag-btn-reset {
+    padding: 5px 8px;
+    font-size: 10px;
+    flex: 1;
+    background: #252525;
+    border: 1px solid #444;
+    color: #aaa;
+  }
+  .mag-btn-reset:hover {
+    color: #fff;
+    border-color: #777;
+  }
+
+  @media (max-width: 860px) {
+    .screen-and-mag-container {
+      flex-direction: column;
+    }
+    .minimag-slot-bay {
+      width: 100%;
+      min-width: 0;
+    }
+  }
+
   /* Screen Frame Stream Canvas */
   .screen-viewport {
     position: relative;
     width: 100%;
+    flex: 1;
+    min-width: 0;
     aspect-ratio: 16 / 9;
     max-height: 62vh;
     background: #000;
@@ -1130,11 +1428,66 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         <span>1024 x 576 NATIVE (16:9)</span>
       </div>
 
-      <div class="screen-viewport" id="viewport">
-        <!-- Live Video Stream -->
-        <img id="stream-img" src="/api/stream" alt="RED DSMC2 LCD Stream" />
-        <!-- Interactive Touch Layer -->
-        <canvas class="touch-overlay" id="touchCanvas" width="1024" height="576"></canvas>
+      <!-- Container: Vertical RED MINI-MAG Slot (Left) + Screen Viewport (Right) -->
+      <div class="screen-and-mag-container">
+        <!-- RED MINI-MAG Slot Bay -->
+        <div class="minimag-slot-bay" id="minimag-bay">
+          <div class="mag-header">
+            <div class="mag-brand">
+              <span class="mag-logo-red">RED</span>
+              <span class="mag-label">MINI-MAG&reg;</span>
+            </div>
+            <div class="mag-slot-tag">SLOT 1 &bull; SATA0</div>
+          </div>
+
+          <!-- Physical Cartridge Graphic / Insert Slot -->
+          <div class="mag-cartridge" id="mag-cartridge">
+            <div class="mag-grip"></div>
+            <div class="mag-cartridge-body">
+              <div class="mag-cartridge-title">RED MINI-MAG</div>
+              <div class="mag-cartridge-cap" id="mag-cartridge-cap">512 GB</div>
+              <div class="mag-cartridge-sub">TURBO / R3D RAW</div>
+            </div>
+            <div class="mag-led-row">
+              <div class="mag-led" id="mag-led"></div>
+              <span class="mag-led-text" id="mag-led-text">MEDIA READY</span>
+            </div>
+          </div>
+
+          <!-- Active Firmware Status Box -->
+          <div class="mag-fw-card">
+            <div class="fw-card-label">ACTIVE FIRMWARE</div>
+            <div class="fw-card-name" id="fw-active-name">SCARLET-W 5K (v7.4.1)</div>
+            <div class="fw-card-status" id="fw-active-status">Confirmed Working Baseline</div>
+            <div class="fw-card-details" id="fw-active-details">dsmc_program.mem &bull; 18.1 MB</div>
+          </div>
+
+          <!-- Firmware Upload / Drag-and-Drop Area -->
+          <div class="mag-dropzone" id="mag-dropzone" onclick="document.getElementById('fw-file-input').click()" title="Drag &amp; drop custom firmware file (.bin / .mem / .pkg) or click to browse">
+            <input type="file" id="fw-file-input" style="display: none;" accept=".bin,.mem,.pkg,.zip,.tar,.gz,.dsmc2" onchange="handleFwFileSelect(this.files)" />
+            <div class="dropzone-icon">&uArr;</div>
+            <div class="dropzone-text"><strong>Drop Custom Firmware</strong><br>or click to load (.bin, .mem, .pkg)</div>
+            <div class="dropzone-hint">Test custom firmware mods</div>
+          </div>
+
+          <!-- Slot Action Controls -->
+          <div class="mag-controls">
+            <button class="cam-btn mag-btn-reset" id="btn-revert-fw" onclick="revertFirmwareBaseline()" title="Reset to confirmed working v7.4.1 firmware">
+              &circlearrowleft; Revert to v7.4.1
+            </button>
+            <button class="cam-btn" style="padding: 5px 8px; font-size: 10px; flex: 1;" onclick="document.getElementById('fw-file-input').click()">
+              Load Image...
+            </button>
+          </div>
+        </div>
+
+        <!-- Screen Viewport (Right of Media Slot) -->
+        <div class="screen-viewport" id="viewport">
+          <!-- Live Video Stream -->
+          <img id="stream-img" src="/api/stream" alt="RED DSMC2 LCD Stream" />
+          <!-- Interactive Touch Layer -->
+          <canvas class="touch-overlay" id="touchCanvas" width="1024" height="576"></canvas>
+        </div>
       </div>
 
       <div class="bezel-screws" style="margin-top: 8px;">
@@ -1599,6 +1952,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         renderMedia(data.media);
       }
 
+      // Render Firmware Telemetry
+      if (data.firmware) {
+        updateFirmwareDisplay(data.firmware);
+      }
+
     } catch (e) {}
 
     // 2. Serial logs
@@ -1870,6 +2228,92 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
   function closeRmdViewer() {
     document.getElementById('rmd-viewer-container').style.display = 'none';
+  }
+
+  // RED MINI-MAG Firmware Slot Drag & Drop and Upload
+  const dropzone = document.getElementById('mag-dropzone');
+  if (dropzone) {
+    ['dragenter', 'dragover'].forEach(name => {
+      dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(name => {
+      dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+      });
+    });
+    dropzone.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+        handleFwFileSelect(e.dataTransfer.files);
+      }
+    });
+  }
+
+  function handleFwFileSelect(files) {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const b64Data = e.target.result;
+      fetch('/api/firmware/upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({filename: file.name, data: b64Data})
+      }).then(r => r.json()).then(res => {
+        if (res.status === 'ok') {
+          updateFirmwareDisplay({
+            active_name: res.active_name,
+            active_file: res.filename,
+            active_size: res.size,
+            is_custom: true
+          });
+        }
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function revertFirmwareBaseline() {
+    fetch('/api/firmware/reset', {method: 'POST'}).then(r => r.json()).then(res => {
+      if (res.status === 'ok') {
+        updateFirmwareDisplay({
+          active_name: res.active_name,
+          active_file: 'dsmc_program.mem',
+          active_size: 18972672,
+          is_custom: false
+        });
+      }
+    });
+  }
+
+  function updateFirmwareDisplay(fw) {
+    if (!fw) return;
+    const nameEl = document.getElementById('fw-active-name');
+    const statusEl = document.getElementById('fw-active-status');
+    const detailsEl = document.getElementById('fw-active-details');
+    const ledEl = document.getElementById('mag-led');
+    const ledText = document.getElementById('mag-led-text');
+
+    if (nameEl) nameEl.textContent = fw.active_name;
+    if (statusEl) statusEl.textContent = fw.is_custom ? 'Custom Mod Staged' : 'Confirmed Working Baseline';
+    if (detailsEl) {
+      const mb = (fw.active_size / (1024 * 1024)).toFixed(1);
+      detailsEl.textContent = `${fw.active_file} • ${mb} MB`;
+    }
+    if (ledEl) {
+      if (fw.is_custom) {
+        ledEl.className = 'mag-led custom';
+        if (ledText) ledText.textContent = 'CUSTOM MOD LOADED';
+        if (nameEl) nameEl.style.color = '#00b0ff';
+      } else {
+        ledEl.className = 'mag-led';
+        if (ledText) ledText.textContent = 'MEDIA READY';
+        if (nameEl) nameEl.style.color = '#00e676';
+      }
+    }
   }
 
   // Load initial lens catalog and media clips on startup

@@ -7,23 +7,26 @@ This document describes the system architecture, memory map, peripheral models, 
 ## 1. High-Level System Architecture
 
 ```
-+-----------------------------------------------------------------------------------+
-|               RED DSMC2 Web-Based Virtual Camera Studio (Port 8765)               |
-|  +---------------------------------------------+  +----------------------------+  |
-|  |           Virtual RED Camera                |  |  Emulator Developer Tools  |  |
-|  |  - 1024x576 Virtual LCD Stream (MJPEG/Canvas|  |  - Live UART4 Serial Log   |  |
-|  |  - Atmel maXTouch Multi-Touch Digitizer     |  |  - Live RCP Parameter Grid |  |
-|  |  - Tactile Controls (REC, POWER, NAV, GPIO) |  |  - ThreadX RTOS Inspector  |  |
-|  |  - RedUi Interactive Dialogs & Menu System  |  |  - MMIO Diagnostic Browser |  |
-|  +---------------------------------------------+  |  - Fault Injection Engine  |  |
-|                                                   |  - Snapshot Save / Restore |  |
-|                                                   +----------------------------+  |
-+-----------------------------------------------------------------------------------+
++--------------------------------------------------------------------------------------------------+
+|                      RED DSMC2 Web-Based Virtual Camera Studio (Port 8765)                       |
+|  +-------------------------------------------------------------+  +---------------------------+  |
+|  |                 Virtual RED Camera                          |  | Emulator Developer Tools |  |
+|  |  +---------------------+  +------------------------------+  |  | - Live UART4 Serial Log   |  |
+|  |  | Vertical RED        |  | 1024x576 Virtual LCD Screen  |  |  | - Live RCP Parameter Grid |  |
+|  |  | MINI-MAG Loader Slot|  | - Real-time MJPEG Stream     |  |  | - Lens & Optics Controls  |  |
+|  |  | - Status LED        |  | - Atmel maXTouch Touchscreen |  |  | - Media Clips & Storage   |  |
+|  |  | - Firmware Staging  |  | - Authentic RedUi Master     |  |  | - ThreadX RTOS Inspector |  |
+|  |  | - Drag & Drop / Rev |  |   Menu Tree (8 Categories)   |  |  | - MMIO Diagnostic Browser|  |
+|  |  | - Baseline: v7.4.1  |  | - 8-Tile Look Matrix & Ribbon|  |  | - Fault Injection Engine |  |
+|  |  +---------------------+  +------------------------------+  |  | - Snapshot Save / Restore |  |
+|  |  - Tactile Controls (REC, POWER, MENU, MAG, NAV, GPIO)       |  +---------------------------+  |
+|  +-------------------------------------------------------------+                                 |
++--------------------------------------------------------------------------------------------------+
                                          |  (HTTP REST / WebSocket / MJPEG Stream)
                                          v
-+-----------------------------------------------------------------------------------+
-|                  WebStudio Server & Dsmc2Camera Orchestrator                      |
-+-----------------------------------------------------------------------------------+
++--------------------------------------------------------------------------------------------------+
+|                    WebStudio Server & Dsmc2Camera Orchestrator                                   |
++--------------------------------------------------------------------------------------------------+
         |                       |                         |                 |
         v                       v                         v                 v
 +---------------+     +--------------------+     +----------------+  +--------------+
@@ -150,7 +153,32 @@ The emulator models the physical address space of the Texas Instruments DM3725 /
 
 ### 3.12 Web-Based Virtual Camera Studio (`emulator/ui/web.py`)
 - Runs a multi-threaded HTTP server on default port `8765`.
-- Decoupled `ScreenCompositor` generating authentic 1024x576 JPEG frames from live framebuffer and splash assets.
+- Decoupled `ScreenCompositor` generating authentic 1024x576 JPEG frames from live framebuffer and sensor assets.
 - Real-time MJPEG video stream (`/api/stream`) at ~25 FPS with zero OS mouse/keyboard lockups.
+- Responsive 16:9 monitor viewport with automatic recursive scaling and exact touch coordinate mapping.
+- **Vertical RED MINI-MAG Media Slot**:
+  - Located on the left side of the virtual monitor screen, authentic to DSMC2 BRAIN ergonomics.
+  - Active LED indicator (Green = baseline ready, Amber/Cyan = custom mod staged, Off = ejected).
+  - Drag-and-drop dropzone and file selector supporting `.bin`, `.mem`, `.pkg`, `.zip`, `.tar` firmware binaries.
+  - Endpoints: `GET /api/firmware/status`, `POST /api/firmware/upload`, `POST /api/firmware/reset`.
+  - Staging storage directory in `firmware_store/custom/` with one-click instant revert to baseline `SCARLET-W 5K (v7.4.1)`.
 - Interactive HUD overlays: Iris aperture badge and quick-selection dialog, FPS, Shutter, ISO, Format, and False Color tools.
 - Engineering Workbench with live tabs: Console/Serial, RCP Parameters, Lens & Optics, Media & Clips, ThreadX RTOS, Snapshots, and Fault Injection.
+
+### 3.13 RedUi Master Menu Engine & Exposure Tools (`emulator/ui/redui.py`)
+- Complete hierarchical DSMC2 menu tree (`DSMC2_MENU_TREE`) spanning all 8 root categories:
+  - `IMAGE`: Image Pipeline, White Balance, ISO, Color, Gain, Curves, LGG, CDL, 3D LUT.
+  - `MONITORING`: Monitors, Test Signal, Look Around, Advanced.
+  - `OVERLAYS`: Tools, Status, Guides, Custom.
+  - `POWER`: Power In, Power Out, Power Save.
+  - `PLAYBACK`: Playback Screen.
+  - `MEDIA`: Device (with crash-proof storage bar), Clips.
+  - `PRESETS`: Camera Presets, Looks, Auto Presets.
+  - `SETTINGS`: Project, Recording, HDRX, Audio, Focus, Exposure Assist, Setup, Maintenance, Look.
+- **8-Tile Look Matrix (`Menu > Settings > Look >`)**:
+  - Replicates authentic 2x4 button grid: `Color`, `Gain`, `ISO/FLUT®`, `Sharpness`, `Curves`, `Video`, `Color Temp`, `LGG`.
+  - Active red highlight for selected tile with navigation history tracking and breadcrumb bar.
+- **Exposure Tools Ribbon & False Color Dropdown (`Menu > Overlays > Tools`)**:
+  - Authentic horizontal ribbon toolbar with interactive `False Color` mode selector, `Magnify`, `Log View`, `Horizon`, and `Zebras`.
+  - Cascading vertical drop-down popup with authentic styling (`Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`).
+  - Screen center crosshair reticle matching DSMC2 operation guides.

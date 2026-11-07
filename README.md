@@ -62,31 +62,38 @@ python -m emulator.cli test -o test_report.json
 | **Virtual Storage & Partitions** | **VERIFIED** | Full partition mapping for `/env`, `/image1`, `/image2`, `/data`, `/log`, `/pdata`. |
 | **RED Command Protocol (RCP)** | **VERIFIED** | Multi-threaded RCP TCP server on port 1111 and UART3 bridging camera parameter control. |
 | **Fault Injection & Snapshots** | **VERIFIED** | Disconnect/reconnect monitor, simulate I2C bus errors, corrupt `/env`, trigger watchdog resets, and full compressed snapshot save/restore. |
+| **Web Camera Studio (Zero Freeze)** | **VERIFIED** | Standard library multi-threaded HTTP/MJPEG streaming UI on port 8765 with 16:9 responsive scaling and coordinate mapping. |
+| **Vertical MINI-MAG Loader Slot** | **VERIFIED** | Authentic left-bay vertical cartridge slot with active LED, custom firmware mod drag-and-drop, and 1-click baseline revert. |
+| **Master DSMC2 Menu Hierarchy** | **VERIFIED** | Complete 8-category menu tree, 8-tile `Settings > Look >` matrix, and authentic `Overlays > Tools` ribbon & dropdown. |
 
 ---
 
-## 3. Desktop Application Overview
+## 3. Web Virtual Camera Studio & Studio Interfaces
 
-The engineering application provides two synchronized zones sharing the exact same emulator backend state:
+### Web Virtual Camera Studio (`http://127.0.0.1:8765`)
+The primary modern, freeze-proof interface built entirely with Python standard libraries (no Node.js/pip web frameworks required):
+- **Vertical RED MINI-MAG Media Slot**:
+  - Positioned to the left of the virtual monitor screen, authentic to DSMC2 BRAIN ergonomics.
+  - Active status LED: Green (baseline ready), Amber/Cyan (custom mod staged), Off (ejected).
+  - Drag-and-drop dropzone supporting user-supplied firmware binary mods (`.bin`, `.mem`, `.pkg`, `.zip`, `.tar`).
+  - Staging storage in `firmware_store/custom/` with instant 1-click baseline revert button.
+- **Virtual LCD Screen (1024x576 Native 16:9 Aspect)**:
+  - Responsive recursive viewport scaling fitting any browser window dimensions without aspect distortion.
+  - Renders live sensor feed (`res/sensor_feed_cinema.jpg`), authentic splash screen, and OMAP framebuffers.
+  - Interactive touchscreen with exact pixel coordinate mapping to the virtual Atmel maXTouch digitizer.
+  - Authentic HUD indicators: Timecode, Camera Model (`SCARLET-W 5K`), FPS, Shutter Angle, ISO, Format, Iris Aperture, and Media Gauge.
+- **Authentic DSMC2 Menu & Tool Overlays**:
+  - Complete 8-category master menu tree (`IMAGE`, `MONITORING`, `OVERLAYS`, `POWER`, `PLAYBACK`, `MEDIA`, `PRESETS`, `SETTINGS`).
+  - 8-tile Look matrix (`Menu > Settings > Look >`) with active red tile selection.
+  - Exposure Tools ribbon with False Color mode drop-down popup (`Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`) and crosshair reticle.
+- **Physical Camera Controls & Developer Workbench**:
+  - Distinctive RED **● REC** button, **POWER / RESET**, tactile function keys (**MENU**, **1:1 MAG**, **USER 1**, **USER 2**), and D-pad.
+  - Live tabs: Console / Serial Log, RCP Parameters, Lens & Optics (electronic iris, zoom, ultrasonic AF), Media Clips & R3D/RMD Generation, ThreadX RTOS Inspector, MMIO Registers, Fault Injection, and Snapshots.
 
-### Left Zone: Virtual RED Camera
-- **Virtual LCD Screen (1024x576 Native Aspect)**:
-  - Renders live firmware pixels and authentic RED splash screen.
-  - Interactive touchscreen: click and drag mouse gestures are mapped to native coordinates and dispatched to the Atmel maXTouch controller.
-  - Real-time HUD indicators: Record status badge, Camera Model (`SCARLET-W 5K`), FPS, Shutter, ISO, Format, SMPTE timecode, and media gauge.
-- **Physical Camera Controls**:
-  - Distinctive RED **● REC** button (toggles recording and updates HUD state).
-  - **POWER / STANDBY** button (triggers hardware reset).
-  - Tactile function keys: **MENU**, **1:1 MAG**, **USER 1**, **USER 2**.
-  - Directional navigation D-pad (**▲, ◀, ●, ▶, ▼**).
-
-### Right Zone: Developer Dashboard
-- **Console / Serial**: Real-time UART4 system log stream with auto-scroll and clear.
-- **RCP & Parameters**: Live camera parameter inspector and interactive RED Command Protocol command prompt.
-- **ThreadX RTOS Inspector**: Live table displaying all active threads, thread names, states (`READY`, `SUSPENDED`), priorities, entry PCs, and stack pointers.
-- **MMIO & Diagnostics**: Unknown MMIO register tracker with access counts, last values, and address classification.
-- **Fault Injection**: One-click triggers for LCD disconnection, I2C bus NACK, corrupt `/env`, and watchdog reset.
-- **Snapshots**: Save and restore full compressed emulator state (`.dsmc2` files).
+### Synchronized Desktop Application
+A synchronized desktop GUI is also available for offline development environments:
+- Dual-zone interface sharing identical camera backend state.
+- Live canvas rendering and physical tactile controls.
 
 ---
 

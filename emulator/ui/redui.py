@@ -43,86 +43,271 @@ class RedUiEngine:
     # Official DSMC2 Master Menu Hierarchy
     DSMC2_MENU_TREE: Dict[str, Any] = {
         "IMAGE": {
-            "IMAGE PIPELINE": ["IPP2 Mode", "Legacy Mode", "Options", "Output Summary"],
-            "WHITE BALANCE": ["3200K", "4000K", "5000K", "5600K", "6500K", "Auto WB"],
-            "ISO": ["250", "320", "400", "500", "640", "800", "1000", "1280", "1600", "3200"],
-            "COLOR": ["Saturation", "Contrast", "Brightness", "Exposure Comp"],
-            "GAIN": ["Red Gain", "Green Gain", "Blue Gain", "User Matrix"],
-            "CURVES": ["Luma Curve", "Red Curve", "Green Curve", "Blue Curve", "Reset Curves"],
-            "LGG": ["Lift", "Gamma", "Gain"],
-            "CDL": ["Slope", "Power", "Offset", "Saturation", "CDLs"],
-            "3D LUT": ["RED IPP2 Cinema Standard", "Film Rec709", "Low Contrast Print", "Log3G10 Neutral"],
+            "IMAGE PIPELINE": {
+                "Options": ["IPP2 Mode", "Legacy Mode", "Standard Options", "Log3G10", "REDWideGamutRGB", "Output Transform"],
+                "Output Summary": ["Pipeline: IPP2", "Color Space: REDWideGamutRGB", "Gamma Curve: Log3G10", "3D LUT: RED IPP2 Cinema Standard"]
+            },
+            "WHITE BALANCE": {
+                "Color Temperature": ["3200K (Tungsten)", "4000K", "5000K", "5600K (Daylight)", "6500K", "8000K (Shade)"],
+                "Tint": ["-10.0 (Magenta)", "-5.0", "0.0 (Neutral)", "+5.0", "+10.0 (Green)"],
+                "Auto White Balance": ["Calculate AWB Now", "Reset AWB to 5600K"]
+            },
+            "ISO": {
+                "ISO": ["250", "320", "400", "500", "640", "800", "1000", "1280", "1600", "3200", "6400", "12800"],
+                "Shadow": ["Shadow -2.0", "Shadow -1.0", "Shadow 0.0 (Default)", "Shadow +1.0", "Shadow +2.0"],
+                "FLUT": ["FLUT -2.0", "FLUT -1.0", "FLUT 0.0 (Default)", "FLUT +1.0", "FLUT +2.0"],
+                "Exposure Adjust": ["-3.0 Stops", "-2.0 Stops", "-1.0 Stop", "0.0 (Nominal)", "+1.0 Stop", "+2.0 Stops", "+3.0 Stops"]
+            },
+            "COLOR": {
+                "Saturation": ["Saturation 0.0 (B&W)", "Saturation 0.5", "Saturation 1.0 (Default)", "Saturation 1.2", "Saturation 1.5"],
+                "Contrast": ["Contrast -0.5", "Contrast 0.0 (Default)", "Contrast +0.5", "Contrast +1.0"],
+                "Brightness": ["Brightness -1.0", "Brightness 0.0 (Default)", "Brightness +1.0"],
+                "Exposure Compensation": ["-2.0 EV", "-1.0 EV", "0.0 EV (Default)", "+1.0 EV", "+2.0 EV"]
+            },
+            "GAIN": {
+                "Color": ["Red Gain 1.00", "Green Gain 1.00", "Blue Gain 1.00", "Reset Gains"],
+                "User Matrix": ["Matrix: Standard", "Matrix: Custom 1", "Matrix: Custom 2", "Reset Matrix"]
+            },
+            "CURVES": {
+                "Luma Curve": ["Luma Linear", "Luma S-Curve", "Luma High Contrast", "Luma Soft Clip"],
+                "Red Curve": ["Red Linear", "Red Boost", "Red Soften"],
+                "Green Curve": ["Green Linear", "Green Boost", "Green Soften"],
+                "Blue Curve": ["Blue Linear", "Blue Boost", "Blue Soften"],
+                "Reset Curve": ["Reset All Curves to Linear"]
+            },
+            "LGG": {
+                "Lift": ["Lift -0.05", "Lift 0.00 (Default)", "Lift +0.05", "Lift +0.10"],
+                "Gamma": ["Gamma 0.90", "Gamma 1.00 (Default)", "Gamma 1.10", "Gamma 1.20"],
+                "Gain": ["Gain 0.90", "Gain 1.00 (Default)", "Gain 1.10", "Gain 1.20"]
+            },
+            "CDL": {
+                "Slope": ["Slope Red 1.0", "Slope Green 1.0", "Slope Blue 1.0"],
+                "Power": ["Power Red 1.0", "Power Green 1.0", "Power Blue 1.0"],
+                "Offset": ["Offset Red 0.0", "Offset Green 0.0", "Offset Blue 0.0"],
+                "Saturation": ["CDL Saturation 1.00"],
+                "CDLs": ["Import CDL", "Export CDL", "Bypass CDL"]
+            },
+            "3D LUT": {
+                "Creative 3D LUT": ["RED IPP2 Cinema Standard", "Film Rec709", "Low Contrast Print", "Log3G10 Neutral", "Import 3D LUT (.cube)"]
+            }
         },
         "MONITORING": {
-            "MONITORS": ["Brain LCD", "EVF", "HD-SDI", "HDMI", "Priority"],
-            "TEST SIGNAL": ["Off", "SMPTE Bars", "Chip Chart", "Luma Ramp", "Audio Tone 1kHz"],
-            "LOOK AROUND": ["Look Around ON", "Look Around OFF"],
-            "ADVANCED": ["Clean Feed", "Overlays Feed", "Touchscreen Lock", "Genlock Offset"],
+            "MONITORS": {
+                "Select Monitor": ["Brain LCD (RED Touch 7.0)", "EVF (OLED)", "HD-SDI 1", "HD-SDI 2", "HDMI Monitor"],
+                "Priority": ["Auto Detect Priority", "Brain LCD Primary", "EVF Primary", "HD-SDI Primary"]
+            },
+            "TEST SIGNAL": {
+                "Off": ["Test Signal OFF"],
+                "Chip Chart": ["Standard Chip Chart (Gamma/Color)"],
+                "SMPTE Bars": ["SMPTE Color Bars 100%"],
+                "Luma": ["Luma Step Ramp 10-Step", "Luma Smooth Ramp"],
+                "Audio Tone": ["Audio Tone 1 kHz (-20 dBFS)", "Audio Tone Sweep", "Tone OFF"]
+            },
+            "LOOK AROUND": {
+                "Look Around": ["Look Around ON (5% Margin)", "Look Around OFF (Full Frame)"]
+            },
+            "ADVANCED": {
+                "Video": ["Clean Video Feed", "Display All Overlays Feed", "Guides Only Feed"],
+                "Touch": ["Touchscreen Locked", "Touchscreen Unlocked", "Recalibrate Touch Digitizer"],
+                "Genlock Offset": ["Genlock Offset 0 Lines", "Genlock Offset +1 Line", "Sync Phase 0.00°"]
+            }
         },
         "OVERLAYS": {
-            "TOOLS": ["False Color", "Magnify 1:1", "RAW View", "Horizon", "Zebras 95%"],
-            "STATUS": ["Camera Status", "Lens Status", "Power Status"],
-            "GUIDES": ["16:9", "2.39:1", "1.85:1", "Off"],
-            "CUSTOM": ["In Camera", "On Media Overlays", "Custom Reticle"],
+            "TOOLS": {
+                "False Color": ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"],
+                "Magnify": ["1:1 Magnify Center", "1:1 Magnify Focus Point", "Magnify OFF"],
+                "RAW": ["RAW View ON", "RAW View OFF"],
+                "Horizon": ["Horizon Level ON", "Horizon Level OFF"],
+                "Zebras": ["Zebras 1 (95%)", "Zebras 2 (80%)", "Zebras OFF"]
+            },
+            "STATUS": {
+                "Camera": ["Show Core Camera Status", "Show Temperatures (Sensor/Core)", "Show Fan RPM"],
+                "Lens": ["Show Lens Focal & Aperture", "Show Focus Distance (m/ft)", "Lens Status OFF"]
+            },
+            "GUIDES": {
+                "Frame Guide": ["16:9 Frame Guide", "2.39:1 Anamorphic Guide", "1.85:1 Cinema Guide", "4:3 Guide", "Guides OFF"],
+                "Action Guide": ["Action Safe 90% ON", "Action Safe OFF"],
+                "Title Guide": ["Title Safe 80% ON", "Title Safe OFF"],
+                "General": ["Guide Line: Red", "Guide Line: White", "Guide Line: Yellow", "Guide Shading 50%", "Guide Shading 100%"]
+            },
+            "CUSTOM": {
+                "In Camera": ["Load Reticle 1", "Save Current Reticle", "Reset Reticle"],
+                "On Media, overlays": ["Save Overlays to RED MINI-MAG", "Load Overlays from Media"]
+            }
         },
         "POWER": {
-            "Power In": ["DC IN 14.8V", "Low Battery Warning", "Min Voltage Alert"],
-            "Power Out": ["Aux 12V", "RS 24V", "USB 5V Power"],
-            "Power Save": ["Auto Sleep", "LCD Dimmer", "Low Power Fan Mode"],
+            "Power In": ["DC IN 14.8V", "Low Battery Warning", "Min Voltage Alert", "Battery Level: 100%"],
+            "Power Out": ["Aux 12V DC Out (2.0A)", "RS 24V Run/Stop Out", "USB 5V Power ON", "Power Out All OFF"],
+            "Power Save": ["Auto Sleep: 15 Min", "Auto Sleep: Never", "LCD Dimmer: 60s", "Low Power Fan Mode ON"]
         },
         "PLAYBACK": {
-            "Playback Screen": ["Browse Recorded Clips", "Shuttle / Play", "In/Out Points", "Clip Metadata"],
+            "Playback Screen": ["Browse Recorded Clips", "Play / Pause", "Shuttle 2x / 4x", "Frame Step Forward", "Frame Step Backward", "In/Out Marker", "Clip Metadata Inspector"]
         },
         "MEDIA": {
-            "Device": ["Format RED MINI-MAG", "Eject Media", "Media Status & Space"],
-            "Clips": ["List R3D Clips", "Clip Properties", "Delete Last Clip"],
+            "Device": ["Format RED MINI-MAG (512GB)", "Eject Media Safely", "Media Status & S.M.A.R.T.", "Verify File System (UDF)"],
+            "Clips": ["List R3D Clips", "Clip Properties / Metadata", "Delete Last Recorded Clip", "Export Clip Log"]
         },
         "PRESETS": {
-            "Camera Presets": ["Save User Preset", "Load User Preset", "Factory Default"],
-            "Looks": ["Cinema Standard", "High Dynamic Range", "Vintage Film Look"],
-            "Auto Presets": ["Narrative 24fps", "Commercial 60fps", "Slow Motion 120fps"],
+            "Camera Presets": ["Save User Preset to Memory", "Load User Preset", "Export Preset to MINI-MAG", "Factory Default Reset"],
+            "Looks": ["Cinema Standard Look", "High Dynamic Range Look", "Vintage 35mm Film Look", "Low Contrast Commercial"],
+            "Auto Presets": ["Narrative 24fps 5K", "Commercial 60fps 4K", "High Speed Slow-Mo 120fps 3K"]
         },
         "SETTINGS": {
+            "LOOK": {
+                "Color": ["Saturation 1.0 (Default)", "Contrast 0.0", "Brightness 0.0", "Exposure Comp 0.0"],
+                "Gain": ["Red Gain 1.00", "Green Gain 1.00", "Blue Gain 1.00", "User Matrix: Standard"],
+                "ISO/FLUT®": ["ISO 250", "ISO 320", "ISO 400", "ISO 500", "ISO 640", "ISO 800", "ISO 1000", "ISO 1280", "ISO 1600", "ISO 3200", "Shadow: 0.0", "FLUT: 0.0"],
+                "Sharpness": ["Sharpness: Normal", "Sharpness: Crisp", "Sharpness: Soft", "Denoise: Off", "Denoise: Standard"],
+                "Curves": ["Luma S-Curve", "Luma High Contrast", "Red/Green/Blue RGB Curves", "Reset Curves to Linear"],
+                "Video": ["Video Color Space: Rec.709", "Video Color Space: REDcolor4", "Gamma: REDlogFilm", "Gamma: BT.1886"],
+                "Color Temp": ["3200K (Tungsten)", "4000K", "5000K", "5600K (Daylight)", "6500K", "Auto WB Calibration"],
+                "LGG": ["Lift 0.00", "Gamma 1.00", "Gain 1.00", "Reset LGG"]
+            },
             "PROJECT": {
                 "Frame Rate": ["23.98", "24.00", "25.00", "29.97", "48.00", "50.00", "59.94", "60.00", "120.00"],
                 "Exposure": ["1/24", "1/32", "1/48", "1/50", "1/60", "1/96", "1/120", "1/250", "1/500", "180.0°"],
-                "Timecode": ["Timecode Display Mode", "RTC Time of Day", "External LTC"],
-                "Slate": ["Scene A01", "Camera A", "Take 1", "Auto Slate"],
+                "Timecode": {
+                    "Timecode Display Mode": ["Time of Day (TOD)", "Edge Code", "External LTC"],
+                    "Source": ["Internal RTC Clock", "External LTC (Lemo)", "Genlock Sync"]
+                },
+                "Slate": {
+                    "Scene": ["Scene A01", "Scene A02", "Scene B01", "Scene C01"],
+                    "Camera": ["Camera A", "Camera B", "Camera C"],
+                    "Project": ["Project: DSMC2 Production", "Director: Cinematographer", "Production: RED Virtual Studio"],
+                    "Auto Slate": ["Auto Slate ON (Beep on REC)", "Auto Slate OFF"]
+                },
                 "Format": ["5K 16:9", "5K 2:1", "4.5K 16:9", "4K 16:9", "3K 16:9", "2K 16:9"],
-                "Sensor": ["Standard Scan", "Flip / Mirror Scan"],
+                "Sensor": {
+                    "Flip/Mirror Scan Direction": ["Standard Scan Direction", "Flip Sensor Scan", "Mirror Sensor Scan", "Flip & Mirror"]
+                }
             },
             "RECORDING": {
-                "Mode": ["Continuous Record", "Frame Burst Mode", "Storage to SSD"],
-                "Codec": ["REDCODE 3:1", "REDCODE 5:1", "REDCODE 8:1", "REDCODE 12:1", "REDCODE 16:1", "Apple ProRes 422 HQ"],
-                "Frame Processing": ["Normal Processing", "Multi-Frame Burst"],
-                "Pre-Record": ["Pre-Record 4s", "Pre-Record 8s", "Always Trigger"],
-                "Indicator": ["Beeps & Tones ON", "EVF Tally Light", "SSD Tally Light"],
+                "Mode": {
+                    "Storage": ["RED MINI-MAG (Port 1)", "External Storage"],
+                    "Mode": ["Continuous Record", "Burst Mode", "Speed Ramp", "Time Lapse"]
+                },
+                "Codec": {
+                    "Record File Format": ["REDCODE RAW (R3D)", "Apple ProRes 422 HQ", "ProRes + R3D Dual Record", "Avid DNxHR HQX"],
+                    "REDCODE®": ["REDCODE 3:1", "REDCODE 5:1", "REDCODE 8:1", "REDCODE 12:1", "REDCODE 16:1"]
+                },
+                "Frame Processing": {
+                    "Mode": ["Normal Processing", "Multi-Frame Burst", "Frame Averaging"],
+                    "Number of Frames": ["1 Frame", "2 Frames", "4 Frames", "8 Frames"]
+                },
+                "Pre-Record": {
+                    "Duration": ["Pre-Record OFF", "Pre-Record 2 Sec", "Pre-Record 4 Sec", "Pre-Record 8 Sec", "Pre-Record 10 Sec"],
+                    "Always Trigger": ["Always Trigger ON", "Always Trigger OFF"],
+                    "Trigger Pre-Record Now": ["Arm & Buffer Pre-Record"]
+                },
+                "Indicator": {
+                    "Enable Sounds": ["Record Beeps ON", "Record Beeps OFF", "Key Click Sounds"],
+                    "EVF Tally Light": ["EVF Tally ON", "EVF Tally OFF"],
+                    "SSD Tally Light": ["SSD Tally LED ON", "SSD Tally LED OFF"]
+                }
             },
-            "HDRX": ["HDRx ON", "HDRx OFF", "+1 Stop", "+2 Stops", "+3 Stops", "Track A", "Track X"],
+            "HDRX": {
+                "Mode": ["HDRx OFF", "HDRx ON"],
+                "Factor": ["+1 Stop (2x)", "+2 Stops (4x)", "+3 Stops (8x)", "+4 Stops (16x)", "+5 Stops (32x)", "+6 Stops (64x)"],
+                "Monitor Track": ["Track A (Normal Exposure)", "Track X (Highlight Protection)"]
+            },
             "AUDIO": {
-                "Control": ["Ch1 Gain +18dB", "Ch2 Gain +18dB", "Ch3 Gain 0dB", "Ch4 Gain 0dB", "Headphone Vol 80%"],
-                "Mix": ["Stereo Mix L/R", "Monitor Mix"],
+                "Control": {
+                    "Channel 1/2": ["Ch1: Cam Mic L (+18dB)", "Ch2: Cam Mic R (+18dB)", "Phantom +48V ON", "Line Level In"],
+                    "Channel 3/4": ["Ch3: Aux Audio In", "Ch4: Aux Audio In", "Mute Ch3/4"],
+                    "Pre-Amp Gain": ["Pre-Amp 0 dB", "Pre-Amp +12 dB", "Pre-Amp +18 dB", "Pre-Amp +24 dB", "Pre-Amp +36 dB"],
+                    "Headphone Volume": ["Volume 40%", "Volume 60%", "Volume 80%", "Volume 100%"]
+                },
+                "Mix": {
+                    "Headphone Mix": ["Stereo Mix L/R", "Mono Ch1", "Mono Ch2"],
+                    "Monitor Mix": ["Program Audio 1/2", "Monitor Audio Mute"]
+                }
             },
-            "FOCUS": ["Manual Focus", "Autofocus Single", "Continuous AF", "Rack Focus"],
-            "EXPOSURE ASSIST": ["Exposure Priority", "Spot Metering", "Center Weighted", "Histogram Mode"],
+            "FOCUS": {
+                "Mode": ["Manual Focus (MF)", "Autofocus Single (AF-S)", "Continuous AF (AF-C)"],
+                "Rack": ["Rack Focus Start Point", "Rack Focus End Point", "Execute Rack Focus", "Rack Speed: Medium"]
+            },
+            "EXPOSURE ASSIST": {
+                "Mode": ["Exposure Assist OFF", "Spot Metering Assist", "Exposure Priority Assist"],
+                "Exposure Priority": ["Manual Exposure", "Iris Priority", "Shutter Priority"],
+                "Exp Comp": ["-2.0 EV", "-1.0 EV", "0.0 EV (Nominal)", "+1.0 EV", "+2.0 EV"],
+                "Metering Mode": ["Center-Weighted Metering", "Spot Metering (Center)", "Matrix Multi-Zone"],
+                "Selection": ["Spot Focus / Meter Target", "Reset Target to Center"]
+            },
             "SETUP": {
-                "Keys": ["Key Mapping", "User 1 Action", "User 2 Action", "Soft Keys"],
-                "Date/Time": ["Set Date", "Set Local Time", "Time Zone UTC-8"],
-                "Communication": ["Camera PIN", "Serial RS-232", "Ethernet IP", "WiFi Setup", "RCP TCP 1111"],
-                "GPIO / Sync": ["Genlock Sync", "BRAIN GPIO Out", "GPI Trigger"],
-                "Fan Control": ["Adaptive Fan", "Quiet Fan Mode", "Manual Fan Speed"],
-                "Lens": ["Lens Info", "Electronic Mount EF", "Run AF Sweep", "Metadata Sync"],
-                "Motor Control": ["General Motors", "Focus Motor", "Iris Motor", "Zoom Motor"],
+                "Keys": {
+                    "Key Mapping": ["User 1 -> False Color", "User 2 -> Zebras", "Record Key -> Toggle REC", "D-Pad -> Navigation"],
+                    "Options": ["Key Tone Sound ON", "Key Lockout Enabled", "Key Lockout Disabled"],
+                    "Soft Keys": ["Soft Key A -> 1:1 Magnify", "Soft Key B -> Horizon Level"],
+                    "Advanced": ["Load Key Profile", "Save Key Profile", "Reset Key Mappings"]
+                },
+                "Date/Time": {
+                    "Date": ["Set Year 2026", "Set Month 11", "Set Day 06"],
+                    "Local Time": ["Set Time 16:30:00", "Sync to Host System Time"],
+                    "Time Zone": ["UTC-8 (Pacific)", "UTC-5 (Eastern)", "UTC+0 (GMT/UTC)", "UTC+1 (CET)"]
+                },
+                "Communication": {
+                    "Camera": ["Camera Name: SCARLET-W 5K", "Camera PIN: 0000"],
+                    "Serial": ["UART4 RS-232 @ 115200 Baud", "Binary Protocol ON", "ASCII Terminal Mode"],
+                    "Ethernet³": ["Gigabit Ethernet: Connected", "DHCP Auto", "Static IP: 192.168.1.100"],
+                    "WiFi": ["WiFi Infrastructure", "WiFi Ad-Hoc", "WiFi OFF"],
+                    "RCP⁴": ["RCP Server Port 1111", "RCP Status: Online", "Clients Connected: 0", "Authenticate RCP"]
+                },
+                "GPIO / Sync": {
+                    "Sync": ["Genlock Sync: Internal", "Genlock Sync: External SMPTE", "Sync Phase: 0°"],
+                    "BRAIN GPIO": ["GPI: Record Trigger", "GPO: Tally Light Driver", "Direction: Bi-directional"]
+                },
+                "Fan Control": {
+                    "Mode": ["Adaptive Fan Mode (Target 40°C)", "Quiet Record Mode", "Manual Fan Speed (50%)"],
+                    "Post Record Delay": ["Delay 0s", "Delay 30s", "Delay 60s"]
+                },
+                "Lens": {
+                    "Lens": ["Mount: Canon EF Smart Mount", "Mount: Nikon F Electronic", "Mount: PL Intelligent (/i)"],
+                    "Motion Mount⁴": ["Motion Mount: None Detected", "Electronic ND: Clear", "ND Filter 0.6", "ND Filter 1.2"],
+                    "Info": ["Canon EF 24-70mm f/2.8L II USM", "Serial: CN-748921", "Firmware: v1.0.4"],
+                    "Metadata": ["Sync Focal Length to R3D", "Sync Aperture to R3D", "Sync Focus Distance"]
+                },
+                "Motor Control⁵": {
+                    "General": ["Motor Driver Power ON", "Motor Driver Status: Ready"],
+                    "Focus": ["Calibrate Focus Motor", "Set Focus In/Out Stops"],
+                    "Iris": ["Calibrate Iris Motor", "Set Aperture Motor Range"],
+                    "Zoom": ["Calibrate Zoom Motor", "Set Zoom Motor Range"],
+                    "Wireless": ["RED Wireless Motor Driver (W.M.D.) Pair", "Channel 1 (2.4 GHz)"]
+                }
             },
             "MAINTENANCE": {
-                "Save Log": ["Save Log to Media", "View System Log"],
-                "Upgrade": ["Upgrade Camera Firmware", "Check Media Firmware"],
-                "Calibrate": ["Black Shading Sensor (T/E)", "Calibrate Gyro/Acc"],
-                "Self Test": ["Sensor Test Pattern", "Touchscreen Test"],
-                "Restore System": ["Reset Defaults", "Wipe Camera Config"],
-                "Rediscover": ["Rediscover Hardware Modules"],
-                "System Status": ["Project Status", "Attached Modules", "RCP Connections", "Camera Info"],
-                "OLPF": ["Standard OLPF", "Skin Tone-Highlight", "Low Light"],
+                "Save Log": {
+                    "Save Camera Log to Media": ["Save Complete Camera Log to RED MINI-MAG (.txt)", "Save System Trace"],
+                    "Save Log to Media": ["Save Complete Camera Log to RED MINI-MAG (.txt)", "Save System Trace"],
+                    "View Camera Log": ["Display Recent 100 Log Lines in Console"]
+                },
+                "Upgrade": {
+                    "Camera": ["Upgrade Camera Firmware from RED MINI-MAG", "Check For Staged Firmware Image"],
+                    "Media": ["Verify Firmware Integrity on Media", "Revert to Confirmed Working Baseline (v7.4.1)"]
+                },
+                "Calibrate": {
+                    "Sensor": ["Black Shading Sensor (T/E)", "Load Calibration Map 1 (24fps 1/48)", "Reset Calibration Map"],
+                    "Gyro/Acc": ["Calibrate Internal 6-Axis IMU", "Level Calibration (Zero Horizon)"]
+                },
+                "Self Test": {
+                    "Enable Sensor Test Pattern": ["Test Pattern: SMPTE 100%", "Test Pattern: Color Ramp", "Test Pattern: Grid 16x9", "Test Pattern OFF"],
+                    "Touchscreen": ["Run Touchscreen Digitizer Test", "Touch Calibration 5-Point"]
+                },
+                "Restore System": {
+                    "Reset Defaults": ["Reset Camera to Factory DSMC2 Defaults", "Confirm Reset Settings"],
+                    "Wipe Camera": ["Wipe All User Profiles & Media Logs", "Confirm System Wipe"]
+                },
+                "Rediscover": {
+                    "Rediscover Hardware": ["Rescan All Attached Modules & Expander Bus", "Rescan I2C / SPI Sensors"]
+                },
+                "System Status": {
+                    "Project Status": ["Camera Model: SCARLET-W 5K", "Active Resolution: 5K 16:9", "Active Codec: REDCODE 8:1", "Sensor Temp: 39°C / Core: 54°C"],
+                    "Attached Modules": ["RED Touch 7.0 LCD (Port LCD1)", "DSMC2 Base Expander", "RED MINI-MAG 512GB (Port SATA0)"],
+                    "RCP Connections": ["RCP Server: 127.0.0.1:1111 (Listening)", "Active Clients: 0"],
+                    "Camera Info": ["Firmware: v7.4.1 (SCARLET-W 5K)", "RTOS: ThreadX ARMv7-A", "Bootloader: RED U-Boot v2016.03"]
+                },
+                "OLPF": {
+                    "OLPF Type": ["Standard OLPF", "Skin Tone-Highlight OLPF", "Low Light Optimized OLPF"]
+                }
             }
         }
     }
@@ -146,6 +331,9 @@ class RedUiEngine:
         self.is_magnify_on: bool = False
         self.is_false_color_on: bool = False
         self.is_zebras_on: bool = False
+        self.is_log_view_on: bool = False
+        self.is_horizon_on: bool = False
+        self.is_false_color_dropdown_open: bool = False
         self.overlay_mode: str = "Standard" # Standard, Overview, Guides, None
         self.guide_mode: str = "16:9"       # 16:9, 2.39:1, 1.85:1, Off
 
@@ -433,13 +621,20 @@ class RedUiEngine:
         return None
 
     def _get_menu_node(self, path: List[str]):
-        """Traverse DSMC2_MENU_TREE along path."""
+        """Traverse DSMC2_MENU_TREE along path with case-insensitivity."""
         if not path or path == ["Menu"]:
             return self.DSMC2_MENU_TREE
         curr = self.DSMC2_MENU_TREE
         for seg in path[1:]:
-            if isinstance(curr, dict) and seg in curr:
-                curr = curr[seg]
+            if isinstance(curr, dict):
+                if seg in curr:
+                    curr = curr[seg]
+                else:
+                    match_k = next((k for k in curr if k.lower() == seg.lower()), None)
+                    if match_k is not None:
+                        curr = curr[match_k]
+                    else:
+                        return None
             else:
                 return None
         return curr
@@ -461,8 +656,10 @@ class RedUiEngine:
             return 4, 200, 52, 24, 20, 70, 80
         elif count <= 10:
             return 5, 170, 48, 18, 16, 50, 75
-        else:
+        elif count <= 12:
             return 4, 200, 44, 24, 12, 70, 65
+        else:
+            return 5, 170, 42, 18, 10, 50, 60
 
     def _get_grid_clicked_index_custom(self, x: int, y: int, start_x: int, start_y: int, count: int, cols: int, item_w: int, item_h: int, pad_x: int, pad_y: int) -> Optional[int]:
         for i in range(count):
@@ -505,8 +702,13 @@ class RedUiEngine:
                 self.menu_path.pop()
             return True
 
+        # Special view: OVERLAYS TOOLS buttons (matching Attachment 4)
+        if len(self.menu_path) >= 2 and self.menu_path[1].upper() == "OVERLAYS" and (len(self.menu_path) == 2 or self.menu_path[2].upper() == "TOOLS"):
+            if self._handle_tools_touch(x, y):
+                return True
+
         # Backward compatibility check for tab touch in test_redui.py
-        if x <= 200 and 110 <= y <= 350:
+        if self.menu_path == ["Menu"] and x <= 200 and 110 <= y <= 350:
             tab_y = 50 + 60
             for tab in self.MENU_TABS:
                 if tab_y <= y <= (tab_y + 40):
@@ -551,6 +753,57 @@ class RedUiEngine:
 
         return True
 
+    def _handle_tools_touch(self, x: int, y: int) -> bool:
+        """Handle touches on authentic DSMC2 Overlays > Tools ribbon & popup."""
+        # Check False Color popup if open: x: 105..275, y: 96..325
+        if self.is_false_color_dropdown_open:
+            if 105 <= x <= 275 and 96 <= y <= (96 + 6 * 38):
+                idx = (y - 96) // 38
+                modes = ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"]
+                if 0 <= idx < len(modes):
+                    chosen = modes[idx]
+                    self.active_false_color_mode = chosen
+                    if chosen == "Off":
+                        self.is_false_color_on = False
+                    else:
+                        self.is_false_color_on = True
+                    self.camera.log_system(f"[UI] False Color mode set to {chosen}")
+                    self.is_false_color_dropdown_open = False
+                    return True
+            else:
+                self.is_false_color_dropdown_open = False
+
+        # Ribbon buttons (y: 50..95)
+        if 50 <= y <= 95:
+            # False Color Mode button [ Focus / ... ]: x: 105..220
+            if 105 <= x <= 220:
+                self.is_false_color_dropdown_open = not self.is_false_color_dropdown_open
+                return True
+            # OK button [ OK ]: x: 224..275
+            if 224 <= x <= 275:
+                self.is_false_color_dropdown_open = False
+                return True
+            # Magnify button [ Magnify ]: x: 285..425
+            if 285 <= x <= 425:
+                self.toggle_magnify()
+                return True
+            # Log View button [ Log View ]: x: 435..570
+            if 435 <= x <= 570:
+                self.is_log_view_on = not getattr(self, "is_log_view_on", False)
+                self.camera.log_system(f"[UI] Log View mode {'ENABLED' if self.is_log_view_on else 'DISABLED'}")
+                return True
+            # Horizon button [ Horizon ]: x: 580..715
+            if 580 <= x <= 715:
+                self.is_horizon_on = not getattr(self, "is_horizon_on", False)
+                self.camera.log_system(f"[UI] Horizon Level overlay {'ENABLED' if self.is_horizon_on else 'DISABLED'}")
+                return True
+            # Zebras button [ Zebras... ]: x: 725..865
+            if 725 <= x <= 865:
+                self.toggle_zebras()
+                return True
+
+        return False
+
     def _handle_menu_item_selected(self, item: str):
         """Process item click: drill down into submenu or execute terminal option."""
         test_path = self.menu_path + [item]
@@ -565,16 +818,16 @@ class RedUiEngine:
         rcp = self.camera.rcp
         last_cat = self.menu_path[-1]
 
-        if last_cat == "Frame Rate" or item in self.FPS_OPTIONS:
+        if last_cat in ("Frame Rate", "Recording Frame Rate") or item in self.FPS_OPTIONS:
             val = item.replace(" FPS", "").strip()
             rcp.state[RcpProtocol.PARAM_FPS] = val
             self.camera.log_system(f"[UI] Project Frame Rate set to {val} FPS")
 
-        elif last_cat == "Exposure" or item in self.SHUTTER_OPTIONS:
+        elif last_cat in ("Exposure", "Shutter Speed") or item in self.SHUTTER_OPTIONS:
             rcp.state[RcpProtocol.PARAM_SHUTTER] = item
             self.camera.log_system(f"[UI] Shutter Speed set to {item}")
 
-        elif last_cat == "Format" or item in self.FORMAT_OPTIONS:
+        elif last_cat in ("Format", "Recording Format") or item in self.FORMAT_OPTIONS:
             rcp.state[RcpProtocol.PARAM_FORMAT] = item
             self.camera.log_system(f"[UI] Recording Format set to {item}")
 
@@ -583,18 +836,18 @@ class RedUiEngine:
             rcp.state[RcpProtocol.PARAM_ISO] = val
             self.camera.log_system(f"[UI] Sensor ISO set to {val}")
 
-        elif last_cat == "WHITE BALANCE":
-            if item == "Auto WB":
+        elif last_cat == "WHITE BALANCE" or "Color Temp" in last_cat:
+            if item == "Auto WB" or "Auto WB" in item:
                 self.camera.log_system("[UI] Executed Auto White Balance calibration (5600K 0 Tint)")
             else:
                 rcp.state["color_temperature"] = item
                 self.camera.log_system(f"[UI] Color Temperature set to {item}")
 
-        elif last_cat == "3D LUT":
+        elif last_cat in ("3D LUT", "Creative 3D LUT"):
             self.active_lut = item
             self.camera.log_system(f"[UI] 3D LUT changed to: {item}")
 
-        elif last_cat == "GUIDES":
+        elif last_cat in ("GUIDES", "Frame Guide"):
             self.guide_mode = item
             self.camera.log_system(f"[UI] Frame Guides set to {item}")
 
@@ -609,6 +862,59 @@ class RedUiEngine:
                 self.camera.log_system("[UI] Horizon Level overlay toggled")
             elif "RAW" in item:
                 self.camera.log_system("[UI] RAW exposure view toggled")
+
+        elif "Saturation" in item or "Contrast" in item or "Brightness" in item or "Exposure Comp" in item:
+            self.camera.log_system(f"[LOOK] Color parameter updated: {item}")
+
+        elif "Gain" in item or "Matrix" in item:
+            self.camera.log_system(f"[LOOK] Sensor Gain & Matrix updated: {item}")
+
+        elif "Curve" in item:
+            self.camera.log_system(f"[LOOK] Tone curve profile applied: {item}")
+
+        elif "Lift" in item or "Gamma" in item or "Gain" in item or "LGG" in item:
+            self.camera.log_system(f"[LOOK] Lift / Gamma / Gain adjusted: {item}")
+
+        elif "Sharpness" in item or "Denoise" in item:
+            self.camera.log_system(f"[LOOK] Detail & Denoise setting: {item}")
+
+        elif "Video Color Space" in item or "REDlogFilm" in item or "BT.1886" in item:
+            self.camera.log_system(f"[LOOK] Video transform set: {item}")
+
+        elif "REDCODE" in item or "ProRes" in item or "DNxHR" in item or "R3D" in item:
+            rcp.state["record_file_format"] = item
+            self.camera.log_system(f"[RECORDING] Codec format set: {item}")
+
+        elif "Pre-Record" in item:
+            self.camera.log_system(f"[RECORDING] Pre-Record buffer: {item}")
+
+        elif "Tally" in item or "Beeps" in item:
+            self.camera.log_system(f"[RECORDING] Indicator & Tally setting: {item}")
+
+        elif "Upgrade" in item or "Firmware" in item:
+            self.camera.log_system(f"[UPGRADE] Checking RED MINI-MAG slot for firmware packages: {item}")
+            self.camera.log_system("[UPGRADE] Staged firmware package verified in slot. Ready for flash.")
+
+        elif "Wipe Camera" in item:
+            self.camera.log_system("[MAINTENANCE] Camera user config wiped. Clean DSMC2 baseline restored.")
+
+        elif "Rediscover" in item:
+            self.camera.log_system("[HARDWARE] Rediscovered expansion modules: RED Touch 7.0, Base Expander, SATA0 MINI-MAG.")
+
+        elif "OLPF" in item:
+            self.camera.log_system(f"[CALIBRATION] Optical Low Pass Filter (OLPF) profile set: {item}")
+
+        elif "Test Pattern" in item:
+            self.camera.log_system(f"[MONITORING] Test Pattern generator: {item}")
+
+        elif "Genlock" in item or "Sync Phase" in item:
+            self.camera.log_system(f"[SYNC] Genlock & Phase synchronized: {item}")
+
+        elif "Adaptive Fan" in item or "Quiet" in item or "Fan" in item:
+            self.camera.log_system(f"[FAN] Fan control mode updated: {item}")
+
+        elif "Rack Focus" in item or "AF-S" in item or "AF-C" in item:
+            self.camera.log_system(f"[FOCUS] Focus system mode: {item}")
 
         elif "Format" in item:
             if hasattr(self.camera, "recorder"):
@@ -974,6 +1280,8 @@ class RedUiEngine:
 
         # Breadcrumbs text
         b_txt = " > ".join(self.menu_path) + " >"
+        if len(b_txt) > 42 and len(self.menu_path) > 3:
+            b_txt = f"Menu > ... > {self.menu_path[-2]} > {self.menu_path[-1]} >"
         draw.text((18, 13), b_txt, fill=(245, 245, 245), font=FONT_TITLE)
 
         # Right buttons: [ ... ] [ Back ] [ Close ]
@@ -995,7 +1303,7 @@ class RedUiEngine:
             self._draw_media_device_screen(draw)
             return
 
-        if self.menu_path == ["Menu", "OVERLAYS", "TOOLS"]:
+        if len(self.menu_path) >= 2 and self.menu_path[1].upper() == "OVERLAYS" and (len(self.menu_path) == 2 or self.menu_path[2].upper() == "TOOLS"):
             self._draw_tools_screen(draw)
             return
 
@@ -1037,6 +1345,9 @@ class RedUiEngine:
             elif val == "Magnify 1:1" and self.is_magnify_on:
                 is_active = True
             elif val == "Zebras 95%" and self.is_zebras_on:
+                is_active = True
+            elif len(self.menu_path) >= 3 and self.menu_path[-1].upper() == "LOOK" and val == "Color":
+                # Match authentic Look screen tile activation (Attachment 3)
                 is_active = True
 
             # Has children submenus?
@@ -1094,41 +1405,71 @@ class RedUiEngine:
         draw.text((cx + 55, 408), "EJECT MEDIA", fill=(220, 220, 220), font=FONT_BOLD)
 
     def _draw_tools_screen(self, draw: ImageDraw.ImageDraw):
-        """Draw authentic DSMC2 Overlays > Tools Toolbar & Options."""
-        draw.text((70, 75), "OVERLAY TOOLS & EXPOSURE ASSIST", fill=(255, 255, 255), font=FONT_TITLE)
+        """Draw authentic DSMC2 Overlays > Tools Toolbar & Options matching official HUD (Attachment 4)."""
+        # Top tools ribbon container: y: 46..100
+        draw.rectangle([(0, 46), (self.WIDTH, 100)], fill=(28, 28, 28))
+        draw.line([(0, 100), (self.WIDTH, 100)], fill=(55, 55, 55), width=1)
 
-        tools = [
-            ("False Color", self.is_false_color_on),
-            ("Magnify 1:1", self.is_magnify_on),
-            ("Zebras 95%", self.is_zebras_on),
-            ("Horizon", False),
-            ("RAW View", False)
-        ]
-        start_x = 70
-        start_y = 120
-        item_w = 160
-        item_h = 48
-        pad_x = 20
+        # 1. False Color Block (x: 10 .. 275)
+        draw.rectangle([(10, 52), (275, 94)], fill=(20, 20, 20), outline=(65, 65, 65), width=1)
+        draw.text((18, 66), "False Color:", fill=(210, 210, 210), font=FONT_MED)
+        # Mode button [ Focus / Exposure / ... ]
+        cur_mode = self.active_false_color_mode if self.is_false_color_on else "Off"
+        mode_btn_bg = (210, 210, 210) if self.is_false_color_dropdown_open else (50, 50, 50)
+        mode_btn_txt = (10, 10, 10) if self.is_false_color_dropdown_open else (240, 240, 240)
+        draw.rectangle([(105, 55), (220, 91)], fill=mode_btn_bg, outline=(80, 80, 80), width=1)
+        draw.text((120, 66), cur_mode, fill=mode_btn_txt, font=FONT_BOLD)
+        # [ OK ] button
+        draw.rectangle([(224, 55), (271, 91)], fill=(45, 45, 45), outline=(75, 75, 75), width=1)
+        draw.text((236, 66), "OK", fill=(220, 220, 220), font=FONT_MED)
 
-        for i, (tool_name, active) in enumerate(tools):
-            bx = start_x + i * (item_w + pad_x)
-            by = start_y
-            bg = (180, 20, 20) if active else (40, 40, 40)
-            border = (255, 60, 60) if active else (80, 80, 80)
-            draw.rectangle([(bx, by), (bx + item_w, by + item_h)], fill=bg, outline=border, width=2 if active else 1)
-            draw.text((bx + 16, by + 14), tool_name, fill=(255, 255, 255), font=FONT_MED)
-            if active:
-                draw.text((bx + item_w - 22, by + 14), "●", fill=(255, 255, 255), font=FONT_MED)
+        # 2. [ ● Magnify ] (x: 285 .. 425)
+        mag_bg = (180, 20, 20) if self.is_magnify_on else (40, 40, 40)
+        draw.rectangle([(285, 54), (425, 92)], fill=mag_bg, outline=(75, 75, 75), width=1)
+        draw.ellipse([(296, 69), (304, 77)], fill=(255, 255, 255) if self.is_magnify_on else (120, 120, 120))
+        draw.text((314, 66), "Magnify", fill=(255, 255, 255), font=FONT_MED)
 
-        # False Color Mode Selection
-        draw.text((70, 220), "FALSE COLOR EXPOSURE MODES:", fill=(200, 200, 200), font=FONT_BOLD)
-        modes = ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"]
-        for j, mode in enumerate(modes):
-            my = 260 + j * 38
-            is_cur = (self.is_false_color_on and getattr(self, "active_false_color_mode", "Focus") == mode) or (not self.is_false_color_on and mode == "Off")
-            mbg = (170, 20, 20) if is_cur else (30, 30, 30)
-            draw.rectangle([(70, my), (260, my + 32)], fill=mbg, outline=(255, 60, 60) if is_cur else (60, 60, 60))
-            if is_cur:
-                draw.text((80, my + 8), f"◄ {mode} ►", fill=(255, 255, 255), font=FONT_BOLD)
-            else:
-                draw.text((80, my + 8), mode, fill=(200, 200, 200), font=FONT_MED)
+        # 3. [ ● Log View ] (x: 435 .. 570)
+        log_active = getattr(self, "is_log_view_on", False)
+        draw.rectangle([(435, 54), (570, 92)], fill=(180, 20, 20) if log_active else (40, 40, 40), outline=(75, 75, 75), width=1)
+        draw.ellipse([(446, 69), (454, 77)], fill=(255, 255, 255) if log_active else (120, 120, 120))
+        draw.text((464, 66), "Log View", fill=(255, 255, 255), font=FONT_MED)
+
+        # 4. [ ● Horizon ] (x: 580 .. 715)
+        horiz_active = getattr(self, "is_horizon_on", False)
+        draw.rectangle([(580, 54), (715, 92)], fill=(180, 20, 20) if horiz_active else (40, 40, 40), outline=(75, 75, 75), width=1)
+        draw.ellipse([(591, 69), (599, 77)], fill=(255, 255, 255) if horiz_active else (120, 120, 120))
+        draw.text((609, 66), "Horizon", fill=(255, 255, 255), font=FONT_MED)
+
+        # 5. [ Zebras... ] (x: 725 .. 865)
+        draw.rectangle([(725, 54), (865, 92)], fill=(180, 20, 20) if self.is_zebras_on else (40, 40, 40), outline=(75, 75, 75), width=1)
+        draw.text((750, 66), "Zebras...", fill=(255, 255, 255), font=FONT_MED)
+
+        # Center Crosshair Reticle (matching Attachment 4)
+        cx, cy = self.WIDTH // 2, self.HEIGHT // 2
+        draw.line([(cx - 18, cy), (cx - 4, cy)], fill=(190, 190, 190), width=1)
+        draw.line([(cx + 4, cy), (cx + 18, cy)], fill=(190, 190, 190), width=1)
+        draw.line([(cx, cy - 18), (cx, cy - 4)], fill=(190, 190, 190), width=1)
+        draw.line([(cx, cy + 4), (cx, cy + 18)], fill=(190, 190, 190), width=1)
+
+        # False Color Mode Dropdown Menu (matching Attachment 4)
+        if self.is_false_color_dropdown_open:
+            modes = ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"]
+            pop_x1, pop_x2 = 105, 271
+            pop_y1 = 92
+            pop_h = 38
+            draw.rectangle([(pop_x1, pop_y1), (pop_x2, pop_y1 + len(modes) * pop_h)], fill=(195, 195, 195), outline=(50, 50, 50), width=1)
+
+            for idx, mode in enumerate(modes):
+                my1 = pop_y1 + idx * pop_h
+                my2 = my1 + pop_h
+                is_sel = (self.active_false_color_mode == mode and self.is_false_color_on) or (mode == "Off" and not self.is_false_color_on)
+                if is_sel:
+                    draw.rectangle([(pop_x1 + 1, my1), (pop_x2 - 1, my2)], fill=(140, 10, 10))
+                    # Red triangular arrow accents on left and right
+                    draw.polygon([(pop_x1 + 2, my1 + 6), (pop_x1 + 12, my1 + pop_h // 2), (pop_x1 + 2, my2 - 6)], fill=(100, 0, 0))
+                    draw.polygon([(pop_x2 - 2, my1 + 6), (pop_x2 - 12, my1 + pop_h // 2), (pop_x2 - 2, my2 - 6)], fill=(100, 0, 0))
+                    draw.text((pop_x1 + 45, my1 + 10), mode, fill=(255, 255, 255), font=FONT_BOLD)
+                else:
+                    draw.text((pop_x1 + 45, my1 + 10), mode, fill=(20, 20, 20), font=FONT_MED)
+                draw.line([(pop_x1, my2), (pop_x2, my2)], fill=(160, 160, 160), width=1)

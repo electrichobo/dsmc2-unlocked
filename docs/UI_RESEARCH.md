@@ -93,3 +93,83 @@ In `slot/overlays/`, the genuine RED firmware provides 8 pre-compiled overlay te
   - RED MINI-MAG Status (`RED MINI-MAG 512GB [78% FREE]`).
   - Audio VU Meters (`CH1 -18dB  CH2 -18dB`).
   - Instruction Counter (`INSTR: 45.0M`).
+
+---
+
+## 4. Master DSMC2 Menu Architecture & Navigation
+
+The emulator implements the full authentic DSMC2 menu tree as documented in the official RED Operation Guides (GEMINI, RAVEN, DRAGON-X, HELIUM, MONSTRO):
+
+```mermaid
+graph TD
+    ROOT["DSMC2 Root Menu"] --> IMAGE["IMAGE"]
+    ROOT --> MONITORING["MONITORING"]
+    ROOT --> OVERLAYS["OVERLAYS"]
+    ROOT --> POWER["POWER"]
+    ROOT --> PLAYBACK["PLAYBACK"]
+    ROOT --> MEDIA["MEDIA"]
+    ROOT --> PRESETS["PRESETS"]
+    ROOT --> SETTINGS["SETTINGS"]
+
+    IMAGE --> IP["IMAGE PIPELINE"]
+    IMAGE --> WB["WHITE BALANCE"]
+    IMAGE --> ISO["ISO"]
+    IMAGE --> COLOR["COLOR"]
+    IMAGE --> GAIN["GAIN"]
+    IMAGE --> CURVES["CURVES"]
+    IMAGE --> LGG["LGG"]
+    IMAGE --> CDL["CDL"]
+    IMAGE --> LUT["3D LUT"]
+
+    SETTINGS --> PROJ["PROJECT"]
+    SETTINGS --> REC["RECORDING"]
+    SETTINGS --> HDRX["HDRX"]
+    SETTINGS --> AUD["AUDIO"]
+    SETTINGS --> FOC["FOCUS"]
+    SETTINGS --> EXP["EXPOSURE ASSIST"]
+    SETTINGS --> SETUP["SETUP"]
+    SETTINGS --> MAINT["MAINTENANCE"]
+    SETTINGS --> LOOK["LOOK (8 Tiles)"]
+
+    OVERLAYS --> TOOLS["TOOLS (Ribbon + Popup)"]
+    OVERLAYS --> STAT["STATUS"]
+    OVERLAYS --> GUIDE["GUIDES"]
+    OVERLAYS --> CUST["CUSTOM"]
+```
+
+### 4.1 Authentic `Settings > Look >` 8-Tile Matrix
+In DSMC2 systems, `Menu > Settings > Look >` presents eight dedicated quick-parameter tiles arranged in a 4x2 grid:
+1. **Color**: Saturation, Contrast, Brightness, Exposure Compensation.
+2. **Gain**: Red Gain, Green Gain, Blue Gain, User Matrix.
+3. **ISO/FLUT®**: Sensor ISO rating, Shadow, FLUT®, Exposure Adjust.
+4. **Sharpness**: Crisp, Normal, Soft detail enhancement and noise suppression.
+5. **Curves**: Luma S-Curve, High Contrast, Red/Green/Blue RGB curve adjustments.
+6. **Video**: Rec.709, REDcolor4, REDlogFilm, BT.1886 transform curves.
+7. **Color Temp**: 3200K (Tungsten) through 8000K (Shade) and Auto WB.
+8. **LGG**: Lift, Gamma, Gain master grading controls.
+
+### 4.2 Authentic `Overlays > Tools` Ribbon & Dropdown
+Matches the genuine RED Touch 7.0 layout:
+- **Top Ribbon**:
+  - `False Color:` [ Mode Button ] [ OK ]
+  - [ ● Magnify ] (1:1 pixel zoom toggle)
+  - [ ● Log View ] (Bypass 3D LUT to inspect raw sensor data)
+  - [ ● Horizon ] (Digital gyroscope horizon line overlay)
+  - [ Zebras... ] (95% / 80% IRE exposure zebra stripes)
+- **False Color Mode Dropdown**:
+  - Drops down immediately below the mode button: `Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`.
+  - Active selection is highlighted in red with triangular indicators (`◄ Focus ►`).
+- **Center Crosshair Reticle**:
+  - Renders authentic 1px crosshair reticle at center of frame (`(512, 288)`).
+
+---
+
+## 5. Vertical RED MINI-MAG Media Loader / Slot
+
+Physically situated immediately to the left of the screen viewport inside the RED Touch monitor bezel:
+- **Ergonomic Fidelity**: DSMC2 BRAINs feature the RED MINI-MAG media slot vertically on the left side of the camera body.
+- **Visual Presentation**: Dark anodized aluminum enclosure with knurled grip lines, laser-engraved RED MINI-MAG branding, and dual-state cartridge LED.
+- **Baseline Firmware**: Defaults to confirmed working `SCARLET-W 5K (v7.4.1)` (`dsmc_program.mem`, 18.1 MB).
+- **Custom Firmware Staging**: Drag-and-drop dropzone accepting `.bin`, `.mem`, `.pkg`, `.zip`, `.tar` firmware mod files, saving them to `firmware_store/custom/` and updating the active firmware card in real time.
+- **Instant Baseline Reset**: One-click restore button reverting the media slot to confirmed working baseline v7.4.1.
+

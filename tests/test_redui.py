@@ -181,3 +181,56 @@ def test_dsmc2_maintenance_and_calibration(redui, camera):
     redui._handle_menu_item_selected("Save Log to Media")
     logs2 = camera.get_serial_logs()
     assert any("MAINTENANCE" in l for l in logs2)
+
+
+def test_dsmc2_settings_look_8_tiles_hierarchy(redui, camera):
+    """Verify authentic DSMC2 Menu > Settings > Look > hierarchy matching Attachment 3."""
+    redui.is_menu_open = True
+    redui.menu_path = ["Menu", "SETTINGS", "LOOK"]
+
+    # Verify 8 tiles matching user's screenshot
+    items = redui._get_current_items()
+    expected_tiles = ["Color", "Gain", "ISO/FLUT®", "Sharpness", "Curves", "Video", "Color Temp", "LGG"]
+    assert items == expected_tiles
+
+    # Test drilling into Curves
+    redui._handle_menu_item_selected("Curves")
+    assert redui.menu_path == ["Menu", "SETTINGS", "LOOK", "Curves"]
+
+    # Select Luma S-Curve
+    redui._handle_menu_item_selected("Luma S-Curve")
+    logs = camera.get_serial_logs()
+    assert any("LOOK" in l and "Curve" in l for l in logs)
+
+    # Verify rendering of Look screen with tiles
+    redui.menu_path = ["Menu", "SETTINGS", "LOOK"]
+    base = Image.new("RGB", (1024, 576), (15, 15, 15))
+    rendered = redui.render(base)
+    assert rendered.size == (1024, 576)
+
+
+def test_dsmc2_overlays_tools_ribbon_and_dropdown(redui, camera):
+    """Verify authentic Overlays > Tools ribbon toolbar and False Color mode dropdown matching Attachment 4."""
+    redui.is_menu_open = True
+    redui.menu_path = ["Menu", "OVERLAYS", "TOOLS"]
+
+    # 1. Tap False Color button [ Focus ] in ribbon (x=150, y=70)
+    redui.handle_touch(150, 70, pressed=True)
+    assert redui.is_false_color_dropdown_open is True
+
+    # 2. Tap "Exposure" option in dropdown (y: 92 + 38 = 130, x: 150)
+    redui.handle_touch(150, 140, pressed=True)
+    assert redui.active_false_color_mode == "Exposure"
+    assert redui.is_false_color_on is True
+    assert redui.is_false_color_dropdown_open is False
+
+    # 3. Tap Magnify button in ribbon (x=350, y=70)
+    assert redui.is_magnify_on is False
+    redui.handle_touch(350, 70, pressed=True)
+    assert redui.is_magnify_on is True
+
+    # 4. Tap Zebras button in ribbon (x=780, y=70)
+    assert redui.is_zebras_on is False
+    redui.handle_touch(780, 70, pressed=True)
+    assert redui.is_zebras_on is True
+

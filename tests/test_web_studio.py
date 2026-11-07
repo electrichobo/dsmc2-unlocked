@@ -172,3 +172,58 @@ def test_web_studio_responsive_layout(web_server):
     assert "aspect-ratio: 16 / 9" in html
     assert "tactile-deck" in html
     assert "workbench" in html
+    assert "minimag-slot-bay" in html
+    assert "mag-cartridge" in html
+    assert "mag-dropzone" in html
+
+
+def test_web_studio_firmware_loader_lifecycle(web_server):
+    """Verify RED MINI-MAG firmware loader slot status, custom upload staging, and baseline reset."""
+    base_url = web_server["url"]
+
+    # 1. Initial firmware status (confirmed working baseline)
+    resp = urllib.request.urlopen(base_url + "/api/firmware/status")
+    assert resp.status == 200
+    info = json.loads(resp.read().decode("utf-8"))
+    assert info["status"] == "ok"
+    assert "SCARLET-W 5K (v7.4.1)" in info["active_name"]
+    assert info["is_custom"] is False
+    assert info["slot_mounted"] is True
+
+    # 2. Upload custom firmware image
+    import base64
+    test_fw_bytes = b"RED_CUSTOM_FIRMWARE_HEADER\x00\x01\x02\x03THREADX_IMAGE_DATA"
+    b64_content = base64.b64encode(test_fw_bytes).decode("ascii")
+    upload_url = base_url + "/api/firmware/upload"
+    payload = json.dumps({"filename": "custom_mod_build101.bin", "data": b64_content}).encode("utf-8")
+    req = urllib.request.Request(upload_url, data=payload, headers={"Content-Type": "application/json"})
+    upload_resp = urllib.request.urlopen(req)
+    assert upload_resp.status == 200
+    res_data = json.loads(upload_resp.read().decode("utf-8"))
+    assert res_data["status"] == "ok"
+    assert "custom_mod_build101.bin" in res_data["active_name"]
+
+    # Verify /api/status telemetry reflects custom firmware
+    status_resp = urllib.request.urlopen(base_url + "/api/status")
+    status_json = json.loads(status_resp.read().decode("utf-8"))
+    assert status_json["firmware"]["is_custom"] is True
+    assert "custom_mod_build101.bin" in status_json["firmware"]["active_name"]
+
+    # Verify custom firmware file exists on disk
+    dest_path = os.path.join(REPO_ROOT, "firmware_store", "custom", "custom_mod_build101.bin")
+    assert os.path.exists(dest_path)
+
+    # 3. Reset to confirmed baseline
+    reset_url = base_url + "/api/firmware/reset"
+    req_reset = urllib.request.Request(reset_url, data=b"{}", headers={"Content-Type": "application/json"})
+    reset_resp = urllib.request.urlopen(req_reset)
+    assert reset_resp.status == 200
+    reset_json = json.loads(reset_resp.read().decode("utf-8"))
+    assert reset_json["status"] == "ok"
+    assert "SCARLET-W 5K (v7.4.1)" in reset_json["active_name"]
+
+    # Verify status polled afterwards shows confirmed baseline
+    status_resp2 = urllib.request.urlopen(base_url + "/api/status")
+    status_json2 = json.loads(status_resp2.read().decode("utf-8"))
+    assert status_json2["firmware"]["is_custom"] is False
+
