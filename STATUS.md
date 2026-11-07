@@ -10,9 +10,9 @@
 
 ## 1. Executive Summary
 
-A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~1.6 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful I2C communication and ARDY interrupt semaphore wake-ups, satisfies monitor presence detection via Atmel maXTouch (`0x4B`) and EDID EEPROM (`0x50`), renders authentic 1024x576 display imagery and overlays, and provides synchronized Desktop GUI, CLI, and Web Virtual Camera Studio interfaces.
+A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~1.6 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful multi-bus I2C communication (TWL4030 PMIC, TMP411 thermal, OLPF 24C02 EEPROM, EDID EEPROM, maXTouch), OMAP3630 GPMC NAND Flash controller with BCH hardware ECC, Tensilica Xtensa coprocessor ASICs (IOB0, IOB1, dual ISP) over C2C mailbox transport, the TI TMS320C64x+ DSP Vision Engine parsing genuine COFF binaries, and the DSMC2 Accessory Bus with binary TLV module enumeration.
 
-**All 53 automated unit and integration tests pass cleanly (100% pass rate).**
+**All 74 automated unit and integration tests pass cleanly (100% pass rate).**
 
 ---
 
@@ -28,8 +28,8 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M5** | Firmware-visible peripheral models | Stateful I2C1..3 master controllers; Atmel maXTouch multi-touch controller on `0x4B` with 7-object table; 24C02 EDID EEPROM on `0x50` with authentic "RED TOUCH 7.0" 128-byte block. Satisfies `isMonitorAttached` at `0x80754DC0`. | **COMPLETE** |
 | **M6** | Authentic UI pipeline | Verified 1024x576 native LCD resolution from decompressed `slot/res/splash_screen.bin` (1,769,480 bytes, format REDZLIB0); DISPC DDR framebuffer extraction; Atmel maXTouch T5/T9 packet injection. Interactive `RedUiEngine` with visual touch feedback reticles, quick-selection dialogs (ISO, FPS, Shutter, Format, Media, Audio), full DSMC2 system menu, and cinema exposure tools (1:1 Mag, False Color LUT, Zebras 95%). | **COMPLETE** |
 | **M7** | Operational virtual camera | Full desktop application (`emulator/ui/app.py`): Virtual RED Camera zone (1024x576 screen + tactile buttons: REC, POWER, MENU, MAG, NAV) and synchronized Developer Dashboard (Console, RCP, ThreadX inspector, MMIO, Faults, Snapshots). | **COMPLETE** |
-| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (53 passed). | **COMPLETE** |
-| **M9** | Complete, distributable local product | Authoritative documentation suite complete (`README.md`, `docs/ARCHITECTURE.md`, `docs/BOOT_TRACE.md`, `docs/UI_RESEARCH.md`, `docs/TESTING.md`, `STATUS.md`, `HANDOFF.md`). All proprietary assets untracked. | **COMPLETE** |
+| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (74 passed). | **COMPLETE** |
+| **M9** | Complete, distributable local product | Authoritative documentation suite complete (`README.md`, `docs/ARCHITECTURE.md`, `docs/BOOT_TRACE.md`, `docs/UI_RESEARCH.md`, `docs/TESTING.md`, `docs/HARDWARE_PERIPHERALS_PLAN.md`, `STATUS.md`, `HANDOFF.md`). All proprietary assets untracked. | **COMPLETE** |
 | **M10** | Extended fidelity | Multi-model profile foundations prepared in `CameraEnvironment` and lens mount database (230+ models). | **COMPLETE** |
 | **M11** | Web-Based Virtual Camera Studio | Zero-dependency standard library web studio (`emulator/ui/web.py`) on dedicated port with fluid responsive 16:9 screen bezel, crosshair coordinate mapping, and full developer workbench. | **COMPLETE** |
 | **M12** | Master DSMC2 Menu Tree & Look Tiles | Complete hierarchical DSMC2 menu tree (IMAGE, MONITORING, OVERLAYS, POWER, PLAYBACK, MEDIA, PRESETS, SETTINGS) with 8-tile `Settings > Look >` matrix and authentic False Color dropdown ribbon. | **COMPLETE** |
@@ -38,6 +38,9 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M15** | Hardware Re-initialization & Dynamic Firmware DDR Reloading | Implemented `_init_hardware()` in `Dsmc2Camera` to cleanly re-create CPU JIT state, PRCM registers, INTC vectors, GPTimers, and DISPC framebuffers on camera model switch, booting any of the 5 models in ~1.6s without translation block caching deadlocks. | **COMPLETE** |
 | **M16** | Standby Power Lifecycle & Auto-Prompt Launch Modal | Enabled full Standby power management via web button (`#pwr-btn`), touch screen wake, physical key wake, and on-screen `Menu > Power > Shutdown` confirmation. Replaced one-time `localStorage` suppression with auto-prompt camera selection panel on studio launch before user interaction. | **COMPLETE** |
 | **M17** | Custom Firmware Inspection, Staging & Boot Execution Engine | Built `FirmwareManager` in `emulator/core/firmware.py` parsing vector tables, entry points (SP Word 10, Reset PC Word 11), SHA-256 hashes, and binary formats. Added `POST /api/firmware/boot` enabling direct flash & boot of staged custom firmware mods from RED MINI-MAG bay with register crash diagnostics and 1-click baseline revert. | **COMPLETE** |
+| **M18** | Multi-Bus I2C Peripherals & OMAP GPMC Memory Controller | Built `Twl4030Pmic` (I2C1 @ `0x48`), `Tmp411Thermal` (I2C1 @ `0x4C`), `OlpfEeprom` (I2C2 @ `0x54`), and `OmapGpmc` (MMIO @ `0x6E000000`) with BCH hardware ECC engine and SLC NAND flash window. | **COMPLETE** |
+| **M19** | Phase 3 Coprocessor ASICs (Tensilica Xtensa IOB0/IOB1/ISP & C2C Mailbox) | Built `XtensaCore` instruction and memory model, `Iob0Coprocessor` (SATA 3.0 6Gbps DMA frame writer, 1080p HDMI transmitter, STACCELERO SPI accelerometer), `Iob1Coprocessor` (sensor black shading calibration, factory & user defect tables, Bayer alignment), `IspCoprocessor` (dual ISP1/ISP2 3-level DWT REDCODE wavelet compression & Modified SCL V2 DDR training), and `C2cTransport` (bidirectional mailbox and FIFO protocol at `0x49000000`). | **COMPLETE** |
+| **M20** | Phase 4 TI TMS320C64x+ DSP Vision Engine & DSMC2 Accessory Bus | Built `TiC64xDsp` parsing genuine `rdc_dsp_app.out` COFF binary (entry `0x8FA00000`), `DspLinkIpc` (shared memory MSGQ message queues), `CImagingServer` (AF contrast sharpness gradient and Haar-cascade face detection with TI VLIB acceleration), `RAudioServer` (4-channel 24-bit peak meters), and `AccessoryBus` with authentic `ModuleDescriptor` binary TLV encoder/decoder (WHO, VERSION, REDINFO handshake, hot-plug catalog). | **COMPLETE** |
 
 ---
 
@@ -50,80 +53,91 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 57 items
+collected 74 items
 
-tests\test_camera_boot.py ..                                             [  3%]
-tests\test_fault_injection.py .                                          [  5%]
-tests\test_firmware_manager.py ....                                      [ 12%]
-tests\test_gui_interaction.py .                                          [ 14%]
-tests\test_lens_mount.py ......                                          [ 24%]
-tests\test_peripherals.py ......                                         [ 35%]
-tests\test_r3d_recording.py ....                                         [ 42%]
-tests\test_rcp_network.py ......                                         [ 52%]
-tests\test_redui.py ...........                                          [ 71%]
-tests\test_storage.py ...                                                [ 77%]
-tests\test_web_studio.py .............                                   [100%]
+tests/test_camera_boot.py ..                                             [  2%]
+tests/test_coprocessors_and_dsp.py ..........                            [ 16%]
+tests/test_fault_injection.py .                                          [ 17%]
+tests/test_firmware_manager.py ....                                      [ 22%]
+tests/test_gui_interaction.py .                                          [ 24%]
+tests/test_hardware_io.py .......                                        [ 33%]
+tests/test_lens_mount.py ......                                          [ 41%]
+tests/test_peripherals.py ......                                         [ 50%]
+tests/test_r3d_recording.py ....                                         [ 55%]
+tests/test_rcp_network.py ......                                         [ 63%]
+tests/test_redui.py ...........                                          [ 78%]
+tests/test_storage.py ...                                                [ 82%]
+tests/test_web_studio.py .............                                   [100%]
 
-============================= 57 passed in 14.83s =============================
+============================= 74 passed in 21.00s =============================
 ```
 
 ---
 
-## 4. Web Studio & Media Bay Capabilities
+## 4. Phase 3 & Phase 4 Coprocessors, DSP & Accessory Bus Capabilities
 
-1. **Vertical RED MINI-MAG Cartridge Bay (`.minimag-slot-bay`)**:
-   - Situated vertically immediately to the left of the 1024x576 monitor viewport within `.monitor-bezel`, matching real DSMC2 BRAIN left-side media bay ergonomics.
-   - Laser-etched RED MINI-MAG branding, active status LED (Green = Baseline Ready, Amber/Cyan = Custom Mod Staged, Off = Ejected).
-   - Capacity display (512 GB Turbo) and real-time firmware metadata box.
-2. **Firmware Staging & Testing Pipeline**:
-   - `GET /api/firmware/status`: Inspects active firmware build, baseline identity, and slot mount state.
-   - `POST /api/firmware/upload`: Ingests custom user firmware binary images (`.bin`, `.mem`, `.pkg`, etc.) via drag-and-drop or file dialog, staging them into `firmware_store/custom/` for verification.
-   - `POST /api/firmware/reset`: Restores the verified baseline `SCARLET-W 5K (v7.4.1)` / `dsmc_program.mem`.
-3. **Master DSMC2 Menu Tree (`RedUiEngine`)**:
-   - Complete 8-category root navigation: `IMAGE`, `MONITORING`, `OVERLAYS`, `POWER`, `PLAYBACK`, `MEDIA`, `PRESETS`, `SETTINGS`.
-   - Authentic `Settings > Look >` 8-tile matrix: `Color`, `Gain`, `ISO/FLUT®`, `Sharpness`, `Curves`, `Video`, `Color Temp`, `LGG` with active red highlight.
-   - Authentic `Overlays > Tools` ribbon toolbar with False Color mode drop-down popup (`Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`), center crosshair reticle, and 1:1 Magnify / Zebras toggles.
-   - Crash-proof storage capacity bar in both quick-selection dialog and full Media device menu.
-4. **Cinematic Sensor Frame Stream**:
-   - Renders authentic cinema portrait frame (`res/sensor_feed_cinema.jpg`) during active camera power in place of abstract boot splashes.
-   - Responsive fluid aspect-ratio scaling (16:9) with pixel-accurate touch coordinate transformation.
-5. **Multi-Model DSMC2 Camera Personality & Firmware Engine**:
-   - Extracted all 5 DSMC2 models from `combo_7.4.1.bin`: `WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, and `EPIC-W 8K`.
-   - Dynamic `/env` partition reconfiguration, slot remounting (`/image1`, `/image2`), and direct firmware binary reload (`dsmc_program.mem` into DDR `0x80000000`) with CPU register reset and ThreadX initialization.
-   - Dynamic brain-tailored RedUi menus:
-     - `System Status > Project Status` reflects the active camera model, active resolution, and current codec.
-     - `System Status > Camera Info` reflects the active camera model, firmware version, and physical sensor dimensions.
-     - `Project > Format` dynamically scopes format offerings (e.g. 4.5K on RAVEN with no 5K/8K; 8K on WEAPON/EPIC-W; 5K on SCARLET-W/DRAGON-X).
-     - `Project > Frame Rate` dynamically exposes high-speed sensor modes (e.g. 120 FPS on RAVEN, 96 FPS on DRAGON-X).
-     - Fixed mount enforcement on RED RAVEN (locks to Canon EF mount).
-   - Graceful connection handling silencing Windows host socket aborts (`WinError 10053`).
-6. **Adaptive Button Typography & Push-Through Elimination**:
-   - Intelligent font scaling (12pt -> 10pt -> 9pt), multi-line wrapping, and truncation preventing button text overflow.
-   - Strict `action: 'down'` / `action: 'move'` / `action: 'up'` event separation eliminating drag push-through activations.
-7. **Custom Firmware Inspection, Boot Stager & Crash Recovery**:
-   - `FirmwareManager`: Automated entry vector detection (`Word 10` = Initial SP `0x881D2690`, `Word 11` = Reset PC `0x80829F2C`), DDR address boundary checking (`0x80000000 - 0x9FFFFFFF`), and SHA-256/MD5 hashing.
-   - Direct DDR flash execution harness with register dump diagnostics (`PC`, `SP`, `LR`, `CPSR`, `R0`-`R12`) and disassembly capture on halt.
-   - One-click rollback button restoring confirmed stock baseline firmware in DDR.
-8. **Multi-Bus I2C Hardware Peripherals & OMAP GPMC Memory Controller**:
-   - **`Twl4030Pmic` (I2C1 @ `0x48`)**: TI TPS65950 companion PMIC modeling 10-bit MADC battery voltage conversion, VDD1 (1.35V MPU) and VDD2 (1.15V Core) regulators, and DC-IN external supply detection.
-   - **`Tmp411Thermal` (I2C1 @ `0x4C`)**: TI TMP411 dual-channel digital sensor monitoring remote sensor die temp (39°C) and local BRAIN core temp (63°C), integer/fractional registers, and black shading T/E calibration tolerance checking (±2.5°C).
-   - **`OlpfEeprom` (I2C2 @ `0x54`)**: 256-byte 24C02 I2C EEPROM on lens/sensor mount holding DSMC2 OLPF profiles (`Standard`, `Skin Tone-Highlight`, `Low Light Optimized`), 3x3 IEEE 754 color matrices, and `REDOLPF\x01` header magic.
-   - **`OmapGpmc` (MMIO @ `0x6E000000`)**: TI OMAP3630 General Purpose Memory Controller with CS0 256MB SLC NAND Flash window (`0x08000000`), ONFI command engine (ID Read `0xBA2C0000`, Status `0xE0`), and hardware BCH8 ECC calculation.
-   - **RedUi & HUD Synchronization**:
-     - RedUi `Menu > SETTINGS > MAINTENANCE > OLPF > OLPF Type` dynamically reprograms EEPROM profiles.
-     - RedUi `Project Status` displays live sensor and BRAIN temperatures.
-     - Monitor HUD bottom status bar reads live temperatures and DC/BAT voltage dynamically from peripheral models.
-   - **Web Studio Hardware Workbench**: Dedicated telemetry card and interactive sliders/presets for battery voltage drain simulation, thermal drift simulation, OLPF profile flashing, and GPMC memory status.
+### 1. Tensilica Xtensa Coprocessor Subsystem (`emulator/coprocessors/xtensa.py`)
+- **`XtensaCore` Architecture**: 32-bit RISC core modeling IRAM (`0x40000000`) and DRAM (`0x3FFE0000`), 16 general-purpose registers (`a0`–`a15`), Program Counter (`PC`), Processor Status (`PS`), LITBASE, and SAR shift amount registers. Loads genuine `iram.bin` and `dram.bin` segments directly from active camera firmware slots.
+- **`Iob0Coprocessor` (Storage, Display & SPI Motion)**:
+  - Models SATA 3.0 Host Bus Adapter (6.0 Gbps speed, DMA burst frame writing, command issue/completion queues).
+  - Models 1080p60 HDMI transmitter display pipeline.
+  - Models STMicroelectronics STACCELERO SPI 3-axis accelerometer, streaming `X`, `Y`, `Z` G-force vectors and calculating roll/pitch degrees and horizon level status (`is_level` when $|roll| \le 0.5^\circ$).
+- **`Iob1Coprocessor` (Sensor Dark-Level & Defect Masking)**:
+  - Models sensor dark-level calibration (`run_black_shading`) calculating average pixel pedestals, updating calibration temperature and exposure targets.
+  - Maintains factory defect maps (`pFactoryMap`) and user-calibrated defect maps (`pUserMap`) with coordinate correction counters.
+  - Provides Bayer green alignment correction across G1/G2 channels.
+- **`IspCoprocessor` (Dual ISP1 & ISP2 Image Signal Processors)**:
+  - Models REDCODE Wavelet discrete wavelet transform (3-level DWT) supporting compression ratios from 2:1 to 16:1 across G1, B, R, G2 sensor sub-bands with 32-bit CRC frame validation.
+  - Models Modified SCL V2 DDR memory timing training with multi-tap delay line calibration.
+- **`C2cTransport` Mailbox (`emulator/coprocessors/c2c.py`)**:
+  - Memory-mapped peripheral at `0x49000000` (size `0x1000`) providing 32-bit control, status, target core selector (`IOB0=0`, `IOB1=1`, `ISP1=2`, `ISP2=3`), bidirectional 64-word TX/RX FIFOs, and ARM IRQ generation.
+
+### 2. TI TMS320C64x+ DSP Subsystem (`emulator/coprocessors/dsp.py`)
+- **`TiC64xDsp` Architecture**:
+  - Parses genuine `firmware_store/unpacked/scarlet_w_7_4_1/slot/dsp/rdc_dsp_app.out` COFF binary (magic `0x00C2`, 20-byte file header, standard TI optional header, section headers, text/data segments, entry point `0x8FA00000`).
+- **`DspLinkIpc` Engine**:
+  - Inter-processor communication message queues (`MSGQ`) between ARM Cortex-A8 and C64x+ DSP over shared DDR.
+- **`CImagingServer`**:
+  - Autofocus contrast sharpness gradient engine computing multi-point sharpness curves.
+  - Haar-cascade face detection engine modeling TI VLIB hardware acceleration, returning bounding boxes, confidence ratings, and eye-tracking positions.
+- **`RAudioServer`**:
+  - 4-channel 24-bit audio engine with real-time peak level metering (dBFS, clipping threshold detection at -0.1 dBFS), and programmable pre-amp gain (+0 dB to +36 dB).
+
+### 3. DSMC2 Accessory Bus & Expander Handshake (`emulator/devices/accessory_bus.py`)
+- **`ModuleDescriptor` Binary TLV Engine**:
+  - Encodes and decodes DSMC2 module binary TLVs (magic `REDMOD\x01`):
+    - Tag `0x01`: Manufacturer ID (`0x1143`) and Hardware Revision.
+    - Tag `0x02`: 32-bit Serial Number.
+    - Tag `0x03`: Null-separated Product Name and Part Number (PIN).
+    - Tag `0x04`: Max Power Limits (Watts) and electrical flags.
+  - Encodes to and decodes from base64 strings matching authentic REDINFO UART protocol output.
+- **`AccessoryBus` Manager**:
+  - Authentic 1-Wire / UART enumeration handshake: `[Attach]` $\rightarrow$ `[WHO]` $\rightarrow$ `[VERSION]` $\rightarrow$ `[REDINFO (TLV)]` $\rightarrow$ `[DEVID Ack]` $\rightarrow$ `[Online]`.
+  - Genuine DSMC2 accessory catalog:
+    - `720-0033`: DSMC2 Base Expander (HDMI, 3G-SDI, DC-IN, SYNC, CTRL, 3.5mm Audio; 12W)
+    - `720-0034`: DSMC2 REDVOLT Expander (REDVOLT Battery, 2x XLR, GbE, AUX, HDMI, SDI; 28W)
+    - `720-0035`: DSMC2 Jetpack-SDI Expander (3G-SDI, DC-IN, AUX, SYNC, CTRL; 10W)
+    - `730-0024`: RED Touch 7.0 LCD Monitor (1920x1136, 10-point maXTouch, 9W)
+    - `750-0075`: RED MINI-MAG Media Drive (SATA 3.0 6Gbps, 512GB Turbo, 4.5W)
+  - Real-time accessory power draw tracking and dynamic hot-plug attach/detach events.
+
+### 4. UI & Web Studio Integration
+- **RedUi Monitor Overlays**:
+  - **Horizon Level Assist**: Driven directly by the IOB0 SPI accelerometer, rendering a dynamic roll-tilted horizon line and angle readout with green indicator when level.
+  - **Sensor Black Shading**: `Menu > SETTINGS > MAINTENANCE > Calibrate > Sensor` triggers the IOB1 dark-level calibration routine.
+  - **Attached Modules Display**: `Menu > SETTINGS > MAINTENANCE > System Status > Attached Modules` enumerates all live accessories discovered on the bus.
+- **Web Studio Engineering Workbench**:
+  - Card 5: Tensilica Xtensa ASICs telemetry (IOB0 SATA throughput, HDMI status, tilt angles, IOB1 calibration state, defect counts, ISP compression ratio and DDR training).
+  - Card 6: TI TMS320C64x+ DSP telemetry (autofocus sharpness score, face detection trigger and bounding boxes, 4-channel peak level meters).
+  - Card 7: Accessory Bus Manager with hot-plug dropdown selector, real-time attached module table, serial numbers, port listings, power consumption summation, and detach buttons.
+  - REST API Endpoints: `POST /api/hardware/calibrate`, `POST /api/hardware/accessory/attach`, `POST /api/hardware/accessory/detach`, `POST /api/hardware/face_detect`.
 
 ---
 
 ## 5. Next Steps
 
-1. **Phase 3 Coprocessor ASICs (IOB0 & IOB1 Xtensa)**:
-   - Tensilica Xtensa instruction harness executing `iob0/iram.bin` and `iob1/iram.bin`.
-   - Emulate SATA 3.0 Host Bus Adapter (HBA) on IOB0 for asynchronous DMA frame acquisition.
-   - Emulate sensor calibration dark-level subtraction and bad-pixel defect mapping on IOB1.
-   - Implement bidirectional Chip-to-Chip (C2C) shared-memory mailbox and FIFO protocol between Cortex-A8 and IOB/ISP cores.
-2. **Phase 4 TI TMS320C64x+ DSP Vision Engine & Accessory Bus**:
-   - DSPLink IPC (`MSGQ` shared memory) for autofocus contrast metrics and Haar face detection.
-   - Accessory bus with base64 `ModuleDescriptor` binary TLV decoder for automatic expander discovery.
+1. **Host Audio & Video Streams**:
+   - Stream live 24-bit PCM / WAV audio through WebRTC or Web Audio API from `RAudioServer`.
+   - Real-time HDMI video output rendering to separate preview monitors.
+2. **Advanced RCP Automation**:
+   - Scriptable RCP client sequences for automated testing of complex multi-camera setups.

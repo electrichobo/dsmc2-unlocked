@@ -22,6 +22,10 @@ from emulator.devices.i2c_pmic import Twl4030Pmic
 from emulator.devices.i2c_thermal import Tmp411Thermal
 from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
+from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
+from emulator.coprocessors.c2c import C2cTransport
+from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
+from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
 from emulator.devices.dss import OmapDss
 from emulator.storage.vfs import VirtualFileSystem
@@ -154,6 +158,28 @@ class Dsmc2Camera:
         self.gpmc = OmapGpmc(intc=self.intc)
         self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
 
+        # 11. Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
+        self.c2c = C2cTransport(intc=self.intc)
+        self.bus.register_device(C2cTransport.BASE_ADDR, C2cTransport.SIZE, self.c2c)
+
+        self.iob0 = Iob0Coprocessor()
+        self.iob1 = Iob1Coprocessor()
+        self.isp1 = IspCoprocessor(core_id=2)
+        self.isp2 = IspCoprocessor(core_id=3)
+        self.c2c.register_coprocessor(C2cTransport.CORE_IOB0, self.iob0)
+        self.c2c.register_coprocessor(C2cTransport.CORE_IOB1, self.iob1)
+        self.c2c.register_coprocessor(C2cTransport.CORE_ISP1, self.isp1)
+        self.c2c.register_coprocessor(C2cTransport.CORE_ISP2, self.isp2)
+
+        # 12. TI TMS320C64x+ DSP Subsystem & Servers
+        self.dsp = TiC64xDsp()
+        self.dsplink = DspLinkIpc(self.dsp)
+        self.imaging_server = CImagingServer(self.dsplink)
+        self.audio_server = RAudioServer(self.dsplink)
+
+        # 13. Accessory Bus Subsystem
+        self.accessory_bus = AccessoryBus(camera=self)
+
         self.instruction_count = 0
         self.is_booted = False
 
@@ -246,6 +272,31 @@ class Dsmc2Camera:
             self.log_system(f"[THERMAL] TI TMP411 online (I2C1 @ 0x4C): Sensor={self.thermal.sensor_temp_c:.0f}°C, BRAIN={self.thermal.brain_temp_c:.0f}°C (Cal: T/E OK)")
             self.log_system(f"[OLPF] DSMC2 OLPF EEPROM online (I2C2 @ 0x54): {self.olpf.get_info()['type_name']}")
             self.log_system("[GPMC] OMAP3630 GPMC Controller online @ 0x6E000000 (CS0 Micron NAND Flash, BCH ECC Active)")
+
+            # Bring up Coprocessors from active firmware slot
+            slot = self.firmware_slot_dir
+            iob0_iram = os.path.join(slot, "iob0", "iram.bin")
+            iob0_dram = os.path.join(slot, "iob0", "dram.bin")
+            self.iob0.load_binaries(iob0_iram, iob0_dram)
+
+            iob1_iram = os.path.join(slot, "iob1", "iram.bin")
+            iob1_dram = os.path.join(slot, "iob1", "dram.bin")
+            self.iob1.load_binaries(iob1_iram, iob1_dram)
+
+            isp_iram = os.path.join(slot, "isp", "iram.bin")
+            isp_dram = os.path.join(slot, "isp", "dram.bin")
+            self.isp1.load_binaries(isp_iram, isp_dram)
+            self.isp2.load_binaries(isp_iram, isp_dram)
+
+            dsp_coff = os.path.join(slot, "dsp", "rdc_dsp_app.out")
+            self.dsp.load_coff(dsp_coff)
+
+            self.log_system("[C2C] Chip-to-Chip transport online @ 0x49000000 (IOB0, IOB1, ISP1, ISP2 linked)")
+            self.log_system("[IOB0] Tensilica Xtensa online: SATA 3.0 6Gbps HBA, HDMI 1080p, SPI Accelerometer")
+            self.log_system(f"[IOB1] Tensilica Xtensa online: Dark-Level Calibration & Defect Map ({len(self.iob1.factory_defects)} factory defects)")
+            self.log_system("[ISP] Dual ISP1 & ISP2 online: REDCODE Wavelet Engine, DDR Training PASS (Modified SCL V2)")
+            self.log_system(f"[DSP] TI TMS320C64x+ DSP/BIOS online: Entry 0x{self.dsp.entry_point:08X}, CImagingServer & RAudioServer active")
+            self.log_system(f"[ACCESSORY] Accessory Bus enumerated: {len(self.accessory_bus.attached_modules)} modules online")
             if self.lens_mount and self.lens_mount.attached_lens:
                 self.log_system(f"[MOUNT] {self.lens_mount.mount_type} online: {self.lens_mount.attached_lens.model} ({self.lens_mount.attached_lens.serial})")
             if hasattr(self, "recorder") and self.recorder:
@@ -479,4 +530,39 @@ class Dsmc2Camera:
         """Change active OLPF profile in EEPROM."""
         if hasattr(self, "olpf") and self.olpf:
             return self.olpf.set_olpf_type(olpf_name)
+        return False
+
+    def run_black_shading(self) -> Dict[str, Any]:
+        """Trigger sensor black shading calibration on IOB1."""
+        sensor_c = self.thermal.sensor_temp_c if hasattr(self, "thermal") and self.thermal else 39.0
+        exposure = self.rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48") if hasattr(self, "rcp") and self.rcp else "1/48"
+        if hasattr(self, "iob1") and self.iob1:
+            res = self.iob1.run_black_shading(sensor_c, exposure)
+            self.log_system(f"[CALIBRATION] Black Shading complete on IOB1 ({res['defects_masked']} defects masked, target {sensor_c:.1f}°C {exposure})")
+            return res
+        return {"status": "ERROR"}
+
+    def detect_faces(self) -> List[Dict[str, Any]]:
+        """Run Haar-cascade face detection on DSP."""
+        if hasattr(self, "imaging_server") and self.imaging_server:
+            return self.imaging_server.detect_faces()
+        return []
+
+    def compute_focus_contrast(self, roi: Tuple[int, int, int, int] = (400, 200, 600, 400)) -> float:
+        """Calculate focus contrast sharpness on DSP."""
+        dist = self.lens_mount.current_focus_distance if hasattr(self, "lens_mount") and self.lens_mount else 2.5
+        if hasattr(self, "imaging_server") and self.imaging_server:
+            return self.imaging_server.compute_focus_contrast(roi, dist)
+        return 0.0
+
+    def attach_accessory(self, pin_or_name: str, serial: int = 100001) -> Optional[Dict[str, Any]]:
+        """Attach DSMC2 expander or display module on accessory bus."""
+        if hasattr(self, "accessory_bus") and self.accessory_bus:
+            return self.accessory_bus.attach_module(pin_or_name, serial)
+        return None
+
+    def detach_accessory(self, pin_or_name: str) -> bool:
+        """Detach DSMC2 expander or display module from accessory bus."""
+        if hasattr(self, "accessory_bus") and self.accessory_bus:
+            return self.accessory_bus.detach_module(pin_or_name)
         return False

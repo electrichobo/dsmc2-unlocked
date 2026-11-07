@@ -6,6 +6,7 @@ full system menu, exposure tools (False Color, Zebras, 1:1 Mag), and touch feedb
 
 import os
 import time
+import math
 from typing import Optional, Tuple, Dict, Any, List
 from PIL import Image, ImageDraw, ImageFont
 from emulator.rcp.protocol import RcpProtocol
@@ -709,6 +710,12 @@ class RedUiEngine:
                 f"Sensor: {sensor} ({sw}x{sh})"
             ]
 
+        if last_seg == "Attached Modules":
+            if hasattr(self.camera, "accessory_bus") and self.camera.accessory_bus:
+                mods = self.camera.accessory_bus.get_status()["modules"]
+                return [f"{m['name']} ({m['pin']}, {m['serial']})" for m in mods]
+            return ["RED Touch 7.0 LCD (Port LCD1)", "DSMC2 Base Expander", "RED MINI-MAG 512GB (Port SATA0)"]
+
         if last_seg in ("Format", "Recording Format") and len(self.menu_path) >= 3 and self.menu_path[1] == "SETTINGS":
             return list(getattr(self, "format_options", self.FORMAT_OPTIONS))
 
@@ -1068,8 +1075,19 @@ class RedUiEngine:
         elif "Wipe Camera" in item:
             self.camera.log_system("[MAINTENANCE] Camera user config wiped. Clean DSMC2 baseline restored.")
 
+        elif "Black Shading" in item or (last_cat == "Sensor" and "Black" in item):
+            if hasattr(self.camera, "run_black_shading"):
+                self.camera.run_black_shading()
+            else:
+                self.camera.log_system("[CALIBRATION] Black Shading Sensor (T/E) complete.")
+
         elif "Rediscover" in item:
-            self.camera.log_system("[HARDWARE] Rediscovered expansion modules: RED Touch 7.0, Base Expander, SATA0 MINI-MAG.")
+            if hasattr(self.camera, "accessory_bus") and self.camera.accessory_bus:
+                self.camera.accessory_bus._init_default_accessories()
+                count = len(self.camera.accessory_bus.attached_modules)
+                self.camera.log_system(f"[HARDWARE] Rediscovered {count} expansion modules on accessory bus.")
+            else:
+                self.camera.log_system("[HARDWARE] Rediscovered expansion modules: RED Touch 7.0, Base Expander, SATA0 MINI-MAG.")
 
         elif "OLPF" in item or last_cat == "OLPF" or "OLPF" in last_cat:
             if hasattr(self.camera, "olpf") and self.camera.olpf:
@@ -1723,6 +1741,20 @@ class RedUiEngine:
         draw.line([(cx + 4, cy), (cx + 18, cy)], fill=(190, 190, 190), width=1)
         draw.line([(cx, cy - 18), (cx, cy - 4)], fill=(190, 190, 190), width=1)
         draw.line([(cx, cy + 4), (cx, cy + 18)], fill=(190, 190, 190), width=1)
+
+        # Horizon Level line driven by IOB0 SPI Accelerometer
+        if horiz_active:
+            iob0 = getattr(self.camera, "iob0", None)
+            pitch, roll, is_level = iob0.get_tilt_angles() if iob0 else (0.1, 0.2, True)
+            col = (0, 230, 90) if is_level else (255, 200, 30)
+            rad = math.radians(roll)
+            dx = int(math.cos(rad) * 120)
+            dy = int(math.sin(rad) * 120)
+            draw.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill=col, width=2)
+            draw.line([(cx - 30, cy - 8), (cx - 30, cy + 8)], fill=col, width=2)
+            draw.line([(cx + 30, cy - 8), (cx + 30, cy + 8)], fill=col, width=2)
+            tag = "LEVEL" if is_level else f"{roll:+.1f}°"
+            draw.text((cx - 20, cy - 24), tag, fill=col, font=FONT_SM)
 
         # False Color Mode Dropdown Menu (matching Attachment 4)
         if self.is_false_color_dropdown_open:

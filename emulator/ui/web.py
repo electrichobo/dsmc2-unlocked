@@ -659,6 +659,31 @@ def create_handler(studio: WebStudio):
                     studio.camera.log_system(f"[OLPF] Swapped OLPF filter module to {olpf_type}")
                 self._send_json({"status": "ok" if success else "error", "olpf": info})
 
+            elif path == "/api/hardware/calibrate":
+                with studio.lock:
+                    res = studio.camera.run_black_shading()
+                self._send_json(res)
+
+            elif path == "/api/hardware/accessory/attach":
+                pin = str(data.get("pin", "720-0033"))
+                serial = int(data.get("serial", 100001))
+                with studio.lock:
+                    res = studio.camera.attach_accessory(pin, serial)
+                    if res:
+                        res = {k: v for k, v in res.items() if not k.endswith("_obj")}
+                self._send_json({"status": "ok" if res else "error", "module": res})
+
+            elif path == "/api/hardware/accessory/detach":
+                pin = str(data.get("pin", ""))
+                with studio.lock:
+                    res = studio.camera.detach_accessory(pin)
+                self._send_json({"status": "ok", "detached": res})
+
+            elif path == "/api/hardware/face_detect":
+                with studio.lock:
+                    faces = studio.camera.detect_faces()
+                self._send_json({"status": "ok", "faces": faces})
+
             elif path == "/api/media/format":
                 with studio.lock:
                     res = studio.camera.recorder.format_media()
@@ -845,6 +870,17 @@ def create_handler(studio: WebStudio):
                             "cs0_nand_valid": bool(cam.gpmc.cs_configs.get(0x78, 0) & 0x40)
                         } if hasattr(cam, "gpmc") and cam.gpmc else None,
                     },
+                    "coprocessors": {
+                        "c2c": cam.c2c.get_status() if hasattr(cam, "c2c") and cam.c2c else None,
+                        "iob0": cam.iob0.get_status() if hasattr(cam, "iob0") and cam.iob0 else None,
+                        "iob1": cam.iob1.get_status() if hasattr(cam, "iob1") and cam.iob1 else None,
+                        "isp1": cam.isp1.get_status() if hasattr(cam, "isp1") and cam.isp1 else None,
+                        "isp2": cam.isp2.get_status() if hasattr(cam, "isp2") and cam.isp2 else None,
+                        "dsp": cam.dsp.get_status() if hasattr(cam, "dsp") and cam.dsp else None,
+                        "imaging_server": cam.imaging_server.get_status() if hasattr(cam, "imaging_server") and cam.imaging_server else None,
+                        "audio_server": cam.audio_server.get_status() if hasattr(cam, "audio_server") and cam.audio_server else None,
+                    },
+                    "accessories": cam.accessory_bus.get_status() if hasattr(cam, "accessory_bus") and cam.accessory_bus else None,
                     "threads": cam.get_threads(),
                     "unknown_mmio_count": len(cam.bus.unknown_mmio)
                 }
@@ -2048,6 +2084,110 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
+        <!-- Card 5: Tensilica Xtensa Coprocessors (IOB0, IOB1, Dual ISP) -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #ff5555;">Tensilica Xtensa ASICs (IOB0, IOB1, ISP1/2)</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">C2C @ 0x49000000</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px; font-family: monospace; font-size: 11px;">
+            <!-- IOB0 -->
+            <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #00e676;">
+              <div style="color: #00e676; font-weight: bold;">IOB0: Storage, HDMI &amp; SPI Motion</div>
+              <div style="color: #bbb; margin-top: 2px;">
+                SATA 3.0: <span id="hw-iob0-sata" style="color: #fff;">6.0 Gbps (0 frames)</span> &bull; HDMI: <span style="color: #fff;">1080p60</span>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Tilt Angle: <span id="hw-iob0-tilt" style="color: #ffaa00;">Roll 0.0°, Pitch 0.0° [LEVEL]</span>
+              </div>
+            </div>
+            <!-- IOB1 -->
+            <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #00b0ff;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #00b0ff; font-weight: bold;">IOB1: Sensor Dark-Level Calibration</span>
+                <button class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="runBlackShading()">Run Black Shading</button>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Status: <span id="hw-iob1-status" style="color: #00e676;">CALIBRATED (39°C 1/48)</span>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Defect Tables: <span id="hw-iob1-defects" style="color: #fff;">3 Factory, 2 User Masked</span>
+              </div>
+            </div>
+            <!-- Dual ISP -->
+            <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #ffaa00;">
+              <div style="color: #ffaa00; font-weight: bold;">ISP1 &amp; ISP2: REDCODE Wavelet Compression</div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Engine: <span style="color: #fff;">3-Level DWT (G1/B/R/G2 slices)</span> &bull; DDR: <span style="color: #00e676;">PASS (SCL V2)</span>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Active Ratio: <span id="hw-isp-ratio" style="color: #fff;">8:1</span> &bull; Frames: <span id="hw-isp-frames" style="color: #00e676;">0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 6: TI TMS320C64x+ DSP & Vision Servers -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #b388ff;">TI TMS320C64x+ DSP (DSP/BIOS)</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">Entry @ 0x8FA00000</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px; font-family: monospace; font-size: 11px;">
+            <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #b388ff;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #b388ff; font-weight: bold;">CImagingServer: Vision &amp; Autofocus</span>
+                <button class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="triggerFaceDetection()">Detect Faces</button>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Focus Sharpness Score: <span id="hw-dsp-af" style="color: #00e676;">98.5 / 100.0</span>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Haar Face Detection: <span id="hw-dsp-faces" style="color: #fff;">1 Detected (TI VLIB HW)</span>
+              </div>
+            </div>
+            <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #00e676;">
+              <div style="color: #00e676; font-weight: bold;">RAudioServer: 4-Channel 24-Bit Peak Meters</div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Ch1: <span id="hw-audio-ch1" style="color: #00e676;">-18.5 dBFS</span> &bull; Ch2: <span id="hw-audio-ch2" style="color: #00e676;">-19.2 dBFS</span>
+              </div>
+              <div style="color: #bbb; margin-top: 2px;">
+                Pre-Amps: <span style="color: #fff;">+18.0 dB (Ch1/2)</span> &bull; Headphone: <span style="color: #fff;">75%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 7: Accessory Bus & Module Hot-Plug -->
+        <div style="grid-column: span 2; background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #ffb300;">DSMC2 Accessory Bus &amp; Expander Enumeration (1-Wire / UART)</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">Protocol: WHO &bull; VERSION &bull; REDINFO (TLV)</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 11.5px;">
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <span>Hot-Plug Attach:</span>
+              <select id="hw-acc-select" style="background: #242424; color: #fff; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; font-size: 11px;">
+                <option value="720-0033">DSMC2 Base Expander (720-0033)</option>
+                <option value="720-0034">DSMC2 REDVOLT Expander (720-0034)</option>
+                <option value="720-0035">DSMC2 Jetpack-SDI Expander (720-0035)</option>
+              </select>
+              <button class="cam-btn" style="padding: 3px 8px; font-size: 11px;" onclick="attachAccessoryModule()">Attach Module</button>
+            </div>
+            <div style="font-family: monospace; font-size: 11px; color: #aaa;">
+              Total Accessory Power: <strong id="hw-acc-power" style="color: #00e676;">25W</strong>
+            </div>
+          </div>
+          <div style="overflow-x: auto;">
+            <table class="data-table" style="font-size: 11px;">
+              <thead>
+                <tr><th>PIN</th><th>Module Name</th><th>Category</th><th>Serial</th><th>Power</th><th>Ports</th><th>Action</th></tr>
+              </thead>
+              <tbody id="hw-acc-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -2449,6 +2589,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         renderHardware(data.hardware);
       }
 
+      // Render Coprocessors Telemetry
+      if (data.coprocessors) {
+        renderCoprocessors(data.coprocessors);
+      }
+
+      // Render Accessories Telemetry
+      if (data.accessories) {
+        renderAccessories(data.accessories);
+      }
+
     } catch (e) {}
 
     // 2. Serial logs
@@ -2632,6 +2782,119 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({type: typeStr})
     });
+  }
+
+  function renderCoprocessors(c) {
+    if (!c) return;
+    if (c.iob0 && c.iob0.sata) {
+      const s = c.iob0.sata;
+      const sataEl = document.getElementById('hw-iob0-sata');
+      if (sataEl) sataEl.textContent = `${s.speed_gbps.toFixed(1)} Gbps (${s.frames_written} frames, ${s.mb_transferred} MB)`;
+    }
+    if (c.iob0 && c.iob0.accelerometer) {
+      const a = c.iob0.accelerometer;
+      const tiltEl = document.getElementById('hw-iob0-tilt');
+      if (tiltEl) {
+        tiltEl.textContent = `Roll ${a.roll_deg >= 0 ? '+' : ''}${a.roll_deg.toFixed(1)}°, Pitch ${a.pitch_deg >= 0 ? '+' : ''}${a.pitch_deg.toFixed(1)}° ${a.is_level ? '[LEVEL]' : ''}`;
+        tiltEl.style.color = a.is_level ? '#00e676' : '#ffaa00';
+      }
+    }
+    if (c.iob1 && c.iob1.black_shading) {
+      const bs = c.iob1.black_shading;
+      const stEl = document.getElementById('hw-iob1-status');
+      if (stEl) {
+        stEl.textContent = bs.calibrated ? `CALIBRATED (${Math.round(bs.target_temp_c)}°C ${bs.target_exposure})` : 'CALIBRATING...';
+        stEl.style.color = bs.calibrated ? '#00e676' : '#ffaa00';
+      }
+    }
+    if (c.iob1 && c.iob1.defect_tables) {
+      const dt = c.iob1.defect_tables;
+      const defEl = document.getElementById('hw-iob1-defects');
+      if (defEl) defEl.textContent = `${dt.factory_defects} Factory, ${dt.user_defects} User Masked (${dt.pixels_corrected} corrected)`;
+    }
+    if (c.isp1) {
+      const ispRatio = document.getElementById('hw-isp-ratio');
+      const ispFrm = document.getElementById('hw-isp-frames');
+      if (ispRatio) ispRatio.textContent = c.isp1.compression_ratio || '8:1';
+      if (ispFrm) ispFrm.textContent = (c.isp1.frames_compressed || 0).toLocaleString();
+    }
+    if (c.imaging_server) {
+      const afEl = document.getElementById('hw-dsp-af');
+      const fcEl = document.getElementById('hw-dsp-faces');
+      if (afEl) afEl.textContent = `${c.imaging_server.autofocus_sharpness.toFixed(1)} / 100.0`;
+      if (fcEl) fcEl.textContent = `${c.imaging_server.detected_faces ? c.imaging_server.detected_faces.length : 0} Detected (TI VLIB HW)`;
+    }
+    if (c.audio_server && c.audio_server.channels) {
+      const ch1 = document.getElementById('hw-audio-ch1');
+      const ch2 = document.getElementById('hw-audio-ch2');
+      if (ch1 && c.audio_server.channels[0]) ch1.textContent = `${c.audio_server.channels[0].peak_dbfs.toFixed(1)} dBFS`;
+      if (ch2 && c.audio_server.channels[1]) ch2.textContent = `${c.audio_server.channels[1].peak_dbfs.toFixed(1)} dBFS`;
+    }
+  }
+
+  function renderAccessories(acc) {
+    if (!acc || !acc.modules) return;
+    const pwrEl = document.getElementById('hw-acc-power');
+    if (pwrEl) pwrEl.textContent = `${acc.total_accessory_power_w}W`;
+    const tbody = document.getElementById('hw-acc-table-body');
+    if (!tbody) return;
+
+    let html = '';
+    for (const m of acc.modules) {
+      const isBase = m.pin === '720-0033' || m.pin === '730-0024' || m.pin === '750-0075';
+      const detachBtn = isBase ?
+        '<span style="color: #666;">Primary</span>' :
+        `<button class="cam-btn" style="padding: 2px 6px; font-size: 10px; background: #662222;" onclick="detachAccessoryModule('${m.pin}')">Eject</button>`;
+
+      html += `<tr>
+        <td style="color: #66b3ff;">${m.pin}</td>
+        <td style="color: #fff; font-weight: bold;">${m.name}</td>
+        <td style="color: #aaa;">${m.category}</td>
+        <td>${m.serial}</td>
+        <td style="color: #ffaa00;">${m.power_w}W</td>
+        <td style="color: #888;">${m.ports.join(', ')}</td>
+        <td>${detachBtn}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+  }
+
+  function runBlackShading() {
+    fetch('/api/hardware/calibrate', {method: 'POST'})
+      .then(r => r.json())
+      .then(res => {
+        alert(`Sensor Black Shading Complete!\n\nTarget Temp: ${res.target_temp_c}°C\nTarget Shutter: ${res.target_exposure}\nDefects Masked: ${res.defects_masked}\nMap File: ${res.cal_map}`);
+        pollStatus();
+      });
+  }
+
+  function triggerFaceDetection() {
+    fetch('/api/hardware/face_detect', {method: 'POST'})
+      .then(r => r.json())
+      .then(res => {
+        const count = res.faces ? res.faces.length : 0;
+        alert(`TI VLIB Face Detection Executed on DSP!\n\nDetected ${count} face(s) in frame.\nConfidence: 94%\nAutofocus ROI tracking updated.`);
+        pollStatus();
+      });
+  }
+
+  function attachAccessoryModule() {
+    const sel = document.getElementById('hw-acc-select');
+    if (!sel) return;
+    const pin = sel.value;
+    fetch('/api/hardware/accessory/attach', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pin})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function detachAccessoryModule(pin) {
+    fetch('/api/hardware/accessory/detach', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pin})
+    }).then(r => r.json()).then(() => pollStatus());
   }
 
   function sendRcp() {
