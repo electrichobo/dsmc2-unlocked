@@ -182,3 +182,16 @@ The emulator models the physical address space of the Texas Instruments DM3725 /
   - Authentic horizontal ribbon toolbar with interactive `False Color` mode selector, `Magnify`, `Log View`, `Horizon`, and `Zebras`.
   - Cascading vertical drop-down popup with authentic styling (`Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`).
   - Screen center crosshair reticle matching DSMC2 operation guides.
+- **Adaptive Button Typography & Touch Routing**:
+  - Intelligent button text measurement algorithm with multi-line wrapping and dynamic downscaling (12pt -> 10pt -> 9pt) preventing label clipping on small buttons.
+  - Strict touch action partitioning (`action: 'down'`, `'move'`, `'up'`) preventing drag-induced button activations and eliminating push-through into background HUD layers.
+
+### 3.14 Multi-Model Camera Selection & Profile Engine (`emulator/storage/env.py`, `emulator/camera.py`)
+- Extracted and staged all 5 DSMC2 camera types from `firmware_store/combo_7.4.1.bin`:
+  - `0x16`: **SCARLET-W 5K** (DRAGON 5K S35, 5120x2700, 60 FPS)
+  - `0x15`: **RED RAVEN 4.5K** (DRAGON 4.5K S35, 4608x2160, 120 FPS)
+  - `0x11`: **WEAPON 8K VV** (MONSTRO 8K VV, 8192x4320, 60 FPS)
+  - `0x14`: **DSMC2 DRAGON-X 5K** (DRAGON 5K S35, 5120x2700, 96 FPS)
+  - `0x17`: **EPIC-W 8K S35** (HELIUM 8K S35, 8192x4320, 60 FPS)
+- Interactive camera selection modal presented on first visit to Web Studio or accessible via the top model badge.
+- `POST /api/camera/select`: Dynamically swaps `/env` parameters (`CAMERA_NAME`, `CAMERA_TYPE`, `SENSOR_NAME`, `SENSOR_WIDTH`, `SENSOR_HEIGHT`, `MAX_FPS`), updates RCP state, resets default recording format, points firmware slots to the chosen model, and reflects changes across RedUi HUD and logs.

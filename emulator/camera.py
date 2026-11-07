@@ -50,6 +50,7 @@ class Dsmc2Camera:
 
         # 2. Storage and VFS
         self.vfs = VirtualFileSystem(self.firmware_slot_dir, self.persistent_dir)
+        self.env = self.vfs.env
 
         # 3. Interrupt Controller
         self.intc = OmapIntc()
@@ -362,3 +363,37 @@ class Dsmc2Camera:
             self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0
             self.instruction_count = 0
             self.is_booted = False
+
+    def select_camera_model(self, model_id: str) -> bool:
+        """Dynamically switch camera model personality, /env, and slot assets."""
+        if not self.env.apply_profile(model_id):
+            return False
+
+        profile = self.env.CAMERA_PROFILES.get(model_id) or next(
+            (p for p in self.env.CAMERA_PROFILES.values() if p["CAMERA_NAME"].lower() == model_id.lower()), None
+        )
+        if not profile:
+            return False
+
+        # Update firmware slot directory
+        new_slot_dir = os.path.join(self.workspace_root, profile["FIRMWARE_DIR"], "slot")
+        if os.path.exists(new_slot_dir):
+            self.firmware_slot_dir = new_slot_dir
+            if hasattr(self, "vfs") and self.vfs:
+                self.vfs.mounts["/image1"] = new_slot_dir
+                self.vfs.mounts["/image2"] = new_slot_dir
+
+        # Update RCP state
+        if hasattr(self, "rcp") and self.rcp:
+            self.rcp.state[RcpProtocol.PARAM_CAMERA_NAME] = profile["CAMERA_NAME"]
+            self.rcp.state[RcpProtocol.PARAM_FORMAT] = profile.get("DEFAULT_FORMAT", "5K 16:9")
+            self.rcp.state["camera_type"] = profile["CAMERA_TYPE"]
+            self.rcp.state["sensor_name"] = profile["SENSOR_NAME"]
+
+        # Update RedUi top model text
+        if hasattr(self, "compositor") and hasattr(self.compositor, "redui"):
+            self.compositor.redui.camera_model = profile["CAMERA_NAME"]
+
+        self.log_system(f"[CAMERA] Switched DSMC2 BRAIN Model to {profile['CAMERA_NAME']} ({profile['RELEASE_TAG']}, Type {profile['CAMERA_TYPE']})")
+        self.log_system(f"[SENSOR] Active Sensor: {profile['SENSOR_NAME']} ({profile['SENSOR_WIDTH']}x{profile['SENSOR_HEIGHT']}, Max {profile['MAX_FPS']} FPS)")
+        return True

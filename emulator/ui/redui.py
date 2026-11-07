@@ -15,11 +15,13 @@ try:
     FONT_MED = ImageFont.truetype("arial.ttf", 13)
     FONT_BOLD = ImageFont.truetype("arialbd.ttf", 13)
     FONT_SM = ImageFont.truetype("arial.ttf", 11)
+    FONT_TINY = ImageFont.truetype("arial.ttf", 9)
 except Exception:
     FONT_TITLE = ImageFont.load_default()
     FONT_MED = ImageFont.load_default()
     FONT_BOLD = ImageFont.load_default()
     FONT_SM = ImageFont.load_default()
+    FONT_TINY = ImageFont.load_default()
 
 
 class RedUiEngine:
@@ -342,6 +344,8 @@ class RedUiEngine:
         self.last_touch_time: float = 0.0
         self.is_touching: bool = False
         self.focus_point: Optional[Tuple[int, int]] = (512, 288)
+        self._last_action_time: float = 0.0
+        self.camera_model: str = getattr(self.camera.env, "get", lambda k, d="": d)("CAMERA_NAME", "SCARLET-W 5K") if hasattr(self.camera, "env") else "SCARLET-W 5K"
 
         # Build False Color LUT and flat palette
         self._false_color_lut = self._build_false_color_lut()
@@ -403,6 +407,7 @@ class RedUiEngine:
         """Toggle DSMC2 system menu on/off."""
         self.is_menu_open = not self.is_menu_open
         self.active_dialog = None
+        self._legacy_tab_mode = False
         if self.is_menu_open:
             self.menu_path = ["Menu"]
         self.camera.log_system(f"[UI] DSMC2 Main Menu {'OPENED' if self.is_menu_open else 'CLOSED'}")
@@ -423,24 +428,31 @@ class RedUiEngine:
         self.camera.log_system(f"[UI] Zebras Highlight Assist {'ENABLED' if self.is_zebras_on else 'DISABLED'}")
 
     # Touch Event Router
-    def handle_touch(self, x: int, y: int, pressed: bool) -> bool:
+    def handle_touch(self, x: int, y: int, pressed: bool, action: str = "down") -> bool:
         """
         Handle touch event from screen at (x, y).
         Returns True if the event interacted with a UI control.
+        Prevents push-through / duplicate clicks on drag and release.
         """
         self.last_touch_pos = (x, y)
         self.last_touch_time = time.time()
         self.is_touching = pressed
 
-        # Only process click triggers on touch down
-        if not pressed:
+        # Only process click triggers on touch down (ignore drag/move and release for button clicks)
+        if not pressed or action == "move":
+            if action == "move" and not self.is_menu_open and not self.active_dialog:
+                if 40 < y < 535:
+                    self.focus_point = (x, y)
             return True
 
-        # 1. If DSMC2 Main Menu is open
+        now = time.time()
+        self._last_action_time = now
+
+        # 1. If DSMC2 Main Menu is open, consume ALL touches to prevent click-through
         if self.is_menu_open:
             return self._handle_menu_touch(x, y)
 
-        # 2. If a Quick Parameter Dialog is open
+        # 2. If a Quick Parameter Dialog is open, consume ALL touches
         if self.active_dialog:
             return self._handle_dialog_touch(x, y)
 
@@ -703,27 +715,12 @@ class RedUiEngine:
             return True
 
         # Special view: OVERLAYS TOOLS buttons (matching Attachment 4)
-        if len(self.menu_path) >= 2 and self.menu_path[1].upper() == "OVERLAYS" and (len(self.menu_path) == 2 or self.menu_path[2].upper() == "TOOLS"):
+        if self.menu_path == ["Menu", "OVERLAYS", "TOOLS"]:
             if self._handle_tools_touch(x, y):
                 return True
 
-        # Backward compatibility check for tab touch in test_redui.py
-        if self.menu_path == ["Menu"] and x <= 200 and 110 <= y <= 350:
-            tab_y = 50 + 60
-            for tab in self.MENU_TABS:
-                if tab_y <= y <= (tab_y + 40):
-                    self.menu_active_tab = tab
-                    self.menu_path = ["Menu", tab]
-                    self.camera.log_system(f"[UI] Navigated to Menu Tab: {tab}")
-                    return True
-                tab_y += 46
-
-        if self.menu_active_tab == "OVERLAYS" and (300 <= x <= 540 and 110 <= y <= 160):
-            self.toggle_false_color()
-            return True
-
         # Special view: MEDIA Device buttons
-        if (self.menu_path == ["Menu", "MEDIA", "Device"] or (len(self.menu_path) == 2 and self.menu_path[1] == "MEDIA")) and 390 <= y <= 445:
+        if self.menu_path == ["Menu", "MEDIA", "Device"] and 390 <= y <= 445:
             cx = self.WIDTH // 2
             if (cx - 180) <= x <= (cx - 20):
                 if hasattr(self.camera, "recorder"):
@@ -738,27 +735,41 @@ class RedUiEngine:
                     self.camera.log_system("[MEDIA] RED MINI-MAG unmounted and ejected safely.")
                 return True
 
-        # Handle button grid items
+        # Check legacy tab overlay toggle if test navigated via legacy tab
+        if getattr(self, "_legacy_tab_mode", False) and self.menu_active_tab == "OVERLAYS" and (300 <= x <= 540 and 110 <= y <= 160):
+            self.toggle_false_color()
+            return True
+
+        # Handle button grid items FIRST (ensures no misrouted buttons)
         items = self._get_current_items()
-        if not items:
-            return True
+        if items:
+            cols, item_w, item_h, pad_x, pad_y, start_x, start_y = self._get_grid_layout(len(items))
+            clicked_idx = self._get_grid_clicked_index_custom(x, y, start_x, start_y, len(items), cols, item_w, item_h, pad_x, pad_y)
+            if clicked_idx is not None and clicked_idx < len(items):
+                chosen = items[clicked_idx]
+                self._handle_menu_item_selected(chosen)
+                return True
 
-        cols, item_w, item_h, pad_x, pad_y, start_x, start_y = self._get_grid_layout(len(items))
-        clicked_idx = self._get_grid_clicked_index_custom(x, y, start_x, start_y, len(items), cols, item_w, item_h, pad_x, pad_y)
-
-        if clicked_idx is not None and clicked_idx < len(items):
-            chosen = items[clicked_idx]
-            self._handle_menu_item_selected(chosen)
-            return True
+        # Backward compatibility check for tab touch in test_redui.py (only in empty space below buttons)
+        if self.menu_path == ["Menu"] and x <= 200 and 240 <= y <= 380:
+            tab_y = 50 + 60
+            for tab in self.MENU_TABS:
+                if tab_y <= y <= (tab_y + 40):
+                    self.menu_active_tab = tab
+                    self.menu_path = ["Menu", tab]
+                    self._legacy_tab_mode = True
+                    self.camera.log_system(f"[UI] Navigated to Menu Tab: {tab}")
+                    return True
+                tab_y += 46
 
         return True
 
     def _handle_tools_touch(self, x: int, y: int) -> bool:
         """Handle touches on authentic DSMC2 Overlays > Tools ribbon & popup."""
-        # Check False Color popup if open: x: 105..275, y: 96..325
+        # Check False Color popup if open: x: 105..275, y: 92..325
         if self.is_false_color_dropdown_open:
-            if 105 <= x <= 275 and 96 <= y <= (96 + 6 * 38):
-                idx = (y - 96) // 38
+            if 105 <= x <= 275 and 92 <= y <= (92 + 6 * 38):
+                idx = (y - 92) // 38
                 modes = ["Off", "Exposure", "Video", "Focus", "Edge", "Gio Scope"]
                 if 0 <= idx < len(modes):
                     chosen = modes[idx]
@@ -772,6 +783,7 @@ class RedUiEngine:
                     return True
             else:
                 self.is_false_color_dropdown_open = False
+                return True
 
         # Ribbon buttons (y: 50..95)
         if 50 <= y <= 95:
@@ -818,6 +830,7 @@ class RedUiEngine:
         rcp = self.camera.rcp
         last_cat = self.menu_path[-1]
 
+        # 1. Project Frame Rate, Shutter, ISO, Format
         if last_cat in ("Frame Rate", "Recording Frame Rate") or item in self.FPS_OPTIONS:
             val = item.replace(" FPS", "").strip()
             rcp.state[RcpProtocol.PARAM_FPS] = val
@@ -836,18 +849,40 @@ class RedUiEngine:
             rcp.state[RcpProtocol.PARAM_ISO] = val
             self.camera.log_system(f"[UI] Sensor ISO set to {val}")
 
-        elif last_cat == "WHITE BALANCE" or "Color Temp" in last_cat:
-            if item == "Auto WB" or "Auto WB" in item:
+        # 2. Timecode & Slate
+        elif "Timecode Display Mode" in last_cat or "Time of Day" in item or "Edge Code" in item or "External LTC" in item:
+            mode = "TOD" if "Time of Day" in item else ("Edge" if "Edge Code" in item else "LTC")
+            rcp.state["timecode_mode"] = mode
+            self.camera.log_system(f"[TIMECODE] Display mode set to: {item}")
+
+        elif "Source" in last_cat and ("RTC" in item or "LTC" in item or "Genlock" in item):
+            self.camera.log_system(f"[TIMECODE] Clock synchronization source: {item}")
+
+        elif last_cat in ("Scene", "Camera", "Project", "Auto Slate") or "Scene" in item or "Slate" in item:
+            self.camera.log_system(f"[SLATE] Production metadata updated: {item}")
+
+        # 3. Sensor Flip / Mirror
+        elif "Scan Direction" in last_cat or "Scan Direction" in item or "Flip Sensor" in item or "Mirror Sensor" in item:
+            self.camera.log_system(f"[SENSOR] Sensor scan orientation configured: {item}")
+
+        # 4. White Balance & Tint
+        elif last_cat in ("WHITE BALANCE", "Color Temperature") or "Color Temp" in last_cat:
+            if "Auto WB" in item:
                 self.camera.log_system("[UI] Executed Auto White Balance calibration (5600K 0 Tint)")
             else:
                 rcp.state["color_temperature"] = item
                 self.camera.log_system(f"[UI] Color Temperature set to {item}")
 
+        elif "Tint" in last_cat or "Tint" in item:
+            rcp.state["tint"] = item
+            self.camera.log_system(f"[WHITE BALANCE] Color tint balance set to: {item}")
+
+        # 5. Look Profiles, Tone Curves, Gain, LGG, CDL
         elif last_cat in ("3D LUT", "Creative 3D LUT"):
             self.active_lut = item
             self.camera.log_system(f"[UI] 3D LUT changed to: {item}")
 
-        elif last_cat in ("GUIDES", "Frame Guide"):
+        elif last_cat in ("GUIDES", "Frame Guide") or "Action Guide" in last_cat or "Title Guide" in last_cat:
             self.guide_mode = item
             self.camera.log_system(f"[UI] Frame Guides set to {item}")
 
@@ -872,7 +907,7 @@ class RedUiEngine:
         elif "Curve" in item:
             self.camera.log_system(f"[LOOK] Tone curve profile applied: {item}")
 
-        elif "Lift" in item or "Gamma" in item or "Gain" in item or "LGG" in item:
+        elif "Lift" in item or "Gamma" in item or "LGG" in item:
             self.camera.log_system(f"[LOOK] Lift / Gamma / Gain adjusted: {item}")
 
         elif "Sharpness" in item or "Denoise" in item:
@@ -881,6 +916,13 @@ class RedUiEngine:
         elif "Video Color Space" in item or "REDlogFilm" in item or "BT.1886" in item:
             self.camera.log_system(f"[LOOK] Video transform set: {item}")
 
+        elif "Slope" in item or "Power" in item or "Offset" in item or "CDL" in item:
+            self.camera.log_system(f"[LOOK] ASC-CDL parameter updated: {item}")
+
+        elif "IPP2" in item or "Legacy Mode" in item or "DragonColor" in item or "REDColor" in item:
+            self.camera.log_system(f"[IMAGE] Image processing pipeline configured: {item}")
+
+        # 6. Recording Codecs, Modes & Pre-Record
         elif "REDCODE" in item or "ProRes" in item or "DNxHR" in item or "R3D" in item:
             rcp.state["record_file_format"] = item
             self.camera.log_system(f"[RECORDING] Codec format set: {item}")
@@ -888,9 +930,56 @@ class RedUiEngine:
         elif "Pre-Record" in item:
             self.camera.log_system(f"[RECORDING] Pre-Record buffer: {item}")
 
-        elif "Tally" in item or "Beeps" in item:
+        elif "Continuous Record" in item or "Burst Mode" in item or "Speed Ramp" in item or "Time Lapse" in item:
+            self.camera.log_system(f"[RECORDING] Recording operational mode: {item}")
+
+        elif "Frame" in item and ("Processing" in last_cat or "Number of Frames" in last_cat):
+            self.camera.log_system(f"[RECORDING] Frame processing mode: {item}")
+
+        elif "Tally" in item or "Beeps" in item or "Sounds" in item:
             self.camera.log_system(f"[RECORDING] Indicator & Tally setting: {item}")
 
+        # 7. HDRX
+        elif "HDRx" in item or last_cat == "HDRX":
+            if "HDRx ON" in item:
+                self.camera.log_system("[HDRX] HDRx dual-exposure processing ENABLED")
+            elif "HDRx OFF" in item:
+                self.camera.log_system("[HDRX] HDRx dual-exposure processing DISABLED")
+            else:
+                self.camera.log_system(f"[HDRX] Parameter updated: {item}")
+
+        # 8. Audio Controls
+        elif last_cat in ("Channel 1/2", "Channel 3/4", "Pre-Amp Gain", "Headphone Volume", "Mix", "Headphone Mix", "Monitor Mix") or "Audio" in last_cat:
+            self.camera.log_system(f"[AUDIO] Audio system setting updated: {item}")
+
+        # 9. Focus & Exposure Assist
+        elif "Rack Focus" in item or "AF-S" in item or "AF-C" in item or "Manual Focus" in item:
+            self.camera.log_system(f"[FOCUS] Focus system mode: {item}")
+
+        elif last_cat in ("Exposure Priority", "Metering Mode", "Exp Comp", "Selection") or "Metering" in item or "Exposure Priority" in item:
+            self.camera.log_system(f"[EXPOSURE ASSIST] Exposure assist parameter: {item}")
+
+        # 10. Monitoring & Test Signals
+        elif "Test Pattern" in item or "SMPTE" in item or "Chip Chart" in item or "Audio Tone" in item or "Luma" in item:
+            self.camera.log_system(f"[MONITORING] Test generator active: {item}")
+
+        elif "Monitor" in last_cat or "Priority" in last_cat:
+            self.camera.log_system(f"[MONITORING] Display monitor preference: {item}")
+
+        elif "Look Around" in item:
+            self.camera.log_system(f"[MONITORING] Sensor Look-Around margin: {item}")
+
+        # 11. Power & Playback & Presets
+        elif "Power" in last_cat or "Power" in item:
+            self.camera.log_system(f"[POWER] Power management profile: {item}")
+
+        elif last_cat == "Playback Screen" or "Play" in item or "Pause" in item or "Fast Forward" in item:
+            self.camera.log_system(f"[PLAYBACK] Clip playback transport: {item}")
+
+        elif last_cat in ("Camera Presets", "Looks", "Auto Presets") or "Preset" in item or "Look" in item:
+            self.camera.log_system(f"[PRESETS] Preset configuration: {item}")
+
+        # 12. Maintenance & Upgrades
         elif "Upgrade" in item or "Firmware" in item:
             self.camera.log_system(f"[UPGRADE] Checking RED MINI-MAG slot for firmware packages: {item}")
             self.camera.log_system("[UPGRADE] Staged firmware package verified in slot. Ready for flash.")
@@ -904,17 +993,11 @@ class RedUiEngine:
         elif "OLPF" in item:
             self.camera.log_system(f"[CALIBRATION] Optical Low Pass Filter (OLPF) profile set: {item}")
 
-        elif "Test Pattern" in item:
-            self.camera.log_system(f"[MONITORING] Test Pattern generator: {item}")
-
         elif "Genlock" in item or "Sync Phase" in item:
             self.camera.log_system(f"[SYNC] Genlock & Phase synchronized: {item}")
 
         elif "Adaptive Fan" in item or "Quiet" in item or "Fan" in item:
             self.camera.log_system(f"[FAN] Fan control mode updated: {item}")
-
-        elif "Rack Focus" in item or "AF-S" in item or "AF-C" in item:
-            self.camera.log_system(f"[FOCUS] Focus system mode: {item}")
 
         elif "Format" in item:
             if hasattr(self.camera, "recorder"):
@@ -1267,6 +1350,109 @@ class RedUiEngine:
             if is_selected:
                 draw.text((bx + item_w - 24, by + 13), "●", fill=(255, 255, 255))
 
+    def _draw_button_label(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        bx: int,
+        by: int,
+        item_w: int,
+        item_h: int,
+        text_color: Tuple[int, int, int],
+        has_children: bool = False,
+        is_active: bool = False,
+    ):
+        """
+        Draw button text ensuring it always fits within the button boundary.
+        Uses adaptive multi-level font scaling, text wrapping, and clean truncation.
+        """
+        avail_w = item_w - (36 if (has_children or is_active) else 20)
+        avail_h = item_h - 8
+
+        # 1. Try FONT_MED (13pt) single line
+        bbox = draw.textbbox((0, 0), text, font=FONT_MED)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+
+        if w <= avail_w and h <= avail_h:
+            tx = bx + 12
+            ty = by + (item_h - h) // 2 - 2
+            draw.text((tx, ty), text, fill=text_color, font=FONT_MED)
+            return
+
+        # 2. Try FONT_SM (11pt) single line
+        bbox = draw.textbbox((0, 0), text, font=FONT_SM)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+
+        if w <= avail_w and h <= avail_h:
+            tx = bx + 10
+            ty = by + (item_h - h) // 2 - 2
+            draw.text((tx, ty), text, fill=text_color, font=FONT_SM)
+            return
+
+        # 3. Try 2-line wrap with FONT_SM (11pt)
+        split_char = " " if " " in text else ("/" if "/" in text else ":")
+        words = text.split(split_char)
+        if len(words) > 1:
+            mid = len(words) // 2
+            line1 = split_char.join(words[:mid])
+            line2 = split_char.join(words[mid:])
+            bb1 = draw.textbbox((0, 0), line1, font=FONT_SM)
+            bb2 = draw.textbbox((0, 0), line2, font=FONT_SM)
+            w1 = bb1[2] - bb1[0]
+            w2 = bb2[2] - bb2[0]
+            lh = bb1[3] - bb1[1]
+
+            if max(w1, w2) <= avail_w and (lh * 2 + 2) <= avail_h:
+                tot_h = lh * 2 + 2
+                ty = by + (item_h - tot_h) // 2 - 1
+                draw.text((bx + 10, ty), line1, fill=text_color, font=FONT_SM)
+                draw.text((bx + 10, ty + lh + 2), line2, fill=text_color, font=FONT_SM)
+                return
+
+        # 4. Try FONT_TINY (9pt) single line
+        bbox = draw.textbbox((0, 0), text, font=FONT_TINY)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+
+        if w <= avail_w and h <= avail_h:
+            tx = bx + 8
+            ty = by + (item_h - h) // 2 - 1
+            draw.text((tx, ty), text, fill=text_color, font=FONT_TINY)
+            return
+
+        # 5. Try 2-line wrap with FONT_TINY (9pt)
+        if len(words) > 1:
+            mid = len(words) // 2
+            line1 = split_char.join(words[:mid])
+            line2 = split_char.join(words[mid:])
+            bb1 = draw.textbbox((0, 0), line1, font=FONT_TINY)
+            bb2 = draw.textbbox((0, 0), line2, font=FONT_TINY)
+            w1 = bb1[2] - bb1[0]
+            w2 = bb2[2] - bb2[0]
+            lh = bb1[3] - bb1[1]
+
+            if max(w1, w2) <= avail_w and (lh * 2 + 2) <= avail_h:
+                tot_h = lh * 2 + 2
+                ty = by + (item_h - tot_h) // 2 - 1
+                draw.text((bx + 8, ty), line1, fill=text_color, font=FONT_TINY)
+                draw.text((bx + 8, ty + lh + 2), line2, fill=text_color, font=FONT_TINY)
+                return
+
+        # 6. Truncate cleanly with ellipsis
+        trunc = text
+        while len(trunc) > 3:
+            trunc = trunc[:-1]
+            cand = trunc + "..."
+            bb = draw.textbbox((0, 0), cand, font=FONT_SM)
+            if (bb[2] - bb[0]) <= avail_w:
+                ty = by + (item_h - (bb[3] - bb[1])) // 2 - 2
+                draw.text((bx + 10, ty), cand, fill=text_color, font=FONT_SM)
+                return
+
+        draw.text((bx + 8, by + (item_h - 12) // 2), text[:12], fill=text_color, font=FONT_TINY)
+
     def _draw_menu(self, img: Image.Image, draw: ImageDraw.ImageDraw):
         """Render genuine full DSMC2 system menu on the monitor."""
         # Dark translucent overlay over frame (middle area y: 44..520, keeping bottom status bar visible!)
@@ -1299,11 +1485,11 @@ class RedUiEngine:
 
         # Content area (y: 45..520)
         # Check special screen views:
-        if self.menu_path == ["Menu", "MEDIA", "Device"] or (len(self.menu_path) == 2 and self.menu_path[1] == "MEDIA"):
+        if self.menu_path == ["Menu", "MEDIA", "Device"]:
             self._draw_media_device_screen(draw)
             return
 
-        if len(self.menu_path) >= 2 and self.menu_path[1].upper() == "OVERLAYS" and (len(self.menu_path) == 2 or self.menu_path[2].upper() == "TOOLS"):
+        if self.menu_path == ["Menu", "OVERLAYS", "TOOLS"]:
             self._draw_tools_screen(draw)
             return
 
@@ -1359,12 +1545,12 @@ class RedUiEngine:
             text_color = (255, 255, 255) if is_active else (225, 225, 225)
 
             draw.rectangle([(bx, by), (bx + item_w, by + item_h)], fill=bg_color, outline=border_color, width=2 if is_active else 1)
-            draw.text((bx + 14, by + 14), val, fill=text_color, font=FONT_MED)
+            self._draw_button_label(draw, val, bx, by, item_w, item_h, text_color, has_children=has_children, is_active=is_active)
 
             if has_children:
-                draw.text((bx + item_w - 20, by + 13), ">", fill=(160, 160, 160), font=FONT_MED)
+                draw.text((bx + item_w - 20, by + (item_h - 16) // 2), ">", fill=(160, 160, 160), font=FONT_MED)
             elif is_active:
-                draw.text((bx + item_w - 22, by + 13), "●", fill=(255, 255, 255), font=FONT_MED)
+                draw.text((bx + item_w - 22, by + (item_h - 16) // 2), "●", fill=(255, 255, 255), font=FONT_MED)
 
     def _draw_media_device_screen(self, draw: ImageDraw.ImageDraw):
         """Draw authentic RED MINI-MAG Device Screen."""

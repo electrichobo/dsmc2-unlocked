@@ -34,6 +34,7 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M11** | Web-Based Virtual Camera Studio | Zero-dependency standard library web studio (`emulator/ui/web.py`) on dedicated port with fluid responsive 16:9 screen bezel, crosshair coordinate mapping, and full developer workbench. | **COMPLETE** |
 | **M12** | Master DSMC2 Menu Tree & Look Tiles | Complete hierarchical DSMC2 menu tree (IMAGE, MONITORING, OVERLAYS, POWER, PLAYBACK, MEDIA, PRESETS, SETTINGS) with 8-tile `Settings > Look >` matrix and authentic False Color dropdown ribbon. | **COMPLETE** |
 | **M13** | Vertical RED MINI-MAG Firmware Loader Slot | Anodized brushed aluminum vertical cartridge slot positioned to the left of the screen viewport. Defaults to confirmed working v7.4.1 firmware (`dsmc_program.mem`), accepts custom firmware mods via drag-and-drop or file upload, and provides instant 1-click baseline revert. | **COMPLETE** |
+| **M14** | Multi-Model DSMC2 Selection & Adaptive UI | Extracted all 5 DSMC2 cameras (`WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, `EPIC-W 8K`) from `combo_7.4.1.bin`. Added camera selection modal panel, dynamic profile switching (`/api/camera/select`), adaptive button text auto-fitting/wrapping (zero overflow), and streamlined touch action dispatch (`down`, `move`, `up`). | **COMPLETE** |
 
 ---
 
@@ -82,6 +83,13 @@ tests\test_web_studio.py ...........                                     [100%]
 4. **Cinematic Sensor Frame Stream**:
    - Renders authentic cinema portrait frame (`res/sensor_feed_cinema.jpg`) during active camera power in place of abstract boot splashes.
    - Responsive fluid aspect-ratio scaling (16:9) with pixel-accurate touch coordinate transformation.
+5. **Multi-Model DSMC2 Camera Personality Switcher**:
+   - Extracted all 5 DSMC2 models from `combo_7.4.1.bin`: `WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, and `EPIC-W 8K`.
+   - Dynamic `/env` partition reconfiguration, RCP camera ID updates, and RedUi model badge reflection.
+   - Interactive modal switcher dialog displayed on launch and accessible at any time from the top header model badge.
+6. **Adaptive Button Typography & Push-Through Elimination**:
+   - Intelligent font scaling (12pt -> 10pt -> 9pt), multi-line wrapping, and truncation preventing button text overflow.
+   - Strict `action: 'down'` / `action: 'move'` / `action: 'up'` event separation eliminating drag push-through activations.
 
 ---
 

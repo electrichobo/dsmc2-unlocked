@@ -77,13 +77,23 @@ The primary modern, freeze-proof interface built entirely with Python standard l
   - Active status LED: Green (baseline ready), Amber/Cyan (custom mod staged), Off (ejected).
   - Drag-and-drop dropzone supporting user-supplied firmware binary mods (`.bin`, `.mem`, `.pkg`, `.zip`, `.tar`).
   - Staging storage in `firmware_store/custom/` with instant 1-click baseline revert button.
+- **Multi-Model DSMC2 Camera Selection**:
+  - Interactive selection modal to launch into any extracted DSMC2 camera personality:
+    - **SCARLET-W 5K** (`0x16`, DRAGON 5K S35, 5120x2700, 60 FPS)
+    - **RED RAVEN 4.5K** (`0x15`, DRAGON 4.5K S35, 4608x2160, 120 FPS)
+    - **WEAPON 8K VV** (`0x11`, MONSTRO 8K VV, 8192x4320, 60 FPS)
+    - **DSMC2 DRAGON-X 5K** (`0x14`, DRAGON 5K S35, 5120x2700, 96 FPS)
+    - **EPIC-W 8K S35** (`0x17`, HELIUM 8K S35, 8192x4320, 60 FPS)
+  - One-click model switching in the studio header dynamically updates `/env`, RCP state, default recording format, and slot assets.
 - **Virtual LCD Screen (1024x576 Native 16:9 Aspect)**:
   - Responsive recursive viewport scaling fitting any browser window dimensions without aspect distortion.
   - Renders live sensor feed (`res/sensor_feed_cinema.jpg`), authentic splash screen, and OMAP framebuffers.
   - Interactive touchscreen with exact pixel coordinate mapping to the virtual Atmel maXTouch digitizer.
-  - Authentic HUD indicators: Timecode, Camera Model (`SCARLET-W 5K`), FPS, Shutter Angle, ISO, Format, Iris Aperture, and Media Gauge.
+  - Authentic HUD indicators: Timecode, Camera Model, FPS, Shutter Angle, ISO, Format, Iris Aperture, and Media Gauge.
 - **Authentic DSMC2 Menu & Tool Overlays**:
   - Complete 8-category master menu tree (`IMAGE`, `MONITORING`, `OVERLAYS`, `POWER`, `PLAYBACK`, `MEDIA`, `PRESETS`, `SETTINGS`).
+  - Adaptive button text formatting: automatically scales font from 12pt down to 9pt and wraps to 2 lines to ensure labels never clip or overflow button boundaries.
+  - Touch event streamline: distinct `down`, `move`, and `up` action dispatching eliminates mouse drag push-through activations.
   - 8-tile Look matrix (`Menu > Settings > Look >`) with active red tile selection.
   - Exposure Tools ribbon with False Color mode drop-down popup (`Off`, `Exposure`, `Video`, `Focus`, `Edge`, `Gio Scope`) and crosshair reticle.
 - **Physical Camera Controls & Developer Workbench**:

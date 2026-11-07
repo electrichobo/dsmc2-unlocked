@@ -371,13 +371,13 @@ class WebStudio:
                     self.camera.step_slice(25_000)
             time.sleep(0.015)
 
-    def handle_touch(self, x: int, y: int, pressed: bool):
+    def handle_touch(self, x: int, y: int, pressed: bool, action: str = "down"):
         with self.lock:
             self.camera.touch(x, y, pressed=pressed)
-            self.compositor.redui.handle_touch(x, y, pressed=pressed)
-            if pressed:
+            self.compositor.redui.handle_touch(x, y, pressed=pressed, action=action)
+            if action == "down":
                 self.camera.log_system(f"[TOUCH] Touch down at ({x}, {y}) -> maXTouch (0x4B)")
-            else:
+            elif action == "up":
                 self.camera.log_system(f"[TOUCH] Touch release at ({x}, {y}) -> maXTouch (0x4B)")
 
     def handle_button(self, btn_name: str):
@@ -463,6 +463,11 @@ def create_handler(studio: WebStudio):
                         "slot_mounted": studio.camera.recorder.is_media_mounted if hasattr(studio.camera, "recorder") else True
                     }
                 self._send_json(info)
+            elif path == "/api/camera/models":
+                with studio.lock:
+                    models = studio.camera.env.list_profiles()
+                    current = studio.camera.env.get("CAMERA_TYPE", "0x16")
+                    self._send_json({"status": "ok", "current": current, "models": models})
             else:
                 self.send_error(404, "Not Found")
 
@@ -481,8 +486,18 @@ def create_handler(studio: WebStudio):
                 x = int(data.get("x", 0))
                 y = int(data.get("y", 0))
                 pressed = bool(data.get("pressed", True))
-                studio.handle_touch(x, y, pressed)
-                self._send_json({"status": "ok", "x": x, "y": y, "pressed": pressed})
+                action = str(data.get("action", "down" if pressed else "up"))
+                studio.handle_touch(x, y, pressed, action=action)
+                self._send_json({"status": "ok", "x": x, "y": y, "pressed": pressed, "action": action})
+
+            elif path == "/api/camera/select":
+                model_id = str(data.get("model", "0x16"))
+                with studio.lock:
+                    success = studio.camera.select_camera_model(model_id)
+                    current_name = studio.camera.env.get("CAMERA_NAME", "SCARLET-W 5K")
+                    studio.active_firmware_name = f"{current_name} (v7.4.1)"
+                    studio.confirmed_baseline_name = f"{current_name} (v7.4.1)"
+                self._send_json({"status": "ok" if success else "error", "model": model_id, "camera_name": current_name})
 
             elif path == "/api/button":
                 btn = str(data.get("button", ""))
@@ -709,6 +724,8 @@ def create_handler(studio: WebStudio):
                     "power_state": cam.power_state,
                     "boot_progress": cam.boot_progress,
                     "instruction_count": cam.instruction_count,
+                    "camera_name": cam.env.get("CAMERA_NAME", "SCARLET-W 5K"),
+                    "camera_type": cam.env.get("CAMERA_TYPE", "0x16"),
                     "is_recording": is_rec,
                     "rcp_clients_count": cam.rcp_server.get_client_count() if hasattr(cam, "rcp_server") else 0,
                     "lens": lm_status,
@@ -1386,6 +1403,192 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     color: #aaa;
     font-family: monospace;
   }
+
+  /* Camera Model Modal */
+  .modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.88);
+    backdrop-filter: blur(6px);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-box {
+    background: #181818;
+    border: 2px solid #383838;
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.1);
+    max-width: 920px;
+    width: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-top {
+    background: #111;
+    border-bottom: 1px solid #2e2e2e;
+    padding: 14px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .dsmc2-badge {
+    background: var(--red-brand);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 2px 8px;
+    border-radius: 2px;
+    letter-spacing: 1px;
+    margin-right: 10px;
+  }
+  .modal-x-btn {
+    background: transparent;
+    border: none;
+    color: #aaa;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+  }
+  .modal-x-btn:hover { color: #fff; }
+  .modal-intro {
+    padding: 14px 20px 4px 20px;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.4;
+  }
+  .camera-model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    padding: 16px 20px;
+    max-height: 65vh;
+    overflow-y: auto;
+  }
+  .cam-card {
+    background: #202020;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .cam-card:hover {
+    border-color: #ff3333;
+    background: #262626;
+    transform: translateY(-2px);
+  }
+  .cam-card.active {
+    border-color: var(--red-bright);
+    background: #2a1515;
+    box-shadow: 0 0 12px rgba(220, 20, 20, 0.4);
+  }
+  .cam-card-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .cam-card-name {
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    color: #fff;
+  }
+  .cam-card-id {
+    font-size: 11px;
+    font-family: monospace;
+    background: #111;
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: #888;
+  }
+  .cam-card-sensor {
+    font-size: 12px;
+    color: #00e676;
+    font-family: monospace;
+    margin-top: 4px;
+  }
+  .cam-card-desc {
+    font-size: 12px;
+    color: #bbb;
+    line-height: 1.35;
+  }
+  .cam-card-specs {
+    display: flex;
+    gap: 6px;
+    font-size: 10px;
+    font-family: monospace;
+    flex-wrap: wrap;
+  }
+  .spec-pill {
+    background: #151515;
+    padding: 3px 6px;
+    border-radius: 3px;
+    color: #ddd;
+    border: 1px solid #333;
+  }
+  .cam-card-btn {
+    background: #333;
+    color: #fff;
+    border: 1px solid #555;
+    padding: 7px 12px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.15s;
+    margin-top: 8px;
+  }
+  .cam-card.active .cam-card-btn {
+    background: var(--red-brand);
+    border-color: #ff4444;
+  }
+  .cam-card:hover .cam-card-btn {
+    background: var(--red-brand);
+  }
+  .modal-bottom {
+    background: #111;
+    border-top: 1px solid #2e2e2e;
+    padding: 12px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-foot-note {
+    font-size: 11px;
+    color: #777;
+    font-family: monospace;
+  }
+  .model-select-btn {
+    background: #242424;
+    border: 1px solid #444;
+    color: #fff;
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+  }
+  .model-select-btn:hover {
+    border-color: #ff3333;
+    background: #2c1a1a;
+  }
+  .model-select-btn .bolt { color: #ffb300; font-size: 13px; }
+  .model-select-btn .caret { font-size: 10px; color: #888; }
 </style>
 </head>
 <body>
@@ -1395,10 +1598,13 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <div class="red-logo">RED</div>
     <div>
       <div class="brand-title">DSMC2 VIRTUAL CAMERA STUDIO</div>
-      <div class="brand-sub">SCARLET-W 5K • FIRMWARE v7.4.1 • CORTEX-A8 @ 1.0 GHz</div>
+      <div class="brand-sub"><span id="hdr-sub-name">SCARLET-W 5K</span> • FIRMWARE v7.4.1 • CORTEX-A8 @ 1.0 GHz</div>
     </div>
   </div>
   <div class="status-cluster">
+    <button class="model-select-btn" onclick="openModelModal()" id="hdr-model-btn" title="Choose DSMC2 Camera Model">
+      <span class="bolt">⚡</span> BRAIN: <strong id="hdr-model-name">SCARLET-W 5K</strong> <span class="caret">▾</span>
+    </button>
     <div class="led-badge">
       <div id="led-dot" class="led-dot"></div>
       <span id="pwr-text">STANDBY</span>
@@ -1795,21 +2001,21 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     isTouching = true;
     const {x, y} = getNativeCoords(e);
     drawReticle(x, y);
-    sendTouch(x, y, true);
+    sendTouch(x, y, true, 'down');
   });
 
   window.addEventListener('mousemove', (e) => {
     if (!isTouching) return;
     const {x, y} = getNativeCoords(e);
     drawReticle(x, y);
-    sendTouch(x, y, true);
+    sendTouch(x, y, true, 'move');
   });
 
   window.addEventListener('mouseup', (e) => {
     if (!isTouching) return;
     isTouching = false;
     const {x, y} = getNativeCoords(e);
-    sendTouch(x, y, false);
+    sendTouch(x, y, false, 'up');
     setTimeout(clearReticle, 200);
   });
 
@@ -1819,7 +2025,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     isTouching = true;
     const {x, y} = getNativeCoords(e);
     drawReticle(x, y);
-    sendTouch(x, y, true);
+    sendTouch(x, y, true, 'down');
   }, {passive: false});
 
   canvas.addEventListener('touchmove', (e) => {
@@ -1827,21 +2033,24 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     if (!isTouching) return;
     const {x, y} = getNativeCoords(e);
     drawReticle(x, y);
-    sendTouch(x, y, true);
+    sendTouch(x, y, true, 'move');
   }, {passive: false});
 
   canvas.addEventListener('touchend', (e) => {
     e.preventDefault();
     isTouching = false;
-    clearReticle();
+    sendTouch(0, 0, false, 'up');
+    setTimeout(clearReticle, 200);
   });
 
   // API Dispatchers
-  function sendTouch(x, y, pressed) {
+  function sendTouch(x, y, pressed, action = 'down') {
     fetch('/api/touch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({x, y, pressed})
+      body: JSON.stringify({x, y, pressed, action})
+    }).catch(() => {});
+  }
     }).catch(() => {});
   }
 
@@ -1914,6 +2123,14 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         pwrBtn.textContent = 'POWER OFF';
         pwrBtn.style.color = '#ccc';
         ledDot.className = 'led-dot online';
+      }
+
+      // Camera Model Name update
+      if (data.camera_name) {
+        const hdrName = document.getElementById('hdr-model-name');
+        if (hdrName) hdrName.textContent = data.camera_name;
+        const subName = document.getElementById('hdr-sub-name');
+        if (subName) subName.textContent = data.camera_name;
       }
 
       // Recording badge & button state
@@ -2316,14 +2533,111 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     }
   }
 
+  // DSMC2 Camera Selection Modal Functions
+  async function openModelModal() {
+    const modal = document.getElementById('camera-modal');
+    if (modal) {
+      modal.style.display = 'flex';
+      await renderModelCards();
+    }
+  }
+
+  function closeModelModal() {
+    const modal = document.getElementById('camera-modal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function renderModelCards() {
+    try {
+      const res = await fetch('/api/camera/models');
+      const data = await res.json();
+      const container = document.getElementById('camera-model-grid');
+      if (!container) return;
+      container.innerHTML = '';
+
+      data.models.forEach(m => {
+        const card = document.createElement('div');
+        card.className = `cam-card ${m.is_active ? 'active' : ''}`;
+        card.onclick = () => selectCameraModel(m.CAMERA_TYPE);
+        card.innerHTML = `
+          <div>
+            <div class="cam-card-top">
+              <span class="cam-card-name">${m.CAMERA_NAME}</span>
+              <span class="cam-card-id">TAG ${m.CAMERA_TYPE}</span>
+            </div>
+            <div class="cam-card-sensor">${m.SENSOR_NAME}</div>
+            <div class="cam-card-desc" style="margin-top: 8px;">${m.DESCRIPTION}</div>
+          </div>
+          <div>
+            <div class="cam-card-specs" style="margin-bottom: 8px;">
+              <span class="spec-pill">${m.SENSOR_WIDTH}x${m.SENSOR_HEIGHT}</span>
+              <span class="spec-pill">Max ${m.MAX_FPS} FPS</span>
+              <span class="spec-pill">${m.DEFAULT_FORMAT}</span>
+            </div>
+            <div class="cam-card-btn">${m.is_active ? '✓ ACTIVE CAMERA' : 'SELECT & BOOT'}</div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    } catch (e) {
+      console.error('Error rendering model cards:', e);
+    }
+  }
+
+  async function selectCameraModel(modelId) {
+    try {
+      const res = await fetch('/api/camera/select', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model: modelId})
+      });
+      const data = await res.json();
+      if (data.status === 'ok') {
+        localStorage.setItem('dsmc2_model_initialized', 'true');
+        closeModelModal();
+        pollStatus();
+      }
+    } catch (e) {
+      console.error('Error selecting camera model:', e);
+    }
+  }
+
   // Load initial lens catalog and media clips on startup
   loadLensCatalog();
   loadClips();
   setInterval(loadClips, 2000);
 
+  // Auto-prompt camera chooser on initial session if not initialized
+  if (!localStorage.getItem('dsmc2_model_initialized')) {
+    setTimeout(openModelModal, 400);
+  }
+
   // Start telemetry loop
   pollStatus();
 </script>
+
+<!-- DSMC2 Camera Selection Modal -->
+<div id="camera-modal" class="modal-backdrop" style="display: none;">
+  <div class="modal-box">
+    <div class="modal-top">
+      <div style="display: flex; align-items: center;">
+        <span class="dsmc2-badge">DSMC2 BRAIN</span>
+        <h2 style="font-size: 17px; letter-spacing: 1.5px; margin: 0; color: #fff;">SELECT CAMERA SYSTEM</h2>
+      </div>
+      <button class="modal-x-btn" onclick="closeModelModal()">✕</button>
+    </div>
+    <div class="modal-intro">
+      Choose a genuine RED DSMC2 hardware personality and firmware package to boot into the virtual camera studio.
+    </div>
+    <div class="camera-model-grid" id="camera-model-grid">
+      <!-- Populated via renderModelCards() -->
+    </div>
+    <div class="modal-bottom">
+      <div class="modal-foot-note">Firmware assets extracted from stock RED Combo Build v7.4.1.</div>
+      <button class="cam-btn" onclick="closeModelModal()" style="padding: 7px 16px;">Continue with Current</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 """

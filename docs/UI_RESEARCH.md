@@ -173,3 +173,35 @@ Physically situated immediately to the left of the screen viewport inside the RE
 - **Custom Firmware Staging**: Drag-and-drop dropzone accepting `.bin`, `.mem`, `.pkg`, `.zip`, `.tar` firmware mod files, saving them to `firmware_store/custom/` and updating the active firmware card in real time.
 - **Instant Baseline Reset**: One-click restore button reverting the media slot to confirmed working baseline v7.4.1.
 
+---
+
+## 6. Multi-Model DSMC2 Camera Selection & Adaptive Button Typography
+
+### 6.1 Multi-Model Selection Modal & Real-Time Personality Switching
+The Web Virtual Camera Studio features a DSMC2 Camera Selection Modal presented upon initial load or toggled via the header camera pill:
+- **Available Models**:
+  - `SCARLET-W 5K` (`0x16`, DRAGON 5K S35, 5120x2700, 60 FPS)
+  - `RED RAVEN 4.5K` (`0x15`, DRAGON 4.5K S35, 4608x2160, 120 FPS)
+  - `WEAPON 8K VV` (`0x11`, MONSTRO 8K VV, 8192x4320, 60 FPS)
+  - `DSMC2 DRAGON-X 5K` (`0x14`, DRAGON 5K S35, 5120x2700, 96 FPS)
+  - `EPIC-W 8K S35` (`0x17`, HELIUM 8K S35, 8192x4320, 60 FPS)
+- **Dynamic Personality Reconfiguration**:
+  - Dynamic rewriting of `/env` partition variables (`CAMERA_NAME`, `CAMERA_TYPE`, `SENSOR_NAME`, `SENSOR_WIDTH`, `SENSOR_HEIGHT`, `MAX_FPS`).
+  - Automatic synchronization with RCP protocol state (`PARAM_CAMERA_NAME`, `PARAM_FORMAT`, `camera_type`).
+  - Real-time updates to RedUi top HUD banner and firmware slot paths.
+
+### 6.2 Adaptive Button Typography
+To avoid text clipping or awkward overflow on compact DSMC2 menu tiles (such as "Flip/Mirror Scan Direction", "Trigger Pre-Record Now", "Exposure Compensation"):
+- **Multi-Stage Fitting Algorithm**:
+  1. Measures label width using primary 12pt bold font (`FONT_BOLD`).
+  2. If label exceeds button interior width (with 8px padding), tests downscaled 10pt font (`FONT_SM`).
+  3. If still exceeding width, tests 9pt font (`FONT_TINY`).
+  4. If single-line rendering still overflows, splits into two balanced words lines.
+  5. If two-line text exceeds width, applies clean mid/end ellipsis truncation (`...`).
+- Guarantees 100% of labels remain crisp, fully legible, and strictly inside button boundaries.
+
+### 6.3 Touch Event Partitioning & Push-Through Elimination
+- Prevents simulated touch-down cascading into background HUD buttons during mouse drags:
+  - Mouse movement events are strictly flagged with `action: 'move'` and ignored by button trigger logic.
+  - Modal menus and dialogs consume touch down coordinates completely before passing to background layers.
+
