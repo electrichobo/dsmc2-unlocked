@@ -139,6 +139,87 @@ class ScreenCompositor:
         img.save(buf, format="JPEG", quality=quality)
         return buf.getvalue()
 
+    def compose_hdmi_frame(self, mode: Optional[str] = None) -> Image.Image:
+        """
+        Compose dedicated clean or broadcast HDMI output frame.
+        Independent from the RED Touch LCD display (no touch menus or HUD).
+        Modes:
+          - CLEAN: Pristine sensor video feed.
+          - BROADCAST_TALLY: Video feed with tally indicator when recording and SMPTE timecode.
+          - FRAME_GUIDES: Video feed with 2.39:1 aspect ratio safe action frame lines.
+        """
+        if hasattr(self.camera, "iob0") and self.camera.iob0:
+            if mode:
+                self.camera.iob0.set_hdmi_mode(mode)
+            effective_mode = self.camera.iob0.hdmi_mode
+            self.camera.iob0.hdmi_frames_rendered += 1
+        else:
+            effective_mode = mode or "CLEAN"
+
+        state = self.camera.power_state
+        if state == self.camera.POWER_STANDBY:
+            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.text((self.NATIVE_WIDTH // 2 - 140, self.NATIVE_HEIGHT // 2 - 10), "HDMI OUT: NO SIGNAL (STANDBY)", fill=(80, 80, 80), font=HUD_FONT_MED)
+            return img
+        elif state == self.camera.POWER_BOOTING:
+            if self.splash_image:
+                img = self.splash_image.copy()
+            else:
+                img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+            return img
+
+        # Live sensor feed for clean HDMI
+        fb_bytes = self.camera.get_frame()
+        is_blank = (fb_bytes == self._zero_fb_buf)
+        if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
+            img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+        elif self.sensor_feed_image:
+            img = self.sensor_feed_image.copy()
+        elif self.splash_image:
+            img = self.splash_image.copy()
+        else:
+            img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        draw = ImageDraw.Draw(img)
+
+        # Apply Broadcast Overlays according to mode
+        if effective_mode == "BROADCAST_TALLY":
+            is_rec = (self.camera.recorder.record_state == 2)
+            if is_rec:
+                draw.rectangle([(0, 0), (self.NATIVE_WIDTH - 1, self.NATIVE_HEIGHT - 1)], outline=(220, 20, 20), width=4)
+                draw.rectangle([(self.NATIVE_WIDTH - 110, 16), (self.NATIVE_WIDTH - 20, 46)], fill=(200, 20, 20))
+                draw.text((self.NATIVE_WIDTH - 98, 22), "● REC", fill=(255, 255, 255), font=HUD_FONT_MED)
+
+            tc = self.camera.recorder.current_timecode if hasattr(self.camera.recorder, "current_timecode") else "01:23:45:12"
+            tc_w = 140
+            tc_x = (self.NATIVE_WIDTH - tc_w) // 2
+            draw.rectangle([(tc_x, self.NATIVE_HEIGHT - 36), (tc_x + tc_w, self.NATIVE_HEIGHT - 14)], fill=(0, 0, 0))
+            draw.text((tc_x + 12, self.NATIVE_HEIGHT - 32), f"TC {tc}", fill=(255, 255, 255), font=HUD_FONT_MED)
+
+        elif effective_mode == "FRAME_GUIDES":
+            target_h = int(self.NATIVE_WIDTH / 2.39)
+            bar_h = (self.NATIVE_HEIGHT - target_h) // 2
+            draw.rectangle([(0, 0), (self.NATIVE_WIDTH, bar_h)], fill=(0, 0, 0))
+            draw.rectangle([(0, self.NATIVE_HEIGHT - bar_h), (self.NATIVE_WIDTH, self.NATIVE_HEIGHT)], fill=(0, 0, 0))
+            draw.line([(0, bar_h), (self.NATIVE_WIDTH, bar_h)], fill=(255, 255, 255), width=1)
+            draw.line([(0, self.NATIVE_HEIGHT - bar_h), (self.NATIVE_WIDTH, self.NATIVE_HEIGHT - bar_h)], fill=(255, 255, 255), width=1)
+            cx, cy = self.NATIVE_WIDTH // 2, self.NATIVE_HEIGHT // 2
+            draw.line([(cx - 15, cy), (cx + 15, cy)], fill=(200, 200, 200), width=1)
+            draw.line([(cx, cy - 15), (cx, cy + 15)], fill=(200, 200, 200), width=1)
+
+        return img
+
+    def get_hdmi_jpeg_bytes(self, quality: int = 85, mode: Optional[str] = None) -> bytes:
+        """Render HDMI output frame to JPEG byte buffer."""
+        img = self.compose_hdmi_frame(mode)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+
     def _render_standby_screen(self) -> Image.Image:
         img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (6, 6, 6))
         draw = ImageDraw.Draw(img)
@@ -353,11 +434,11 @@ class ScreenCompositor:
 class WebStudio:
     """Manages virtual camera execution, HTTP server, and client dispatch."""
 
-    def __init__(self, workspace_root: str, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, workspace_root: str, host: str = "127.0.0.1", port: int = 8765, camera: Optional[Dsmc2Camera] = None):
         self.workspace_root = os.path.abspath(workspace_root)
         self.host = host
         self.port = port
-        self.camera = Dsmc2Camera(self.workspace_root)
+        self.camera = camera if camera is not None else Dsmc2Camera(self.workspace_root)
         self.compositor = ScreenCompositor(self.camera)
         self.camera.compositor = self.compositor
 
@@ -442,6 +523,9 @@ class WebStudio:
         with self.lock:
             self.camera.toggle_power()
 
+    def get_hdmi_jpeg_bytes(self, quality: int = 85, mode: Optional[str] = None) -> bytes:
+        return self.compositor.get_hdmi_jpeg_bytes(quality=quality, mode=mode)
+
     def stop(self):
         self.running = False
         if self.http_server:
@@ -502,6 +586,43 @@ def create_handler(studio: WebStudio):
                     models = studio.camera.env.list_profiles()
                     current = studio.camera.env.get("CAMERA_TYPE", "0x16")
                     self._send_json({"status": "ok", "current": current, "models": models})
+            elif path == "/api/video/hdmi":
+                with studio.lock:
+                    q = urllib.parse.parse_qs(parsed.query)
+                    mode = q.get("mode", [None])[0]
+                    jpeg_bytes = studio.get_hdmi_jpeg_bytes(mode=mode)
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg_bytes)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(jpeg_bytes)
+            elif path == "/api/video/hdmi/mode":
+                with studio.lock:
+                    mode = studio.camera.iob0.hdmi_mode if hasattr(studio.camera, "iob0") and studio.camera.iob0 else "CLEAN"
+                self._send_json({"status": "ok", "mode": mode})
+            elif path == "/api/audio/wav":
+                with studio.lock:
+                    dur = 0.5
+                    wav_bytes = studio.camera.get_audio_wav(dur)
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(wav_bytes)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(wav_bytes)
+            elif path == "/api/audio/status":
+                with studio.lock:
+                    stat = studio.camera.audio_server.get_status() if hasattr(studio.camera, "audio_server") and studio.camera.audio_server else {}
+                self._send_json({"status": "ok", "audio": stat})
+            elif path == "/api/rcp/automation/presets":
+                with studio.lock:
+                    presets = studio.camera.rcp_script_engine.PRESETS
+                self._send_json({"status": "ok", "presets": presets})
+            elif path == "/api/rcp/multicam/status":
+                with studio.lock:
+                    stat = studio.camera.multicam_network.get_status()
+                self._send_json(stat)
             else:
                 self.send_error(404, "Not Found")
 
@@ -768,6 +889,54 @@ def create_handler(studio: WebStudio):
                     "baseline_name": studio.confirmed_baseline_name
                 })
 
+            elif path == "/api/video/hdmi/mode":
+                mode = str(data.get("mode", "CLEAN"))
+                with studio.lock:
+                    studio.camera.set_hdmi_mode(mode)
+                    curr = studio.camera.iob0.hdmi_mode if hasattr(studio.camera, "iob0") and studio.camera.iob0 else mode
+                self._send_json({"status": "ok", "mode": curr})
+
+            elif path == "/api/audio/control":
+                with studio.lock:
+                    srv = studio.camera.audio_server if hasattr(studio.camera, "audio_server") else None
+                    if srv:
+                        if "preamp_ch" in data and "gain_db" in data:
+                            srv.set_preamp_gain(int(data["preamp_ch"]) - 1, float(data["gain_db"]))
+                        if "headphone_vol" in data:
+                            srv.headphone_volume_pct = max(0, min(100, int(data["headphone_vol"])))
+                        if "test_tone" in data:
+                            srv.set_test_tone(bool(data["test_tone"]), float(data.get("freq_hz", 1000.0)))
+                        stat = srv.get_status()
+                    else:
+                        stat = {}
+                self._send_json({"status": "ok", "audio": stat})
+
+            elif path == "/api/rcp/automation/run":
+                script_data = data.get("script") or data.get("preset") or "RACK_FOCUS"
+                script_name = str(data.get("name", "Web Studio Script"))
+                with studio.lock:
+                    res = studio.camera.execute_rcp_script(script_data, script_name=script_name)
+                self._send_json(res)
+
+            elif path == "/api/rcp/multicam/sync":
+                tc = str(data.get("timecode", "01:00:00:00"))
+                with studio.lock:
+                    res = studio.camera.multicam_network.sync_genlock(timecode=tc)
+                self._send_json({"status": "ok", "sync": res})
+
+            elif path == "/api/rcp/multicam/broadcast":
+                param = str(data.get("param", "iso"))
+                val = str(data.get("value", "800"))
+                with studio.lock:
+                    res = studio.camera.multicam_network.broadcast_parameter(param, val)
+                self._send_json({"status": "ok", "broadcast": res})
+
+            elif path == "/api/rcp/multicam/record":
+                action = str(data.get("action", "START"))
+                with studio.lock:
+                    res = studio.camera.multicam_network.synchronized_record_trigger(action)
+                self._send_json({"status": "ok", "record": res})
+
             else:
                 self.send_error(404, "Unknown API Route")
 
@@ -881,6 +1050,7 @@ def create_handler(studio: WebStudio):
                         "audio_server": cam.audio_server.get_status() if hasattr(cam, "audio_server") and cam.audio_server else None,
                     },
                     "accessories": cam.accessory_bus.get_status() if hasattr(cam, "accessory_bus") and cam.accessory_bus else None,
+                    "multicam": cam.multicam_network.get_status() if hasattr(cam, "multicam_network") and cam.multicam_network else None,
                     "threads": cam.get_threads(),
                     "unknown_mmio_count": len(cam.bus.unknown_mmio)
                 }
@@ -1900,6 +2070,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         <button onclick="sendBtn('NAV DOWN')">▼</button>
         <div></div>
       </div>
+
+      <!-- BROADCAST HDMI & AUDIO MONITORING -->
+      <div class="btn-group" style="flex-direction: column; gap: 4px; justify-content: center;">
+        <button class="cam-btn" style="padding: 5px 8px; font-size: 10px; background: #222;" onclick="openHdmiModal()" title="View external 1080p clean/broadcast feed">
+          🖥️ HDMI Broadcast Monitor
+        </button>
+        <button id="audio-mon-btn" class="cam-btn" style="padding: 5px 8px; font-size: 10px; background: #222;" onclick="toggleAudioMonitor()" title="Monitor 48kHz camera audio via Web Audio API">
+          🎧 Headphone Monitor: OFF
+        </button>
+      </div>
     </div>
   </div>
 
@@ -1907,8 +2087,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   <div class="workbench">
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('serial', this)">Console / Serial</button>
-      <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Parameters</button>
-      <button class="tab-btn" onclick="switchTab('hardware', this)">Hardware I/O & Peripherals</button>
+      <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Automation</button>
+      <button class="tab-btn" onclick="switchTab('hardware', this)">Hardware I/O & Audio</button>
       <button class="tab-btn" onclick="switchTab('lens', this)">Lens & Optics</button>
       <button class="tab-btn" onclick="switchTab('media', this)">Media & Clips</button>
       <button class="tab-btn" onclick="switchTab('threads', this)">ThreadX RTOS</button>
@@ -1933,9 +2113,67 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <div id="console" class="console-box"></div>
     </div>
 
-    <!-- Tab 2: RCP Parameters -->
+    <!-- Tab 2: RCP & Automation -->
     <div id="tab-rcp" class="tab-content">
-      <div style="margin-bottom: 8px; font-size: 12px; color: #aaa;">
+      <!-- Top Grid: Automation & Multi-Cam Studio -->
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+        
+        <!-- Script Runner Box -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-weight: bold; font-size: 12px; color: #ff3333;">RCP Automation Sequence Runner</span>
+            <span id="script-status-badge" style="font-size: 10px; padding: 2px 6px; border-radius: 3px; background: #2a2a2a; color: #aaa;">IDLE</span>
+          </div>
+          <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+            <select id="rcp-preset-select" style="flex: 1; background: #242424; color: #fff; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; font-size: 11px;">
+              <option value="RACK_FOCUS">Rack Focus & Depth Sweep (f/2.8 -> f/8)</option>
+              <option value="RECORD_CYCLE">Production Slate & Record Cycle (ISO 800)</option>
+              <option value="EXPOSURE_BRACKET">Exposure Bracket Sweep (ISO/Shutter)</option>
+              <option value="MULTICAM_SYNC">Multi-Camera Master Broadcast Sync</option>
+            </select>
+            <button class="cam-btn" style="padding: 4px 10px; font-size: 11px; background: #c00;" onclick="runRcpPreset()">Execute</button>
+          </div>
+          <div id="script-summary-text" style="font-size: 11px; color: #888; font-family: monospace; min-height: 20px;">
+            Ready to execute automation script sequence.
+          </div>
+        </div>
+
+        <!-- Multi-Camera Network Box -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-weight: bold; font-size: 12px; color: #00b0ff;">Multi-Camera Studio Network</span>
+            <span id="genlock-badge" style="font-size: 10px; padding: 2px 6px; border-radius: 3px; background: #1a3320; color: #00e676;">GENLOCK: LOCKED</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 10.5px; font-family: monospace; margin-bottom: 8px;">
+            <div style="background: #121212; padding: 4px 6px; border-radius: 3px; border-left: 2px solid #ff3333;">
+              <div style="color: #fff; font-weight: bold;">A-CAM (Master)</div>
+              <div id="multicam-acam-state" style="color: #aaa;">Standby</div>
+            </div>
+            <div style="background: #121212; padding: 4px 6px; border-radius: 3px; border-left: 2px solid #00b0ff;">
+              <div style="color: #fff; font-weight: bold;">B-CAM (Slave)</div>
+              <div id="multicam-bcam-state" style="color: #aaa;">Standby</div>
+            </div>
+            <div style="background: #121212; padding: 4px 6px; border-radius: 3px; border-left: 2px solid #00b0ff;">
+              <div style="color: #fff; font-weight: bold;">C-CAM (Slave)</div>
+              <div id="multicam-ccam-state" style="color: #aaa;">Standby</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button class="cam-btn" style="flex: 1; padding: 3px 6px; font-size: 10px;" onclick="syncMulticamGenlock()">Sync Genlock & TC</button>
+            <button class="cam-btn" style="flex: 1; padding: 3px 6px; font-size: 10px; background: #7a1111;" onclick="triggerMulticamRecord()">Broadcast Rec Trigger</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Execution Trace Log Container (collapsible/visible on run) -->
+      <div id="script-trace-box" style="display: none; background: #111; border: 1px solid #444; border-radius: 4px; padding: 8px; margin-bottom: 10px; max-height: 120px; overflow-y: auto; font-family: monospace; font-size: 10.5px;">
+        <div style="color: #00e676; font-weight: bold; margin-bottom: 4px;">Script Execution Audit Trail:</div>
+        <div id="script-trace-content"></div>
+      </div>
+
+      <!-- Live Parameter Cache Table -->
+      <div style="margin-bottom: 6px; font-size: 12px; color: #aaa;">
         Live RED Command Protocol (RCP) Parameter Cache
       </div>
       <div style="flex: 1; overflow-y: auto;">
@@ -2147,13 +2385,17 @@ STUDIO_HTML = r"""<!DOCTYPE html>
               </div>
             </div>
             <div style="background: #111; padding: 6px 8px; border-radius: 3px; border-left: 2px solid #00e676;">
-              <div style="color: #00e676; font-weight: bold;">RAudioServer: 4-Channel 24-Bit Peak Meters</div>
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #00e676; font-weight: bold;">RAudioServer: 4-Channel 24-Bit Audio</span>
+                <button id="hw-audio-tone-btn" class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="toggleTestTone()">1kHz Cal Tone</button>
+              </div>
               <div style="color: #bbb; margin-top: 2px;">
                 Ch1: <span id="hw-audio-ch1" style="color: #00e676;">-18.5 dBFS</span> &bull; Ch2: <span id="hw-audio-ch2" style="color: #00e676;">-19.2 dBFS</span>
               </div>
               <div style="color: #bbb; margin-top: 2px;">
-                Pre-Amps: <span style="color: #fff;">+18.0 dB (Ch1/2)</span> &bull; Headphone: <span style="color: #fff;">75%</span>
+                Pre-Amps: <span id="hw-audio-preamp" style="color: #fff;">+18.0 dB (Ch1/2)</span> &bull; Headphone: <span id="hw-audio-hp" style="color: #fff;">75%</span>
               </div>
+              <canvas id="audio-scope-canvas" width="280" height="36" style="width: 100%; height: 36px; background: #080808; border: 1px solid #2a2a2a; border-radius: 2px; margin-top: 4px; display: block;"></canvas>
             </div>
           </div>
         </div>
@@ -2597,6 +2839,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       // Render Accessories Telemetry
       if (data.accessories) {
         renderAccessories(data.accessories);
+      }
+
+      // Render Multi-Camera Studio Telemetry
+      if (data.multicam) {
+        renderMulticam(data.multicam);
+      }
+
+      // Render Audio Server Telemetry
+      if (data.coprocessors && data.coprocessors.audio_server) {
+        updateAudioTelemetry(data.coprocessors.audio_server);
       }
 
     } catch (e) {}
@@ -3331,6 +3583,254 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   // Prompt camera chooser on launch before user interaction
   setTimeout(openModelModal, 250);
 
+  // --- Broadcast HDMI Output & Clean Monitor ---
+  let hdmiTimer = null;
+  function openHdmiModal() {
+    const modal = document.getElementById('hdmi-modal');
+    if (modal) {
+      modal.style.display = 'flex';
+      refreshHdmiFrame();
+      if (!hdmiTimer) hdmiTimer = setInterval(refreshHdmiFrame, 350);
+    }
+  }
+
+  function closeHdmiModal() {
+    const modal = document.getElementById('hdmi-modal');
+    if (modal) modal.style.display = 'none';
+    if (hdmiTimer) { clearInterval(hdmiTimer); hdmiTimer = null; }
+  }
+
+  function refreshHdmiFrame() {
+    const img = document.getElementById('hdmi-monitor-img');
+    if (img) img.src = '/api/video/hdmi?t=' + Date.now();
+  }
+
+  async function setHdmiMode(mode) {
+    try {
+      const res = await fetch('/api/video/hdmi/mode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode: mode})
+      });
+      const data = await res.json();
+      ['clean', 'tally', 'guides'].forEach(m => {
+        const btn = document.getElementById('hdmi-btn-' + m);
+        if (btn) btn.style.background = '#222';
+      });
+      const activeBtn = document.getElementById('hdmi-btn-' + (mode.toLowerCase().includes('clean') ? 'clean' : mode.toLowerCase().includes('tally') ? 'tally' : 'guides'));
+      if (activeBtn) activeBtn.style.background = '#0077ff';
+      refreshHdmiFrame();
+    } catch (e) {}
+  }
+
+  // --- Web Audio API Headphone Stream & Oscilloscope ---
+  let audioCtx = null;
+  let isAudioMonitoring = false;
+  let audioTimer = null;
+  let testToneActive = false;
+
+  async function toggleAudioMonitor() {
+    const btn = document.getElementById('audio-mon-btn');
+    if (!isAudioMonitoring) {
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+        }
+        isAudioMonitoring = true;
+        btn.textContent = '🎧 Headphone: ON (48kHz)';
+        btn.style.background = '#1a3a20';
+        btn.style.color = '#00e676';
+        streamAudioLoop();
+      } catch (e) {
+        console.error('Failed to start Web Audio:', e);
+      }
+    } else {
+      isAudioMonitoring = false;
+      if (audioTimer) { clearTimeout(audioTimer); audioTimer = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch(e){} audioCtx = null; }
+      btn.textContent = '🎧 Headphone Monitor: OFF';
+      btn.style.background = '#222';
+      btn.style.color = '#fff';
+    }
+  }
+
+  async function streamAudioLoop() {
+    if (!isAudioMonitoring || !audioCtx) return;
+    try {
+      const resp = await fetch('/api/audio/wav?t=' + Date.now());
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        audioCtx.decodeAudioData(arrayBuf, (audioBuf) => {
+          if (!isAudioMonitoring || !audioCtx) return;
+          const source = audioCtx.createBufferSource();
+          source.buffer = audioBuf;
+          source.connect(audioCtx.destination);
+          source.start();
+          drawAudioWaveform(audioBuf);
+        }, () => {});
+      }
+    } catch (e) {}
+    if (isAudioMonitoring) {
+      audioTimer = setTimeout(streamAudioLoop, 450);
+    }
+  }
+
+  function drawAudioWaveform(audioBuf) {
+    const canvas = document.getElementById('audio-scope-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.fillStyle = '#080808';
+    ctx.fillRect(0, 0, width, height);
+
+    const data = audioBuf.getChannelData(0);
+    const step = Math.ceil(data.length / width);
+    const amp = height / 2;
+
+    ctx.strokeStyle = '#00e676';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, amp);
+
+    for (let i = 0; i < width; i++) {
+      let min = 1.0;
+      let max = -1.0;
+      for (let j = 0; j < step; j++) {
+        const datum = data[(i * step) + j];
+        if (datum < min) min = datum;
+        if (datum > max) max = datum;
+      }
+      ctx.lineTo(i, (1 + min) * amp);
+      ctx.lineTo(i, (1 + max) * amp);
+    }
+    ctx.stroke();
+  }
+
+  async function toggleTestTone() {
+    testToneActive = !testToneActive;
+    const btn = document.getElementById('hw-audio-tone-btn');
+    try {
+      await fetch('/api/audio/control', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({test_tone: testToneActive, freq_hz: 1000})
+      });
+      if (btn) {
+        btn.textContent = testToneActive ? 'Tone: 1kHz ACTIVE' : '1kHz Cal Tone';
+        btn.style.background = testToneActive ? '#ffaa00' : '#222';
+        btn.style.color = testToneActive ? '#000' : '#fff';
+      }
+    } catch (e) {}
+  }
+
+  function updateAudioTelemetry(aud) {
+    if (!aud) return;
+    if (aud.channels && aud.channels.length >= 2) {
+      const ch1 = document.getElementById('hw-audio-ch1');
+      const ch2 = document.getElementById('hw-audio-ch2');
+      if (ch1) {
+        ch1.textContent = `${aud.channels[0].peak_dbfs.toFixed(1)} dBFS`;
+        ch1.style.color = aud.channels[0].clipping ? '#ff3333' : '#00e676';
+      }
+      if (ch2) {
+        ch2.textContent = `${aud.channels[1].peak_dbfs.toFixed(1)} dBFS`;
+        ch2.style.color = aud.channels[1].clipping ? '#ff3333' : '#00e676';
+      }
+    }
+    const hp = document.getElementById('hw-audio-hp');
+    if (hp) hp.textContent = `${aud.headphone_volume_pct}%`;
+  }
+
+  // --- RCP Automation Sequences & Multi-Cam Array ---
+  async function runRcpPreset() {
+    const sel = document.getElementById('rcp-preset-select');
+    const badge = document.getElementById('script-status-badge');
+    const summary = document.getElementById('script-summary-text');
+    const traceBox = document.getElementById('script-trace-box');
+    const traceContent = document.getElementById('script-trace-content');
+
+    if (!sel) return;
+    const presetKey = sel.value;
+    badge.textContent = 'RUNNING';
+    badge.style.background = '#aa5500';
+    badge.style.color = '#fff';
+    summary.textContent = `Executing sequence: ${sel.options[sel.selectedIndex].text}...`;
+
+    try {
+      const res = await fetch('/api/rcp/automation/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({preset: presetKey})
+      });
+      const data = await res.json();
+
+      badge.textContent = data.status;
+      badge.style.background = (data.status === 'PASSED') ? '#1a3320' : '#551111';
+      badge.style.color = (data.status === 'PASSED') ? '#00e676' : '#ff4444';
+      summary.textContent = `${data.script_name}: ${data.total_steps} steps in ${data.duration_ms}ms (Passed: ${data.passed_assertions}, Failed: ${data.failed_assertions})`;
+
+      if (data.trace && data.trace.length > 0) {
+        traceBox.style.display = 'block';
+        let traceHtml = '';
+        data.trace.forEach(t => {
+          const col = (t.status === 'PASSED' || t.status === 'OK') ? '#00e676' : '#ff4444';
+          traceHtml += `<div>[${t.step}] <span style="color:#aaa;">${t.action} ${t.param || ''}</span> -> <strong style="color:${col};">${t.status}</strong> (${t.elapsed_ms}ms): ${t.message}</div>`;
+        });
+        traceContent.innerHTML = traceHtml;
+      }
+      await pollStatus();
+    } catch (e) {
+      badge.textContent = 'ERROR';
+      badge.style.background = '#551111';
+      summary.textContent = `Execution failed: ${e.message}`;
+    }
+  }
+
+  function renderMulticam(mc) {
+    if (!mc || !mc.nodes) return;
+    mc.nodes.forEach(n => {
+      let el = null;
+      if (n.id === 'A-CAM') el = document.getElementById('multicam-acam-state');
+      else if (n.id === 'B-CAM') el = document.getElementById('multicam-bcam-state');
+      else if (n.id === 'C-CAM') el = document.getElementById('multicam-ccam-state');
+      if (el) {
+        const recStr = (n.record_state === 2) ? '● RECORDING' : 'Idle Standby';
+        el.textContent = `${recStr} (${n.timecode || '01:00:00:00'})`;
+        el.style.color = (n.record_state === 2) ? '#ff3333' : '#aaa';
+      }
+    });
+    const gBadge = document.getElementById('genlock-badge');
+    if (gBadge) {
+      gBadge.textContent = `GENLOCK: ${mc.genlock}`;
+      gBadge.style.color = (mc.genlock === 'LOCKED') ? '#00e676' : '#ffaa00';
+    }
+  }
+
+  async function syncMulticamGenlock() {
+    try {
+      await fetch('/api/rcp/multicam/sync', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({timecode: '01:00:00:00'})
+      });
+      await pollStatus();
+    } catch (e) {}
+  }
+
+  async function triggerMulticamRecord() {
+    try {
+      await fetch('/api/rcp/multicam/record', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'START'})
+      });
+      await pollStatus();
+    } catch (e) {}
+  }
+
   // Start telemetry loop
   pollStatus();
 </script>
@@ -3354,6 +3854,31 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <div class="modal-bottom">
       <div class="modal-foot-note">Firmware assets extracted from stock RED Combo Build v7.4.1.</div>
       <button class="cam-btn" onclick="closeModelModal()" style="padding: 7px 16px;">Continue with Current</button>
+    </div>
+  </div>
+</div>
+
+<!-- Broadcast HDMI Output Monitor Modal -->
+<div id="hdmi-modal" class="modal-backdrop" style="display: none;">
+  <div class="modal-box" style="max-width: 860px; width: 90vw;">
+    <div class="modal-top">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="dsmc2-badge" style="background: #0077ff;">HDMI OUT</span>
+        <h2 style="font-size: 16px; letter-spacing: 1px; margin: 0; color: #fff;">EXTERNAL BROADCAST MONITOR (1080p60)</h2>
+      </div>
+      <button class="modal-x-btn" onclick="closeHdmiModal()">✕</button>
+    </div>
+    <div style="padding: 12px; background: #000; display: flex; justify-content: center; align-items: center;">
+      <img id="hdmi-monitor-img" src="/api/video/hdmi" alt="HDMI Output" style="width: 100%; aspect-ratio: 16/9; object-fit: contain; border-radius: 4px;" />
+    </div>
+    <div class="modal-bottom">
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <span style="font-size: 11px; color: #888;">Mode:</span>
+        <button id="hdmi-btn-clean" class="cam-btn" style="padding: 4px 8px; font-size: 11px; background: #0077ff;" onclick="setHdmiMode('CLEAN')">Clean Feed</button>
+        <button id="hdmi-btn-tally" class="cam-btn" style="padding: 4px 8px; font-size: 11px; background: #222;" onclick="setHdmiMode('BROADCAST_TALLY')">Broadcast Tally + TC</button>
+        <button id="hdmi-btn-guides" class="cam-btn" style="padding: 4px 8px; font-size: 11px; background: #222;" onclick="setHdmiMode('FRAME_GUIDES')">2.39:1 Frame Guides</button>
+      </div>
+      <button class="cam-btn" onclick="refreshHdmiFrame()" style="padding: 4px 10px; font-size: 11px;">Refresh Frame</button>
     </div>
   </div>
 </div>

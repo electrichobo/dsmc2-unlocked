@@ -32,6 +32,7 @@ from emulator.storage.vfs import VirtualFileSystem
 from emulator.storage.r3d_recorder import R3dClipRecorder
 from emulator.rcp.protocol import RcpProtocol
 from emulator.rcp.server import RcpServer
+from emulator.rcp.automation import RcpScriptEngine, RcpScriptStep, MultiCameraNetwork
 from emulator.devices.lens_mount import LensMount
 from emulator.core.snapshot import SnapshotManager
 
@@ -59,9 +60,11 @@ class Dsmc2Camera:
         self.vfs = VirtualFileSystem(self.firmware_slot_dir, self.persistent_dir)
         self.env = self.vfs.env
 
-        # 3. RCP Protocol & Server
+        # 3. RCP Protocol, Server, Scripting & Multi-Camera Network
         self.rcp = RcpProtocol(camera=self)
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
+        self.rcp_script_engine = RcpScriptEngine()
+        self.multicam_network = MultiCameraNetwork(self)
 
         # 4. Smart Electronic Lens Mount
         lens_dir = os.path.join(self.firmware_slot_dir, "lens")
@@ -342,6 +345,13 @@ class Dsmc2Camera:
         self.rcp_server.stop()
 
     # Input and Control API
+    @property
+    def brain_model(self) -> str:
+        """Active DSMC2 Camera Model name."""
+        if hasattr(self, "env") and self.env:
+            return self.env.get("CAMERA_NAME", "SCARLET-W 5K")
+        return "SCARLET-W 5K"
+
     def touch(self, x: int, y: int, pressed: bool):
         """Deliver touchscreen event to Atmel maXTouch controller."""
         self.maxtouch.inject_touch(x, y, pressed)
@@ -566,3 +576,45 @@ class Dsmc2Camera:
         if hasattr(self, "accessory_bus") and self.accessory_bus:
             return self.accessory_bus.detach_module(pin_or_name)
         return False
+
+    def execute_rcp_script(self, script_data: Any, script_name: str = "Custom Automation Script") -> Dict[str, Any]:
+        """Execute an RCP script sequence (preset key, list of step dicts, or DSL text)."""
+        if isinstance(script_data, str) and script_data.upper() in self.rcp_script_engine.PRESETS:
+            preset = self.rcp_script_engine.PRESETS[script_data.upper()]
+            script_name = preset["name"]
+            steps = [RcpScriptStep(**s) for s in preset["steps"]]
+        elif isinstance(script_data, list):
+            if all(isinstance(s, str) for s in script_data):
+                steps = self.rcp_script_engine.parse_script_lines(script_data)
+            else:
+                steps = [RcpScriptStep(**s) if isinstance(s, dict) else s for s in script_data]
+        elif isinstance(script_data, str):
+            steps = self.rcp_script_engine.parse_script_lines(script_data.splitlines())
+        else:
+            return {"status": "ERROR", "message": "Invalid script format"}
+
+        return self.rcp_script_engine.execute(
+            steps=steps,
+            camera=self,
+            rcp_protocol=self.rcp,
+            multicam=self.multicam_network,
+            script_name=script_name
+        )
+
+    def set_hdmi_mode(self, mode: str):
+        """Set HDMI output broadcast mode (CLEAN, BROADCAST_TALLY, FRAME_GUIDES)."""
+        if hasattr(self, "iob0") and self.iob0:
+            self.iob0.set_hdmi_mode(mode)
+
+    def get_audio_wav(self, duration_sec: float = 0.5) -> bytes:
+        """Fetch 48kHz stereo WAV audio chunk from TI DSP audio server."""
+        if hasattr(self, "audio_server") and self.audio_server:
+            return self.audio_server.get_wav_bytes(duration_sec)
+        import io, wave
+        out = io.BytesIO()
+        with wave.open(out, "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(b"")
+        return out.getvalue()

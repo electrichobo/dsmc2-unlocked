@@ -51,6 +51,11 @@ class R3dClipRecorder:
         self._worker: Optional[threading.Thread] = None
 
     @property
+    def record_state(self) -> int:
+        """DSMC2 record state: 0 = idle, 2 = recording."""
+        return 2 if self.is_recording else 0
+
+    @property
     def current_reel_id(self) -> str:
         return f"{self.camera_letter}{self.reel_number:03d}"
 

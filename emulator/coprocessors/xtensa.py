@@ -116,6 +116,8 @@ class Iob0Coprocessor(XtensaCore):
         self.hdmi_resolution = (1920, 1080)
         self.hdmi_fps = 60.0
         self.hdmi_hdcp_authenticated = True
+        self.hdmi_mode = "CLEAN"  # Options: "CLEAN", "BROADCAST_TALLY", "FRAME_GUIDES"
+        self.hdmi_frames_rendered = 0
 
         # 3. STACCELERO SPI Accelerometer
         self.accel_x = 0.02
@@ -144,6 +146,12 @@ class Iob0Coprocessor(XtensaCore):
         self.sata_bytes_transferred += frame_size_bytes
         self.step(50)
 
+    def set_hdmi_mode(self, mode: str):
+        """Set HDMI output overlay mode: 'CLEAN', 'BROADCAST_TALLY', or 'FRAME_GUIDES'."""
+        m = mode.strip().upper()
+        if m in ("CLEAN", "BROADCAST_TALLY", "FRAME_GUIDES"):
+            self.hdmi_mode = m
+
     def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
         """Handle C2C storage or display commands."""
         if cmd == 0x10: # Query SATA Status
@@ -166,7 +174,9 @@ class Iob0Coprocessor(XtensaCore):
             "hdmi": {
                 "connected": self.hdmi_connected,
                 "resolution": f"{self.hdmi_resolution[0]}x{self.hdmi_resolution[1]} @ {int(self.hdmi_fps)}Hz",
-                "hdcp": self.hdmi_hdcp_authenticated
+                "hdcp": self.hdmi_hdcp_authenticated,
+                "mode": self.hdmi_mode,
+                "frames_rendered": self.hdmi_frames_rendered
             },
             "accelerometer": {
                 "pitch_deg": pitch,
