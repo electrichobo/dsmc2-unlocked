@@ -28,6 +28,7 @@ class SystemBus:
         self.write_callbacks = []
         self.unknown_reads = {}
         self.unknown_writes = {}
+        self.ram_regions: List[Tuple[int, int]] = []
         self._init_memory_maps()
         self._install_bus_hooks()
 
@@ -48,15 +49,29 @@ class SystemBus:
         """Map standard physical RAM and peripheral address windows."""
         # 512 MB DDR RAM at 0x80000000
         self.mu.mem_map(0x80000000, 512 * 1024 * 1024)
+        self.add_ram_region(0x80000000, 512 * 1024 * 1024)
 
         # OMAP L3/L4 Core and Peripherals (0x48000000 - 0x49100000)
         self.mu.mem_map(0x48000000, 0x01100000)
 
         # GPMC / NAND Window (0x68000000 - 0x70000000)
         self.mu.mem_map(0x68000000, 0x08000000)
+        self.add_ram_region(0x68000000, 0x08000000)
 
-        # OMAP Internal SRAM / Boot ROM window (0x40000000 - 0x40300000)
+        # OMAP Internal SRAM / Boot ROM window (0x40000000 - 0x40400000)
         self.mu.mem_map(0x40000000, 0x00400000)
+        self.add_ram_region(0x40000000, 0x00400000)
+
+    def add_ram_region(self, base_addr: int, size: int):
+        """Register an address range backed by mapped RAM."""
+        self.ram_regions.append((base_addr, size))
+
+    def is_ram(self, address: int) -> bool:
+        """Check if an address is backed by mapped RAM."""
+        for base, size in self.ram_regions:
+            if base <= address < base + size:
+                return True
+        return False
 
     def register_device(self, base_addr: int, size: int, device: Device):
         """Register a peripheral model for an address range."""
@@ -77,19 +92,38 @@ class SystemBus:
             if match is not None:
                 offset, dev = match
                 val = dev.read(offset, size)
+                # Write value to memory so Unicorn instruction receives it
+                if size == 1:
+                    uc.mem_write(address, bytes([val & 0xFF]))
+                elif size == 2:
+                    uc.mem_write(address, struct.pack("<H", val & 0xFFFF))
+                elif size == 4:
+                    uc.mem_write(address, struct.pack("<I", val & 0xFFFFFFFF))
+            elif self.is_ram(address):
+                # Address is backed by mapped RAM: preserve existing RAM contents
+                try:
+                    raw = uc.mem_read(address, size)
+                    if size == 1:
+                        val = raw[0]
+                    elif size == 2:
+                        val = struct.unpack("<H", raw)[0]
+                    elif size == 4:
+                        val = struct.unpack("<I", raw)[0]
+                    else:
+                        val = int.from_bytes(raw, "little")
+                except Exception:
+                    val = 0
             else:
                 self.unknown_reads[address] = self.unknown_reads.get(address, 0) + 1
+                if size == 1:
+                    uc.mem_write(address, bytes([0]))
+                elif size == 2:
+                    uc.mem_write(address, struct.pack("<H", 0))
+                elif size == 4:
+                    uc.mem_write(address, struct.pack("<I", 0))
 
             for cb in self.read_callbacks:
                 cb(pc, address, size, val)
-
-            # Write value to memory so Unicorn instruction receives it
-            if size == 1:
-                uc.mem_write(address, bytes([val & 0xFF]))
-            elif size == 2:
-                uc.mem_write(address, struct.pack("<H", val & 0xFFFF))
-            elif size == 4:
-                uc.mem_write(address, struct.pack("<I", val & 0xFFFFFFFF))
 
         def hook_mem_write(uc, access, address, size, value, user_data):
             pc = self.cpu.pc
@@ -97,7 +131,7 @@ class SystemBus:
             if match is not None:
                 offset, dev = match
                 dev.write(offset, size, value)
-            else:
+            elif not self.is_ram(address):
                 self.unknown_writes[address] = self.unknown_writes.get(address, 0) + 1
 
             for cb in self.write_callbacks:

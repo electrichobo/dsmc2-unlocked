@@ -48,6 +48,7 @@ class OmapI2c(Device):
         self.tx_fifo = deque()
         self.rx_fifo = deque()
         self.current_reg_addr = 0
+        self.force_nack: bool = False
         self.on_transaction_finished: Optional[Callable] = None
 
     @property
@@ -57,7 +58,6 @@ class OmapI2c(Device):
     @i2c_stat.setter
     def i2c_stat(self, val: int):
         self.stat = val
-        self.on_transaction_finished = None
 
     def attach_slave(self, slave: I2cSlave):
         self.slaves[slave.address] = slave
@@ -162,8 +162,8 @@ class OmapI2c(Device):
 
         slave = self.slaves.get(slave_addr)
 
-        if slave is None:
-            # NACK if no slave at target address
+        if slave is None or self.force_nack:
+            # NACK if no slave at target address or forced NACK condition
             self.stat |= 0x02 # NACK
             if self.ie & 0x02 and self.intc:
                 self.intc.assert_irq(self.irq_num)

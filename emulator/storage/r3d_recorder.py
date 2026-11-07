@@ -47,7 +47,7 @@ class R3dClipRecorder:
         self.record_start_tc = "01:00:00:00"
 
         # Lock and worker thread
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._worker: Optional[threading.Thread] = None
 
     @property

@@ -16,7 +16,7 @@ from emulator.devices.intc import OmapIntc
 from emulator.devices.prcm import OmapPrcm
 from emulator.devices.gptimer import OmapGPTimer, TIMER_MAP
 from emulator.devices.uart import OmapUart, UART_MAP
-from emulator.devices.i2c import OmapI2c, I2C_MAP
+from emulator.devices.i2c import OmapI2c, I2C_MAP, I2cSlave
 from emulator.devices.i2c_maxtouch import MaXTouchDevice
 from emulator.devices.i2c_eeprom import EdidEeprom
 from emulator.devices.i2c_pmic import Twl4030Pmic
@@ -144,9 +144,10 @@ class Dsmc2Camera:
             self.bus.register_device(base, 0x1000, ctrl)
 
         # Attach I2C Slaves:
-        # I2C1: Power Management (TWL4030 @ 0x48) & Thermal Monitoring (TMP411 @ 0x4C)
+        # I2C1: Power Management (TWL4030 @ 0x48), Thermal (TMP411 @ 0x4C), LED Driver (0x45)
         self.pmic = Twl4030Pmic(0x48)
         self.thermal = Tmp411Thermal(0x4C)
+        self.i2c[1].attach_slave(I2cSlave(0x45))
         self.i2c[1].attach_slave(self.pmic)
         self.i2c[1].attach_slave(self.thermal)
         self.i2c[1].attach_slave(Twl4030Pmic(0x49))
@@ -186,8 +187,14 @@ class Dsmc2Camera:
         self.gpmc = OmapGpmc(intc=self.intc)
         self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
 
+        # GPMC CS1 (FPGA Board Space @ 0x18000000) and CS2 (FPGA Aperture @ 0x1C000000)
+        self.cpu.uc.mem_map(0x18000000, 0x10000)
+        self.bus.add_ram_region(0x18000000, 0x10000)
+        self.cpu.uc.mem_map(0x1C000000, 0x100000)
+        self.bus.add_ram_region(0x1C000000, 0x100000)
+
         # 10b. System DMA (sDMA Controller @ 0x48056000)
-        self.sdma = OmapSdma(intc=self.intc)
+        self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu)
         self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
 
         # 10c. Multichannel SPI Controllers (McSPI 1..4)
@@ -272,6 +279,8 @@ class Dsmc2Camera:
         self.bus.write(0x81EF7818, 4, 0x00000001)
         self.bus.write(0x81EF7820, 4, 0x0000BA2C)
         self.bus.write(0x81EF7824, 4, 0x80FCEBF6)
+        # Seed default CAMERA_TYPE fallback pointer (0x80FF591C -> 0x0016 Scarlet-W)
+        self.bus.write(0x80FF591C, 2, 0x0016)
 
         # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
         splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
@@ -567,11 +576,19 @@ class Dsmc2Camera:
             # Force next I2C transaction to NACK
             bus_id = kwargs.get("bus", 3)
             if bus_id in self.i2c:
-                self.i2c[bus_id].i2c_stat |= 0x02 # NACK flag
+                self.i2c[bus_id].force_nack = True
+                self.i2c[bus_id].stat |= 0x02 # NACK flag
         elif fault_type == "corrupt_env":
-            corrupt_path = os.path.join(self.vfs.env_dir, "CAMERA_TYPE")
-            with open(corrupt_path, "wb") as f:
-                f.write(b"\xFF\xFF\xFF\xFF")
+            # Corrupt active environment and persistent storage backing file
+            self.env.set("CAMERA_TYPE", "CORRUPTED_0xFF")
+            if hasattr(self, "vfs") and self.vfs:
+                env_file = self.vfs.mounts.get("/env")
+                if env_file:
+                    try:
+                        with open(env_file, "wb") as f:
+                            f.write(b"CORRUPT_ENV_DATA\xFF\xFF\xFF\xFF")
+                    except Exception:
+                        pass
         elif fault_type == "watchdog_reset":
             self.cpu.pc = 0x80829F2C
             self.cpu.sp = 0x881D2690
@@ -595,8 +612,7 @@ class Dsmc2Camera:
         if os.path.exists(new_slot_dir):
             self.firmware_slot_dir = new_slot_dir
             if hasattr(self, "vfs") and self.vfs:
-                self.vfs.mounts["/image1"] = new_slot_dir
-                self.vfs.mounts["/image2"] = new_slot_dir
+                self.vfs.firmware_slot_dir = new_slot_dir
 
             # Cleanly re-initialize SoC hardware before booting new model's firmware
             self._init_hardware()

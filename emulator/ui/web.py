@@ -15,6 +15,7 @@ import time
 import socket
 import zlib
 import urllib.parse
+import re
 import threading
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -627,6 +628,11 @@ def create_handler(studio: WebStudio):
                 self.send_error(404, "Not Found")
 
         def do_POST(self):
+            content_type = self.headers.get("Content-Type", "")
+            if not content_type.startswith("application/json"):
+                self.send_error(415, "Unsupported Media Type: application/json required")
+                return
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             length = int(self.headers.get("Content-Length", 0))
@@ -679,17 +685,34 @@ def create_handler(studio: WebStudio):
 
             elif path == "/api/snapshot/save":
                 name = str(data.get("name", f"snapshot_{int(time.time())}.dsmc2"))
+                if not re.match(r"^[A-Za-z0-9_.-]+$", name):
+                    self._send_json({"status": "error", "message": "Invalid snapshot filename"}, status=400)
+                    return
                 snap_dir = os.path.join(studio.workspace_root, "snapshots")
                 os.makedirs(snap_dir, exist_ok=True)
                 snap_path = os.path.join(snap_dir, name)
+                real_snap = os.path.realpath(snap_path)
+                real_snap_dir = os.path.realpath(snap_dir)
+                if not (real_snap == real_snap_dir or real_snap.startswith(real_snap_dir + os.sep)):
+                    self._send_json({"status": "error", "message": "Path traversal detected"}, status=400)
+                    return
                 with studio.lock:
                     from emulator.core.snapshot import SnapshotManager
-                    SnapshotManager.save(studio.camera, snap_path, desc=f"Web snapshot {name}")
+                    SnapshotManager.save(studio.camera, snap_path, description=f"Web snapshot {name}")
                 self._send_json({"status": "ok", "file": snap_path})
 
             elif path == "/api/snapshot/restore":
                 file_name = str(data.get("name", ""))
-                snap_path = os.path.join(studio.workspace_root, "snapshots", file_name)
+                if not re.match(r"^[A-Za-z0-9_.-]+$", file_name):
+                    self._send_json({"status": "error", "message": "Invalid snapshot filename"}, status=400)
+                    return
+                snap_dir = os.path.join(studio.workspace_root, "snapshots")
+                snap_path = os.path.join(snap_dir, file_name)
+                real_snap = os.path.realpath(snap_path)
+                real_snap_dir = os.path.realpath(snap_dir)
+                if not (real_snap == real_snap_dir or real_snap.startswith(real_snap_dir + os.sep)):
+                    self._send_json({"status": "error", "message": "Path traversal detected"}, status=400)
+                    return
                 success = False
                 if os.path.exists(snap_path):
                     with studio.lock:
@@ -945,7 +968,6 @@ def create_handler(studio: WebStudio):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
 
@@ -956,7 +978,6 @@ def create_handler(studio: WebStudio):
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(jpeg_data)))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(jpeg_data)
 

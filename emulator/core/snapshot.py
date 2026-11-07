@@ -63,12 +63,11 @@ class SnapshotManager:
         for reg_name, reg_id in cls.REG_MAP.items():
             metadata["registers"][reg_name] = camera.cpu.uc.reg_read(reg_id)
 
-        # Dump memory: Save DDR and SRAM contents
-        # For efficiency, we save SRAM (64KB) and active DDR regions
-        sram_bytes = camera.cpu.uc.mem_read(0x40000000, 0x10000)
-        # DDR 512MB: Read 16MB of active program and 16MB of stack/data
-        ddr_prog_bytes = camera.cpu.uc.mem_read(0x80000000, 0x01000000) # 16MB
-        ddr_data_bytes = camera.cpu.uc.mem_read(0x88000000, 0x01000000) # 16MB stack/bss
+        # Dump memory: Save full mapped SRAM (4MB) and complete 512MB DDR RAM space.
+        # This guarantees ThreadX TCBs (0x8149D494, 0x827109B0), scheduler exec pointer
+        # (0x8149CE60), BSS, framebuffer, and all RTOS stacks are completely preserved.
+        sram_bytes = camera.cpu.uc.mem_read(0x40000000, 0x00400000) # 4MB (incl. on-chip SRAM at 0x40200000)
+        ddr_bytes = camera.cpu.uc.mem_read(0x80000000, 512 * 1024 * 1024) # Full 512MB DDR window
 
         meta_json = json.dumps(metadata).encode("utf-8")
         meta_len = len(meta_json)
@@ -81,10 +80,8 @@ class SnapshotManager:
             # Write memory blocks
             f.write(struct.pack("<II", 0x40000000, len(sram_bytes)))
             f.write(sram_bytes)
-            f.write(struct.pack("<II", 0x80000000, len(ddr_prog_bytes)))
-            f.write(ddr_prog_bytes)
-            f.write(struct.pack("<II", 0x88000000, len(ddr_data_bytes)))
-            f.write(ddr_data_bytes)
+            f.write(struct.pack("<II", 0x80000000, len(ddr_bytes)))
+            f.write(ddr_bytes)
 
     @classmethod
     def restore(cls, camera, filepath: str) -> Dict[str, Any]:

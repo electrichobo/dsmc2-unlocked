@@ -102,6 +102,8 @@ class OmapGpmc(Device):
             for i in range(size):
                 if self.nand_buffer:
                     b = self.nand_buffer.popleft()
+                elif self.nand_cmd in (0x00, 0x30, 0x23):
+                    b = 0xFF # Blank unprogrammed NAND flash reads 0xFF
                 else:
                     b = 0x00
                 val |= (b << (i * 8))
@@ -197,8 +199,8 @@ class OmapGpmc(Device):
             self.nand_buffer.clear()
         elif cmd in (0x00, 0x30, 0x23): # Read Setup / Confirm / Random Read
             if not self.nand_buffer:
-                # Supply 2048 bytes of flash content (default blank 0xFF)
-                self.nand_buffer.extend([0xFF] * 2048)
+                # Supply page + spare bytes (2048 data + 64 spare = 2112 bytes, blank 0xFF)
+                self.nand_buffer.extend([0xFF] * 2112)
         elif cmd in (0x60, 0xD0, 0x2A): # Block Erase Setup / Confirm
             self.nand_buffer.clear()
         elif cmd in (0x80, 0x10): # Page Program Setup / Confirm

@@ -116,6 +116,11 @@ class MaXTouchDevice(I2cSlave):
             self.irq_callback()
 
     def read(self, reg_addr: int, length: int) -> bytes:
+        # TWL4030 RTC/Power subsystem register handling (shared address 0x4B on physical sub-bus)
+        # STS_HW_CONDITIONS (0x3A): bit 5 WDT_RST = 0 indicates normal power-on (not watchdog timeout)
+        if reg_addr in (0x44, 0x29, 0x2A, 0x3A, 0x3B, 0x3F, 0x45, 0x80) or (0x1C <= reg_addr <= 0x22):
+            return self.pmic_fallback.read(reg_addr, length)
+
         # If reading T5 Message Processor buffer (0x0030)
         if 0x0030 <= reg_addr < 0x0040:
             if self.message_queue:
@@ -125,10 +130,6 @@ class MaXTouchDevice(I2cSlave):
                     return msg + b"\xFF" * (length - len(msg))
                 return msg[:length]
             return b"\xFF" * length # 0xFF indicates no more messages in queue
-
-        # TWL4030 RTC/Power subsystem register handling
-        if reg_addr in (0x44, 0x29, 0x2A, 0x3B, 0x3F, 0x45, 0x80) or (0x1C <= reg_addr <= 0x22):
-            return self.pmic_fallback.read(reg_addr, length)
 
         # Standard register map read
         end = min(reg_addr + length, len(self.reg_map))

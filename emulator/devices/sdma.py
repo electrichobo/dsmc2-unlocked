@@ -37,8 +37,9 @@ class OmapSdma(Device):
     CHANNEL_STRIDE = 0x60
     CHANNEL_BASE = 0x80
 
-    def __init__(self, intc=None):
+    def __init__(self, intc=None, cpu=None):
         self.intc = intc
+        self.cpu = cpu
         self.revision = 0x00000040  # OMAP3 sDMA revision 4.0
         self.sysstatus = 0x00000001 # bit 0: RESETDONE = 1
         self.ocp_sysconfig = 0x00000015 # AUTOIDLE=1, SIDLEMODE=smart, MIDLEMODE=smart
@@ -111,6 +112,19 @@ class OmapSdma(Device):
                     self.channels[ch_num][reg_offset] = val
                     if val & 0x80: # Channel Enable
                         # Complete transfer instantly for NAND / memory DMA
+                        if self.cpu and hasattr(self.cpu, "mu"):
+                            cdsa = self.channels[ch_num].get(0x20, 0) # DMA4_CDSA
+                            cen = self.channels[ch_num].get(0x14, 0) & 0xFFFF # DMA4_CEN
+                            cfn = self.channels[ch_num].get(0x18, 0) & 0xFFFF # DMA4_CFN
+                            csdp = self.channels[ch_num].get(0x10, 0) # DMA4_CSDP
+                            elem_size = 1 << (csdp & 3)
+                            total_bytes = (cen if cen else 1) * (cfn if cfn else 1) * elem_size
+                            if total_bytes > 0 and 0x40000000 <= cdsa < 0x90000000:
+                                try:
+                                    self.cpu.mu.mem_write(cdsa, b"\xFF" * min(total_bytes, 8192))
+                                except Exception:
+                                    pass
+
                         # Set CSR bit 5 (BLOCK_DONE = 0x20)
                         self.channels[ch_num][0x0C] = (self.channels[ch_num].get(0x0C, 0) | 0x20) & ~0x80
                         # Assert IRQ on Line 3 (IRQ 15)

@@ -31,6 +31,7 @@ class Twl4030Pmic(I2cSlave):
     REG_RTC_WEEK = 0x22          # Real-Time Clock BCD weekday
     REG_RTC_CTRL = 0x29          # Real-Time Clock control
     REG_RTC_STATUS = 0x2A        # Real-Time Clock status (bit 7: RUN = 1)
+    REG_STS_HW_CONDITIONS = 0x3A # Hardware reset conditions (bit 5: WDT_RST = 0 on normal boot)
     REG_CHARGER_CTRL = 0x3B      # Charger control register
     REG_CFG_BOOT = 0x3F          # Boot configuration register
 
@@ -51,6 +52,7 @@ class Twl4030Pmic(I2cSlave):
         self.registers[self.REG_POWER_STATUS] = 0x1F # VDD1, VDD2, VPLL, VAUX all active
         self.registers[self.REG_PBR_STATUS] = 0x00
         self.registers[self.REG_PROTECT_KEY] = 0x02  # Default Key 1 unlocked status
+        self.registers[self.REG_STS_HW_CONDITIONS] = 0x00 # 0 = Normal power-up (no watchdog reset)
         self.registers[self.REG_CHARGER_CTRL] = 0x0A
         self.registers[self.REG_CFG_BOOT] = 0x00
 

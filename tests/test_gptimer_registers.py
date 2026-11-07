@@ -59,30 +59,32 @@ def test_gptimer2_register_layout():
 
 
 def test_gptimer1_register_layout():
-    """Verify Timer 1 (WKUP) register offsets matching TI OMAP3 TRM."""
+    """Verify Timer 1 uses authentic standard OMAP3 TRM register offsets (TISR 0x18, TIER 0x1C, TCRR 0x28, TLDR 0x2C)."""
     intc = OmapIntc()
     timer1 = OmapGPTimer(timer_id=1, irq_num=37, intc=intc)
 
-    # In Timer 1, TIER is at 0x18, TISR is at 0x28, TCRR is at 0x3C, TLDR is at 0x40
-    timer1.write(0x18, 4, 0x02) # TIER
-    assert timer1.read(0x18, 4) == 0x02
+    # TIER at 0x1C (enable overflow interrupt bit 1)
+    timer1.write(0x1C, 4, 0x02)
+    assert timer1.read(0x1C, 4) == 0x02
 
-    timer1.write(0x40, 4, 0xFFFFFF00) # TLDR
-    assert timer1.read(0x40, 4) == 0xFFFFFF00
-    assert timer1.read(0x3C, 4) == 0xFFFFFF00 # TCRR updated
+    # TLDR at 0x2C (reload value)
+    timer1.write(0x2C, 4, 0xFFFFFF00)
+    assert timer1.read(0x2C, 4) == 0xFFFFFF00
+    assert timer1.read(0x28, 4) == 0xFFFFFF00 # TCRR updated
 
-    timer1.write(0x3C, 4, 0xFFFFFFFE) # Explicit TCRR write
-    assert timer1.read(0x3C, 4) == 0xFFFFFFFE
+    # TCRR at 0x28 (Counter write)
+    timer1.write(0x28, 4, 0xFFFFFFFE)
+    assert timer1.read(0x28, 4) == 0xFFFFFFFE
 
     # Start timer
     timer1.write(0x24, 4, 0x03)
     intc.write(0xA8, 4, 1 << 5) # MIR_CLEAR1 IRQ 37
 
     timer1.tick(2) # wraps, reloads, flags OVF
-    assert timer1.read(0x28, 4) & 0x02 # TISR at 0x28
+    assert timer1.read(0x18, 4) & 0x02 # TISR at 0x18
     assert intc.get_active_irq() == 37
 
-    # Clear TISR at 0x28
-    timer1.write(0x28, 4, 0x02)
-    assert timer1.read(0x28, 4) == 0
+    # Clear TISR at 0x18 (write-1-to-clear)
+    timer1.write(0x18, 4, 0x02)
+    assert timer1.read(0x18, 4) == 0
     assert intc.has_pending_irq() is False
