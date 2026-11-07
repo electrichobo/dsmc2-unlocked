@@ -1,4 +1,4 @@
-# RED DSMC2 Emulator Fidelity Matrix
+# DSMC2 Virtual Brain ? Fidelity Matrix
 
 Every component, peripheral model, and test result in this project explicitly declares its fidelity level according to the authoritative project directive.
 

@@ -1,4 +1,4 @@
-# RED DSMC2 Full-System Emulator
+# DSMC2 Virtual Brain
 ## Antigravity Master Project Directive | Version 1.0 | 2026-11-06
 
 > **Mission:** Build the most faithful practicable *virtual RED DSMC2 camera brain*, executing genuine user-supplied firmware and displaying a firmware-driven RED interface, so firmware developers can test modifications without putting physical cameras at risk.

@@ -1,4 +1,4 @@
-# RED DSMC2 Full-System Emulator Architecture
+# DSMC2 Virtual Brain Architecture
 
 This document describes the system architecture, memory map, peripheral models, execution loop, and integration model for the virtual RED DSMC2 camera emulator.
 

@@ -1,4 +1,4 @@
-# RED DSMC2 Automated Testing and Regression Report
+# DSMC2 Virtual Brain ? Automated Testing and Regression Report
 
 This document outlines the testing strategy, test suite structure, execution commands, and verified results for the RED DSMC2 full-system emulator.
 

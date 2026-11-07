@@ -1,4 +1,4 @@
-# RED DSMC2 Full-System Emulator — Executive Status Report
+# DSMC2 Virtual Brain ? Executive Status Report
 
 **Report Date**: 2026-11-06  
 **Repository Branch**: `master` (Local Git commit + working tree)  

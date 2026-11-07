@@ -1,4 +1,4 @@
-# RED DSMC2 Firmware Execution and Boot Trace
+# DSMC2 Virtual Brain ? Firmware Execution and Boot Trace
 
 This document details the chronological execution trace of the genuine user-supplied RED DSMC2 firmware binary (`dsmc_program.mem`, SHA-256: `2bfa1c5211910a30b656ee197e70498a4d7d3c52a0a2df3d85d774a1cb27f88e`) in the virtual emulator environment.
 

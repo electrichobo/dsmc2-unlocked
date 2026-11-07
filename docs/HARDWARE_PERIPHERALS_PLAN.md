@@ -1,4 +1,4 @@
-# RED DSMC2 Hardware Peripherals, Coprocessor ASICs & I2C Subsystems Emulation Plan
+# DSMC2 Virtual Brain ? Hardware Peripherals & Coprocessor Architecture Plan
 
 This document establishes the authoritative technical roadmap and architectural specification for expanding hardware peripheral emulation on the RED DSMC2 platform, covering the Texas Instruments OMAP3630/DM3725 on-chip peripherals, Tensilica Xtensa coprocessor ASICs/FPGAs (IOB0, IOB1, ISP1, ISP2), the TI TMS320C64x+ DSP, and the multi-bus I2C / 1-Wire / Accessory networking topology.
 

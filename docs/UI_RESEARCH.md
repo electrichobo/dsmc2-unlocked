@@ -1,4 +1,4 @@
-# RED DSMC2 UI, Display, and Touchscreen Pipeline Research
+# DSMC2 Virtual Brain ? UI, Display, and Touchscreen Pipeline Research
 
 This document analyzes the display hardware, rendering stack, touch input digitizer, EDID handshaking, and graphical overlays used by RED DSMC2 cameras.
 

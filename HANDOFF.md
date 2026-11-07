@@ -1,4 +1,4 @@
-# RED DSMC2 Full-System Emulator — Resumption & Handoff Guide
+# DSMC2 Virtual Brain — Resumption & Handoff Guide
 
 This document provides exact commands and orientation for resuming development, running tests, launching the virtual camera, or performing regression checks.
 
