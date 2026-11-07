@@ -224,8 +224,13 @@ class Dsmc2Camera:
             # Check if exception is benign or stop
             pass
 
-        # Tick hardware timer (GPTimer11 is 100Hz / 1000Hz system tick)
-        self.timers[11].tick(steps=100)
+        # Tick active hardware timers (Timer 2 is ThreadX system tick at 1000Hz)
+        for tmr in self.timers.values():
+            if tmr.tclr & 0x01: # Running
+                if tmr.timer_id == 2:
+                    tmr.tick(steps=32)
+                else:
+                    tmr.tick(steps=100)
 
     # Upper bound on wall-clock time for one interactive CPU slice (50ms max).
     SLICE_TIMEOUT_US = 50_000

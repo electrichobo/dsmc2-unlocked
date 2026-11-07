@@ -43,10 +43,17 @@ class OmapIntc(Device):
 
     def _evaluate_irqs(self):
         """Find highest priority pending unmasked IRQ."""
-        if self.active_irq is None:
-            self.active_irq = self._find_next_irq()
-            if self.active_irq is not None and self.on_irq_asserted:
-                self.on_irq_asserted()
+        next_irq = self._find_next_irq()
+        if self.active_irq is not None:
+            bank = self.active_irq // 32
+            bit = 1 << (self.active_irq % 32)
+            if (self.itr[bank] & ~self.mir[bank] & bit) == 0:
+                self.active_irq = next_irq
+        else:
+            self.active_irq = next_irq
+
+        if self.active_irq is not None and self.on_irq_asserted:
+            self.on_irq_asserted()
 
     def _find_next_irq(self) -> Optional[int]:
         for bank in range(3):
@@ -57,7 +64,12 @@ class OmapIntc(Device):
         return None
 
     def has_pending_irq(self) -> bool:
-        return self._find_next_irq() is not None or self.active_irq is not None
+        if self.active_irq is not None:
+            bank = self.active_irq // 32
+            bit = 1 << (self.active_irq % 32)
+            if (self.itr[bank] & ~self.mir[bank] & bit) == 0:
+                self.active_irq = self._find_next_irq()
+        return self.active_irq is not None or self._find_next_irq() is not None
 
     def get_active_irq(self) -> Optional[int]:
         if self.active_irq is None:
@@ -76,20 +88,30 @@ class OmapIntc(Device):
             return 0x7F
         elif offset == 0x48: # INTC_CONTROL
             return 0
-        # Pending registers: PENDING_IRQ0 (0x98), PENDING_IRQ1 (0xA8), PENDING_IRQ2 (0xB8)
-        elif offset == 0x98:
-            return self.itr[0] & ~self.mir[0]
-        elif offset == 0xA8:
-            return self.itr[1] & ~self.mir[1]
-        elif offset == 0xB8:
-            return self.itr[2] & ~self.mir[2]
-        # Mask registers: MIR0 (0x84), MIR1 (0x94), MIR2 (0xA4)
+        # Raw status registers: ITR0 (0x80), ITR1 (0xA0), ITR2 (0xC0)
+        elif offset == 0x80:
+            return self.itr[0]
+        elif offset == 0xA0:
+            return self.itr[1]
+        elif offset == 0xC0:
+            return self.itr[2]
+        # Mask registers: MIR0 (0x84), MIR1 (0xA4), MIR2 (0xC4)
         elif offset == 0x84:
             return self.mir[0]
-        elif offset == 0x94:
-            return self.mir[1]
         elif offset == 0xA4:
+            return self.mir[1]
+        elif offset == 0xC4:
             return self.mir[2]
+        # Pending registers: PENDING_IRQ0 (0x98), PENDING_IRQ1 (0xB8), PENDING_IRQ2 (0xD8)
+        elif offset == 0x98:
+            return self.itr[0] & ~self.mir[0]
+        elif offset == 0xB8:
+            return self.itr[1] & ~self.mir[1]
+        elif offset == 0xD8:
+            return self.itr[2] & ~self.mir[2]
+        # Pending FIQ registers: PENDING_FIQ0 (0x9C), PENDING_FIQ1 (0xBC), PENDING_FIQ2 (0xDC)
+        elif offset == 0x9C or offset == 0xBC or offset == 0xDC:
+            return 0
         elif 0x100 <= offset < 0x280: # ILR registers
             idx = (offset - 0x100) // 4
             return self.ilr[idx] if idx < 96 else 0
@@ -105,34 +127,55 @@ class OmapIntc(Device):
                     # Deassert pulse if it was an edge interrupt
                     self.active_irq = None
                 self._evaluate_irqs()
-        # MIR clear registers (write 1 to unmask): 0x88, 0x98, 0xA8
-        elif offset == 0x88:
-            self.mir[0] &= ~value
-            self._evaluate_irqs()
-        elif offset == 0x98:
-            self.mir[1] &= ~value
-            self._evaluate_irqs()
-        elif offset == 0xA8:
-            self.mir[2] &= ~value
-            self._evaluate_irqs()
-        # MIR set registers (write 1 to mask): 0x8C, 0x9C, 0xAC
-        elif offset == 0x8C:
-            self.mir[0] |= value
-            self._evaluate_irqs()
-        elif offset == 0x9C:
-            self.mir[1] |= value
-            self._evaluate_irqs()
-        elif offset == 0xAC:
-            self.mir[2] |= value
-            self._evaluate_irqs()
+        # Direct MIR writes: MIR0 (0x84), MIR1 (0xA4), MIR2 (0xC4)
         elif offset == 0x84:
             self.mir[0] = value
             self._evaluate_irqs()
-        elif offset == 0x94:
+        elif offset == 0xA4:
             self.mir[1] = value
             self._evaluate_irqs()
-        elif offset == 0xA4:
+        elif offset == 0xC4:
             self.mir[2] = value
+            self._evaluate_irqs()
+        # MIR clear registers (write 1 to unmask): MIR_CLEAR0 (0x88), MIR_CLEAR1 (0xA8), MIR_CLEAR2 (0xC8)
+        elif offset == 0x88:
+            self.mir[0] &= ~value
+            self._evaluate_irqs()
+        elif offset == 0xA8:
+            self.mir[1] &= ~value
+            self._evaluate_irqs()
+        elif offset == 0xC8:
+            self.mir[2] &= ~value
+            self._evaluate_irqs()
+        # MIR set registers (write 1 to mask): MIR_SET0 (0x8C), MIR_SET1 (0xAC), MIR_SET2 (0xCC)
+        elif offset == 0x8C:
+            self.mir[0] |= value
+            self._evaluate_irqs()
+        elif offset == 0xAC:
+            self.mir[1] |= value
+            self._evaluate_irqs()
+        elif offset == 0xCC:
+            self.mir[2] |= value
+            self._evaluate_irqs()
+        # Software interrupt set (write 1 to assert): ISR_SET0 (0x90), ISR_SET1 (0xB0), ISR_SET2 (0xD0)
+        elif offset == 0x90:
+            self.itr[0] |= value
+            self._evaluate_irqs()
+        elif offset == 0xB0:
+            self.itr[1] |= value
+            self._evaluate_irqs()
+        elif offset == 0xD0:
+            self.itr[2] |= value
+            self._evaluate_irqs()
+        # Software interrupt clear: ISR_CLEAR0 (0x94), ISR_CLEAR1 (0xB4), ISR_CLEAR2 (0xD4)
+        elif offset == 0x94:
+            self.itr[0] &= ~value
+            self._evaluate_irqs()
+        elif offset == 0xB4:
+            self.itr[1] &= ~value
+            self._evaluate_irqs()
+        elif offset == 0xD4:
+            self.itr[2] &= ~value
             self._evaluate_irqs()
         elif 0x100 <= offset < 0x280:
             idx = (offset - 0x100) // 4
