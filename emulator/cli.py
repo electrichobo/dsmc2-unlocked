@@ -1,5 +1,5 @@
 """
-RED DSMC2 Emulator Command Line Interface (CLI).
+DSMC2 Virtual Brain Command Line Interface (CLI - dsmc2-vbrain).
 Provides scriptable commands for booting, running, inspecting, snapshotting, and testing.
 """
 
@@ -199,8 +199,8 @@ def cmd_test(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="dsmc2",
-        description="RED DSMC2 Full-System Virtual Camera & Engineering Workbench"
+        prog="dsmc2-vbrain",
+        description="DSMC2 Virtual Brain ? Virtual Camera & Engineering Workbench"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

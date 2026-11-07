@@ -1,5 +1,5 @@
 """
-RED DSMC2 Web-Based Virtual Camera Studio.
+DSMC2 Virtual Brain Web Studio.
 Provides a modern, freeze-proof browser interface running on a dedicated local port (default: 8765).
 Includes:
 - Authentic 1024x576 RED Touch 7.0 LCD frame streaming (MJPEG)
@@ -1081,7 +1081,7 @@ def create_handler(studio: WebStudio):
 
 
 # ---------------------------------------------------------------------------
-# Authentic RED DSMC2 Virtual Camera Studio Web Frontend
+# Authentic DSMC2 Virtual Brain Web Studio Frontend
 # Single-page application with zero external dependencies (pure HTML5/CSS3/JS)
 # ---------------------------------------------------------------------------
 STUDIO_HTML = r"""<!DOCTYPE html>
@@ -1089,7 +1089,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RED DSMC2 Virtual Camera Studio — Scarlet-W 5K</title>
+<title>DSMC2 Virtual Brain — Scarlet-W 5K</title>
 <style>
   :root {
     --bg-main: #121212;
@@ -1920,7 +1920,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   <div class="brand">
     <div class="red-logo">RED</div>
     <div>
-      <div class="brand-title">DSMC2 VIRTUAL CAMERA STUDIO</div>
+      <div class="brand-title">DSMC2 VIRTUAL BRAIN</div>
       <div class="brand-sub"><span id="hdr-sub-name">SCARLET-W 5K</span> • FIRMWARE v7.4.1 • CORTEX-A8 @ 1.0 GHz</div>
     </div>
   </div>
@@ -3913,7 +3913,7 @@ def launch_web_studio(workspace_root: str, host: str = "127.0.0.1", port: int = 
 
     url = f"http://{host}:{free_port}/"
     print("\n" + "=" * 70, flush=True)
-    print(f"  RED DSMC2 VIRTUAL CAMERA STUDIO ONLINE", flush=True)
+    print(f"  DSMC2 VIRTUAL BRAIN ONLINE", flush=True)
     print(f"  URL: {url}", flush=True)
     print(f"  Platform: Standard Library Web Studio (Port {free_port})", flush=True)
     print(f"  Firmware: RED SCARLET-W 5K (v7.4.1)", flush=True)
@@ -3929,7 +3929,7 @@ def launch_web_studio(workspace_root: str, host: str = "127.0.0.1", port: int = 
     try:
         studio.http_server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[*] Stopping Virtual Camera Studio...", flush=True)
+        print("\n[*] Stopping DSMC2 Virtual Brain Web Studio...", flush=True)
     finally:
         studio.stop()
 

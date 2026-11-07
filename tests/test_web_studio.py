@@ -1,5 +1,5 @@
 """
-Unit and integration tests for RED DSMC2 Web-Based Virtual Camera Studio.
+Unit and integration tests for DSMC2 Virtual Brain Web Studio.
 """
 
 import json
@@ -38,7 +38,7 @@ def test_web_studio_serves_html(web_server):
     resp = urllib.request.urlopen(url)
     assert resp.status == 200
     html = resp.read().decode("utf-8")
-    assert "DSMC2 VIRTUAL CAMERA STUDIO" in html
+    assert "DSMC2 VIRTUAL BRAIN" in html
     assert "RED TOUCH 7.0 LCD MONITOR" in html
     assert "touchCanvas" in html
 

@@ -24,7 +24,7 @@ class Dsmc2DesktopApp:
 
         # Initialize root window
         self.root = tk.Tk()
-        self.root.title("RED DSMC2 Full-System Emulator — Virtual Camera & Engineering Workbench")
+        self.root.title("DSMC2 Virtual Brain — Virtual Camera & Engineering Workbench")
         self.root.geometry("1400x900")
         self.root.minsize(1100, 750)
         self.root.configure(bg="#1E1E1E")
