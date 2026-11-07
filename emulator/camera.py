@@ -143,11 +143,14 @@ class Dsmc2Camera:
         self.olpf = OlpfEeprom(0x54)
         self.i2c[2].attach_slave(self.olpf)
 
-        # I2C3: Atmel maXTouch touch controller (0x4B) and EDID EEPROM (0x50)
+        # I2C3: Atmel maXTouch touch controller (0x4B), EDID EEPROM (0x50), and PMIC sub-bus
         self.maxtouch = MaXTouchDevice(0x4B, irq_callback=lambda: self.intc.assert_irq(58))
         self.edid = EdidEeprom(0x50)
         self.i2c[3].attach_slave(self.maxtouch)
         self.i2c[3].attach_slave(self.edid)
+        self.i2c[3].attach_slave(Twl4030Pmic(0x1B))
+        self.i2c[3].attach_slave(self.pmic)
+        self.i2c[3].attach_slave(self.thermal)
 
         # 8. GPIO Controllers (1..6)
         self.gpio: Dict[int, OmapGpio] = {}
@@ -296,17 +299,28 @@ class Dsmc2Camera:
         ``chunk`` splits execution into resumable slices (verified bit-identical to a
         single run) so callers can report progress via ``progress_cb(fraction)``.
         """
-        if chunk and chunk < initial_instructions:
-            done = 0
-            while done < initial_instructions:
-                n = min(chunk, initial_instructions - done)
-                self.cpu.run(self.cpu.pc, 0, count=n)
-                done += n
-                self.boot_progress = done / initial_instructions
-                if progress_cb:
-                    progress_cb(self.boot_progress)
-        else:
-            self.cpu.run(self.cpu.pc, 0, count=initial_instructions)
+        step_size = chunk if (chunk and chunk < initial_instructions) else 1_000_000
+        done = 0
+        while done < initial_instructions:
+            n = min(step_size, initial_instructions - done)
+            pc = self.cpu.pc
+            if pc in self.IDLE_LOOP_PCS and self.intc.has_pending_irq():
+                if self.cpu.are_interrupts_enabled():
+                    self.cpu.inject_irq(vector=0x80829F00)
+            self.cpu.run(self.cpu.pc, 0, count=n)
+            done += n
+            self.boot_progress = done / initial_instructions
+            if progress_cb:
+                progress_cb(self.boot_progress)
+
+            # Service active hardware timers
+            for tmr in self.timers.values():
+                if tmr.tclr & 0x01:
+                    if tmr.timer_id == 2:
+                        tmr.tick(steps=32)
+                    else:
+                        tmr.tick(steps=100)
+
         self.instruction_count += initial_instructions
         self.is_booted = True
         self.power_state = self.POWER_ON
@@ -473,6 +487,7 @@ class Dsmc2Camera:
                 words = struct.unpack("<20I", chunk)
                 if words[0] != 0x54485244: # 'THRD' magic
                     continue
+                run_cnt = words[1]   # +0x04
                 sp = words[2]        # +0x08
                 stk_start = words[3] # +0x0C
                 stk_end = words[4]   # +0x10
@@ -494,7 +509,8 @@ class Dsmc2Camera:
                     "priority": prio,
                     "entry": f"0x{entry:08X}",
                     "sp": f"0x{sp:08X}",
-                    "stack_range": f"0x{stk_start:08X}-0x{stk_end:08X}"
+                    "stack_range": f"0x{stk_start:08X}-0x{stk_end:08X}",
+                    "run_count": run_cnt,
                 })
             except Exception:
                 continue

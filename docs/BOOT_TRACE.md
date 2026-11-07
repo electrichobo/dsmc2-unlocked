@@ -145,3 +145,11 @@ Between 34.5M and 45.0M instructions, the firmware invokes ThreadX kernel setup 
    - Stores the geometry descriptor pointer at `0x81EF7824` pointing to `0x80FCEBF6`: `page_size = 2048`, `pages_per_block = 64`, `total_blocks = 2048`, `oob_size = 64`.
    - Hardware BCH ECC registers (`0x6E0001FC`, `0x6E0001F8`, `0x6E0001F4`) and prefetch engine (`0x6E0001E0`) are programmed.
    - Driver thread 4 (`NAND File System`, `0x80008310`) invokes `0x80A0F468` (`init_filesystem`), reading `0x81EF7824` via `0x8067D170` and successfully mounting `/env` via YAFFS (`0x80A0F1D0` / `0x80A0CEE0`).
+
+5. **I2C Subsystem & Hardware IRQ 61 Dispatch (`SystemInitThread`)**:
+   - Firmware I2C driver data structure initialized at `0x81407140`: physical base `0x48060000` (I2C3) assigned with IRQ 61 as firmware logical bus 1.
+   - `SystemInitThread` (`0x814CAD40`) issues I2C transactions to PMIC (`0x1B`, `0x48`, `0x4B`) and thermal sensor (`0x4C`), suspending on semaphore completion at `0x806886EC` (`tx_semaphore_get(&i2c->completion_sema)`).
+   - OMAP3 I2C controller asserts IRQ 61 upon Access Ready (`ARDY`, STAT bit 2) and Transmit/Receive Ready (`XRDY`/`RRDY`).
+   - Interrupt dispatcher (`0x80672B18`) reads `INTC_SIR_IRQ` (`0x48200040`) and dispatches vector table entry 61 (`0x81406D1C + 61*4`) -> `0x80688D70`.
+   - ISR calls `0x80688860`, releasing the completion semaphore (`tx_semaphore_put`).
+   - `SystemInitThread` transitions from `SEMAPHORE_SUSP` to `READY`, advancing its run count (17+ execution slices) and unblocking background RTOS logging to UART4 (`0x49042000`).

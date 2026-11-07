@@ -1,7 +1,7 @@
 # DSMC2 Virtual Brain ? Executive Status Report
 
 **Report Date**: 2026-11-06  
-**Repository Branch**: `master` (Local Git commit + working tree)  
+**Repository Branch**: `feature/dsmc2-virtual-brain`  
 **Target Architecture**: TI DM3725 / OMAP3630 (ARMv7-A Cortex-A8 @ 1 GHz)  
 **Target Camera Model**: RED SCARLET-W 5K (Model ID `0x16`, Firmware `v7.4.1`)  
 **Firmware Binary**: `slot/dsmc_program.mem` (SHA-256: `2bfa1c5211910a30b656ee197e70498a4d7d3c52a0a2df3d85d774a1cb27f88e`)
@@ -12,7 +12,7 @@
 
 A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~1.6 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful multi-bus I2C communication (TWL4030 PMIC, TMP411 thermal, OLPF 24C02 EEPROM, EDID EEPROM, maXTouch), OMAP3630 GPMC NAND Flash controller with BCH hardware ECC, Tensilica Xtensa coprocessor ASICs (IOB0, IOB1, dual ISP) over C2C mailbox transport, the TI TMS320C64x+ DSP Vision Engine parsing genuine COFF binaries, DSMC2 Accessory Bus module enumeration, 48kHz live audio and 1080p60 HDMI broadcast streaming, and scriptable RCP automation with multi-camera Genlock orchestration.
 
-**All 82 automated unit and integration tests pass cleanly (100% pass rate).**
+**All 99 automated unit and integration tests pass cleanly (100% pass rate).**
 
 ---
 
@@ -28,7 +28,7 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M5** | Firmware-visible peripheral models | Stateful I2C1..3 master controllers; Atmel maXTouch multi-touch controller on `0x4B` with 7-object table; 24C02 EDID EEPROM on `0x50` with authentic "RED TOUCH 7.0" 128-byte block. Satisfies `isMonitorAttached` at `0x80754DC0`. | **COMPLETE** |
 | **M6** | Authentic UI pipeline | Verified 1024x576 native LCD resolution from decompressed `slot/res/splash_screen.bin` (1,769,480 bytes, format REDZLIB0); DISPC DDR framebuffer extraction; Atmel maXTouch T5/T9 packet injection. Interactive `RedUiEngine` with visual touch feedback reticles, quick-selection dialogs (ISO, FPS, Shutter, Format, Media, Audio), full DSMC2 system menu, and cinema exposure tools (1:1 Mag, False Color LUT, Zebras 95%). | **COMPLETE** |
 | **M7** | Operational virtual camera | Full desktop application (`emulator/ui/app.py`): Virtual RED Camera zone (1024x576 screen + tactile buttons: REC, POWER, MENU, MAG, NAV) and synchronized Developer Dashboard (Console, RCP, ThreadX inspector, MMIO, Faults, Snapshots). | **COMPLETE** |
-| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (82 passed). | **COMPLETE** |
+| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (99 passed). | **COMPLETE** |
 | **M9** | Complete, distributable local product | Authoritative documentation suite complete (`README.md`, `docs/ARCHITECTURE.md`, `docs/BOOT_TRACE.md`, `docs/UI_RESEARCH.md`, `docs/TESTING.md`, `docs/HARDWARE_PERIPHERALS_PLAN.md`, `STATUS.md`, `HANDOFF.md`). All proprietary assets untracked. | **COMPLETE** |
 | **M10** | Extended fidelity | Multi-model profile foundations prepared in `CameraEnvironment` and lens mount database (230+ models). | **COMPLETE** |
 | **M11** | Web-Based Virtual Camera Studio | Zero-dependency standard library web studio (`emulator/ui/web.py`) on dedicated port with fluid responsive 16:9 screen bezel, crosshair coordinate mapping, and full developer workbench. | **COMPLETE** |
@@ -43,6 +43,8 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M20** | Phase 4 TI TMS320C64x+ DSP Vision Engine & DSMC2 Accessory Bus | Built `TiC64xDsp` parsing genuine `rdc_dsp_app.out` COFF binary (entry `0x8FA00000`), `DspLinkIpc` (shared memory MSGQ message queues), `CImagingServer` (AF contrast sharpness gradient and Haar-cascade face detection with TI VLIB acceleration), `RAudioServer` (4-channel 24-bit peak meters), and `AccessoryBus` with authentic `ModuleDescriptor` binary TLV encoder/decoder (WHO, VERSION, REDINFO handshake, hot-plug catalog). | **COMPLETE** |
 | **M21** | Host Audio & Video Streams (Web Audio API & 1080p60 Broadcast HDMI) | Implemented 48kHz PCM and RIFF WAV stream generation in `RAudioServer` with 1kHz calibrated reference test tone, Web Audio API headphone monitoring player with live canvas oscilloscope, and IOB0 1080p60 clean/broadcast HDMI video output with selectable modes: Clean Feed, Broadcast Tally + Timecode, and 2.39:1 Frame Guides. | **COMPLETE** |
 | **M22** | Advanced RCP Automation & Multi-Camera Studio Orchestration | Built `RcpScriptEngine` parsing human-readable DSL (`SET`, `GET`, `ASSERT`, `WAIT`, `RAMP`, `TRIGGER`) with sub-millisecond execution trace, assertion verification, production presets (Rack Focus, Production Slate & Record Cycle, Exposure Bracketing, Multi-Cam Array), and `MultiCameraNetwork` with Tri-Level Genlock lock, timecode distribution, and simultaneous multi-body record triggering. | **COMPLETE** |
+| **M23** | Hardware Micron SLC NAND FIFO, GPMC Registers & YAFFS `/env` Mount | Implemented byte-oriented FIFO streaming in `OmapGpmc` for ONFI Read ID (`0x90`), Status (`0x70`), and commands, added GPMC prefetch engine and BCH ECC hardware registers (`0x1E0..0x220`), and pre-seeded genuine NAND geometry descriptor in DDR (`0x81EF7824`), unblocking YAFFS `/env` mount in driver thread 4. | **COMPLETE** |
+| **M24** | OMAP3 I2C IRQ 61 Dispatch & ThreadX SystemInitThread Synchronization | Corrected OMAP3 TRM I2C register layout (IE `0x04`, STAT `0x08`, CON `0x24`, SA `0x2C`), wired INTC IRQ 61 assertion on ARDY/XRDY/RRDY, connected PMIC sub-bus on I2C3 (`0x48060000`), and added live interrupt delivery in `boot()`, driving ISR `0x80688D70`, releasing completion semaphore and transitioning `SystemInitThread` to READY (17+ execution slices) with authentic UART4 logging. | **COMPLETE** |
 
 ---
 
@@ -55,25 +57,32 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 82 items
+collected 99 items
 
 tests/test_audio_video_streams.py ...                                    [  3%]
-tests/test_camera_boot.py ..                                             [  6%]
-tests/test_coprocessors_and_dsp.py ..........                            [ 18%]
+tests/test_camera_boot.py ..                                             [  5%]
+tests/test_coprocessors_and_dsp.py ..........                            [ 15%]
+tests/test_display_pipeline.py ...                                       [ 18%]
 tests/test_fault_injection.py .                                          [ 19%]
-tests/test_firmware_manager.py ....                                      [ 24%]
-tests/test_gui_interaction.py .                                          [ 25%]
-tests/test_hardware_io.py .......                                        [ 34%]
-tests/test_lens_mount.py ......                                          [ 41%]
-tests/test_peripherals.py ......                                         [ 48%]
-tests/test_r3d_recording.py ....                                         [ 53%]
-tests/test_rcp_automation.py .....                                       [ 59%]
-tests/test_rcp_network.py ......                                         [ 67%]
-tests/test_redui.py ...........                                          [ 80%]
-tests/test_storage.py ...                                                [ 84%]
+tests/test_firmware_manager.py .....                                     [ 24%]
+tests/test_gpmc_nand.py ..                                               [ 26%]
+tests/test_gptimer_registers.py ..                                       [ 28%]
+tests/test_gui_interaction.py .                                          [ 29%]
+tests/test_hardware_io.py .......                                        [ 36%]
+tests/test_i2c_interrupt.py ...                                          [ 39%]
+tests/test_intc_registers.py ..                                          [ 41%]
+tests/test_lens_mount.py ......                                          [ 47%]
+tests/test_nand_mount.py ...                                             [ 50%]
+tests/test_peripherals.py ......                                         [ 56%]
+tests/test_r3d_recording.py ....                                         [ 60%]
+tests/test_rcp_automation.py .....                                       [ 65%]
+tests/test_rcp_network.py ......                                         [ 71%]
+tests/test_redui.py ...........                                          [ 82%]
+tests/test_rtos_timer_tick.py .                                          [ 83%]
+tests/test_storage.py ...                                                [ 86%]
 tests/test_web_studio.py .............                                   [100%]
 
-============================= 82 passed in 33.65s =============================
+============================= 99 passed in 41.38s =============================
 ```
 
 ---
