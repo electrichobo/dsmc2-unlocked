@@ -60,3 +60,79 @@ Between 34.5M and 45.0M instructions, the firmware invokes ThreadX kernel setup 
      0x80E9C370: beq 0x80E9C368    ; Wait for ready thread or interrupt
      ```
    - Hardware GPTimer11 ticks (IRQ 47) and I2C interrupts seamlessly awaken the scheduler, executing application tasks.
+
+
+---
+
+## 4. Timer 2 RTOS Tick Interrupt & Scheduler Resumption
+
+1. **Timer 2 RTOS System Tick (IRQ 38)**:
+   - Genuine DSMC2 firmware initializes OMAP GPTimer 2 with reload value `0xFFFFFFE0` (-32 counts) and interrupt enable `0x02` (`OVF_IT_FLAG`).
+   - The Timer 2 ISR at `0x80701914` invokes `_tx_timer_interrupt()` at `0x80E9C3E4`, which increments the ThreadX global system clock `_tx_timer_system_clock` (`0x8149DD10`) and decrements active thread time-slice counters.
+   - When the scheduler idle loop receives Timer 2 interrupts, `_tx_thread_schedule` resumes ready threads, including `log_thread` (`0x80843260`).
+
+2. **log_thread Execution**:
+   - `log_thread` (`0x80843260`) awakes, processes diagnostic log queues, and transmits genuine log framing bytes (starting with `0x1A`) over UART4 at `0x49042000`.
+
+---
+
+## 5. Driver Bringup (`driverthread.c`) & Authentic Display Pipeline
+
+1. **Driver Thread Initialization Architecture**:
+   - The firmware creates `Driver thread` (`0x81e51f5c`, entry `0x8066c92c`), which registers and starts 32 parallel driver initialization threads via `init_parallel` (`0x8066fe9c`).
+   - Synchronization is governed by two 32-bit ThreadX event flag groups: `init_flags[0]` (`0x81e54834`) and `init_flags[1]` (`0x81e5485c`).
+   - The 32 registered driver threads are:
+     1. `CRYPT` (`0x806712E4`)
+     2. `RTC` (`0x80670098`)
+     3. `FileX` (`0x80670164`)
+     4. `NAND File System` (`0x80008310`)
+     5. `UART` (`0x80670420`)
+     6. `HAL SYS_ID` (`0x80670308`)
+     7. `HW Cap` (`0x804B0FC0`)
+     8. `Module Cap` (`0x804C5CF4`)
+     9. `ASIC Memory Map` (`0x806714C0`)
+     10. `ASIC Memory Stacks` (`0x806714A8`)
+     11. `LED` (`0x806703F4`)
+     12. `Load System Config` (`0x800720AC`)
+     13. `HAL Power` (`0x809B22B8`)
+     14. `Power` (`0x80670434`)
+     15. `Boards` (`0x809B2790`)
+     16. `HAL Power` (`0x809B3284`)
+     17. `Power` (`0x80670434`)
+     18. `Boards` (`0x809B378C`)
+     19. `Fan` (`0x80670498`)
+     20. `XAUI` (`0x8066DDCC`)
+     21. `Mailbox` (`0x80670ACC`)
+     22. `FPGA Mailbox` (`0x80670AF8`)
+     23. `SATA` (`0x80670504`)
+     24. `Media` (`0x8067060C`)
+     25. `IOB/ISP Binary Download` (`0x80670B10`)
+     26. `Monitor Pipeline` (`0x8074C9E4`)
+     27. `HDMI` (`0x80748874`)
+     28. `HDSDI` (`0x8074F38C`)
+     29. `DSP` (`0x80670FFC`)
+     30. `Audio` (`0x806712CC`)
+     31. `Contiguous Media Space` (`0x8067091C`)
+     32. `Cal Load` (`0x8066D604`)
+
+2. **Authentic Display Pipeline Architecture (`mon_register_access.c`)**:
+   - Pipeline structure base: `0x8266316C` (48 bytes per pipeline structure).
+   - **Pipeline 0 (Primary LCD / EVF)**:
+     - Primary Framebuffer: `0x87400000`
+     - Overlay Framebuffer: `0x8E200000`
+     - Register Config: `0x800A0050`
+   - **Pipeline 1 (HDMI Transmitter)**:
+     - Framebuffer: `0x87000000`
+     - Overlay Framebuffer: `0x8E000000`
+     - Register Config: `0x800A0048`
+   - **Pipeline 2 (HDSDI Broadcast)**:
+     - Framebuffer: `0x87200000`
+     - Overlay Framebuffer: `0x8E100000`
+     - Register Config: `0x800A004C`
+   - `iob_write(pipeline_id, reg, val)` routes pipelines 0..2 to IOB0 and pipelines > 2 to IOB1, queuing register pairs into the DDR ring buffer at `0x8267B408`.
+
+3. **C2C Mailbox & Doorbell Interconnect**:
+   - IOB0 Doorbell: MMIO at `0x3FFE8000` (write to `0x3FFE8004` dispatches 16-byte mailbox descriptors from DDR at `0x800B0FFC`).
+   - IOB1 Doorbell: MMIO at `0x4FFE8000` (write to `0x4FFE8004` dispatches descriptors from DDR at `0x800B17FC`).
+   - Command `0x26` configures monitor pipeline modes (`CLEAN`, `BROADCAST_TALLY`, `FRAME_GUIDES`).
+   - GPIO 130 (`MONITOR_HDMI_MUX`, Bank 5 Pin 2) dynamically multiplexes HDMI and LCD outputs.

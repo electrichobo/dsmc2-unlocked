@@ -88,3 +88,41 @@ def test_firmware_manager_crash_reporting():
     finally:
         if os.path.exists(custom_path):
             os.remove(custom_path)
+
+
+def test_firmware_manager_custom_mod_uart_output():
+    """Verify executing custom firmware code that interacts with OMAP3 UART4 MMIO."""
+    # Reset vector points to 0x80000040: writes 'MOD\n' to UART4 (0x4905A000)
+    vecs = [0xEA000006] + [0xE59FF024]*7 + [0xE59FD000, 0xE59FF000, 0x881D2690, 0x80000040]
+    payload = struct.pack("<12I", *vecs)
+    payload += b"\x00" * (0x40 - len(payload))
+
+    insns = [
+        0xE3021000, # movw r1, #0x2000
+        0xE3441904, # movt r1, #0x4904 (r1 = 0x49042000 UART4)
+        0xE3A0004D, # mov r0, #0x4d ('M')
+        0xE5C10000, # strb r0, [r1]
+        0xE3A0004F, # mov r0, #0x4f ('O')
+        0xE5C10000, # strb r0, [r1]
+        0xE3A00044, # mov r0, #0x44 ('D')
+        0xE5C10000, # strb r0, [r1]
+        0xE3A0000A, # mov r0, #0x0a ('\n')
+        0xE5C10000, # strb r0, [r1]
+        0xEAFFFFFE, # b .
+    ]
+    payload += struct.pack(f"<{len(insns)}I", *insns)
+
+    custom_dir = os.path.join(REPO_ROOT, "firmware_store", "custom")
+    os.makedirs(custom_dir, exist_ok=True)
+    custom_path = os.path.join(custom_dir, "test_uart_mod.bin")
+    with open(custom_path, "wb") as f:
+        f.write(payload)
+
+    cam = Dsmc2Camera(REPO_ROOT)
+    try:
+        res = cam.load_and_boot_custom_firmware(custom_path)
+        assert res["status"] == "ok"
+        assert "MOD" in cam.uarts[4].completed_lines
+    finally:
+        if os.path.exists(custom_path):
+            os.remove(custom_path)
