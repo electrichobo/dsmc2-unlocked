@@ -113,4 +113,7 @@ def test_desktop_app_full_interaction():
     assert len(app.screen.canvas.find_all()) == 1
 
     # Clean shutdown
+    import gc
     app._on_close()
+    del app
+    gc.collect()
