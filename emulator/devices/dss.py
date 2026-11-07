@@ -16,6 +16,14 @@ class OmapDss(Device):
     BASE_ADDR = 0x48050000
     SIZE = 0x10000
 
+    # Authentic DSMC2 Firmware Pipeline Framebuffer Addresses
+    FB_PIPELINE_LCD_PRIMARY = 0x87400000
+    FB_PIPELINE_LCD_OVERLAY = 0x8E200000
+    FB_PIPELINE_HDMI = 0x87000000
+    FB_PIPELINE_HDMI_OVERLAY = 0x8E000000
+    FB_PIPELINE_HDSDI = 0x87200000
+    FB_PIPELINE_HDSDI_OVERLAY = 0x8E100000
+
     def __init__(self, bus):
         self.bus = bus
 
@@ -62,11 +70,14 @@ class OmapDss(Device):
             bpp = 4 # Default 32bpp
 
         size = w * h * bpp
-        fb_addr = self.framebuffer_address
-        try:
-            return self.bus.read_mem(fb_addr, size)
-        except Exception:
-            return b"\x00" * size
+        for fb_addr in (self.FB_PIPELINE_LCD_PRIMARY, self.framebuffer_address):
+            try:
+                buf = self.bus.read_mem(fb_addr, size)
+                if any(buf):
+                    return buf
+            except Exception:
+                pass
+        return b"\x00" * size
 
     def read(self, offset: int, size: int) -> int:
         if offset == 0x00: # DSS_SYSSTATUS

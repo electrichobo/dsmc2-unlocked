@@ -100,7 +100,14 @@ class OmapGpio(Device):
         elif offset == 0x34: # OE
             self.oe = val
         elif offset == 0x3C: # DATAOUT
+            old = self.dataout
             self.dataout = val
+            if self.on_pin_changed:
+                diff = old ^ val
+                while diff:
+                    pin = (diff & -diff).bit_length() - 1
+                    self.on_pin_changed(pin, bool(val & (1 << pin)))
+                    diff &= ~(1 << pin)
         elif offset == 0x48: # RISINGDETECT
             self.risingdetect = val
         elif offset == 0x4C: # FALLINGDETECT
@@ -110,9 +117,23 @@ class OmapGpio(Device):
         elif offset == 0x64: # SETIRQENABLE1
             self.irqenable1 |= val
         elif offset == 0x90: # CLEARDATAOUT
+            old = self.dataout
             self.dataout &= ~val
+            if self.on_pin_changed:
+                diff = old ^ self.dataout
+                while diff:
+                    pin = (diff & -diff).bit_length() - 1
+                    self.on_pin_changed(pin, False)
+                    diff &= ~(1 << pin)
         elif offset == 0x94: # SETDATAOUT
+            old = self.dataout
             self.dataout |= val
+            if self.on_pin_changed:
+                diff = old ^ self.dataout
+                while diff:
+                    pin = (diff & -diff).bit_length() - 1
+                    self.on_pin_changed(pin, True)
+                    diff &= ~(1 << pin)
 
 
 GPIO_MAP = {

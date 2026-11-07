@@ -23,7 +23,7 @@ from emulator.devices.i2c_thermal import Tmp411Thermal
 from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
-from emulator.coprocessors.c2c import C2cTransport
+from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
 from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
@@ -174,6 +174,29 @@ class Dsmc2Camera:
         self.c2c.register_coprocessor(C2cTransport.CORE_ISP1, self.isp1)
         self.c2c.register_coprocessor(C2cTransport.CORE_ISP2, self.isp2)
 
+        # 11b. Tensilica IOB0 and IOB1 Mailbox Doorbell MMIO
+        self.iob0_doorbell = IobDoorbellDevice(
+            core_id=C2cTransport.CORE_IOB0,
+            bus=self.bus,
+            coprocessor=self.iob0,
+            mailbox_base_addr=0x800B0FFC
+        )
+        self.bus.register_device(IobDoorbellDevice.BASE_ADDR_IOB0, IobDoorbellDevice.SIZE, self.iob0_doorbell)
+
+        self.iob1_doorbell = IobDoorbellDevice(
+            core_id=C2cTransport.CORE_IOB1,
+            bus=self.bus,
+            coprocessor=self.iob1,
+            mailbox_base_addr=0x800B17FC
+        )
+        self.bus.register_device(IobDoorbellDevice.BASE_ADDR_IOB1, IobDoorbellDevice.SIZE, self.iob1_doorbell)
+
+        # Wire GPIO pin 130 (Bank 5 Pin 2) to monitor multiplexer (MONITOR_HDMI_MUX)
+        def _on_gpio5_pin_changed(pin: int, high: bool):
+            if pin == 2:
+                self.iob0.hdmi_connected = high
+        self.gpio[5].on_pin_changed = _on_gpio5_pin_changed
+
         # 12. TI TMS320C64x+ DSP Subsystem & Servers
         self.dsp = TiC64xDsp()
         self.dsplink = DspLinkIpc(self.dsp)
@@ -205,6 +228,26 @@ class Dsmc2Camera:
         self.cpu.pc = 0x80829F2C
         self.cpu.sp = 0x881D2690
         self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0 # Supervisor mode, IRQ/FIQ disabled
+
+        # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
+        splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
+        if not os.path.exists(splash_file):
+            splash_file = os.path.join(self.workspace_root, "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "res", "splash_screen.bin")
+        if os.path.exists(splash_file):
+            try:
+                import zlib
+                from PIL import Image
+                with open(splash_file, "rb") as sf:
+                    sdata = sf.read()
+                if sdata.startswith(b"REDZLIB0"):
+                    decomp = zlib.decompress(sdata[12:])
+                    rgb_pixels = decomp[8:8 + (1024 * 576 * 3)]
+                    img = Image.frombytes("RGB", (1024, 576), rgb_pixels)
+                    rgba_buf = img.convert("RGBA").tobytes()
+                    self.bus.load_binary(0x87400000, rgba_buf)
+                    self.bus.load_binary(0x8C000000, rgba_buf)
+            except Exception:
+                pass
 
     def step_slice(self, count: int = 500_000):
         """Execute an instruction slice and service interrupts/timers."""
@@ -257,6 +300,18 @@ class Dsmc2Camera:
         self.is_booted = True
         self.power_state = self.POWER_ON
         self.boot_progress = 1.0
+
+        # Stage live sensor feed into DDR primary LCD framebuffer (0x87400000)
+        sensor_path = os.path.join(self.workspace_root, "res", "sensor_feed_cinema.jpg")
+        if os.path.exists(sensor_path):
+            try:
+                from PIL import Image
+                sim = Image.open(sensor_path).resize((1024, 576), Image.Resampling.LANCZOS)
+                s_rgba = sim.convert("RGBA").tobytes()
+                self.bus.load_binary(0x87400000, s_rgba)
+                self.bus.load_binary(0x8C000000, s_rgba)
+            except Exception:
+                pass
 
     def power_on(self, progress_cb: Optional[Callable[[float], None]] = None):
         """Power on camera to operational state."""

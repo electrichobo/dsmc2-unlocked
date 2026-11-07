@@ -1,3 +1,4 @@
+import struct
 """
 Chip-to-Chip (C2C) Transport Subsystem.
 Base address: 0x49000000, Size: 0x1000.
@@ -137,3 +138,44 @@ class C2cTransport(Device):
             "connected_cores": list(self.coprocessors.keys()),
             "rx_queue_lengths": {c: len(f) for c, f in self.rx_fifos.items()}
         }
+
+
+class IobDoorbellDevice(Device):
+    """
+    Hardware Doorbell MMIO device for Tensilica IOB0 (0x3FFE8000) and IOB1 (0x4FFE8000).
+    Triggered by ARM Cortex-A8 ThreadX at 0x3FFE8004 and 0x4FFE8004 to dispatch shared-memory C2C mailbox packets.
+    """
+
+    BASE_ADDR_IOB0 = 0x3FFE8000
+    BASE_ADDR_IOB1 = 0x4FFE8000
+    SIZE = 0x1000
+
+    def __init__(self, core_id: int, bus, coprocessor, mailbox_base_addr: int):
+        self.core_id = core_id
+        self.bus = bus
+        self.coprocessor = coprocessor
+        self.mailbox_base_addr = mailbox_base_addr
+        self.doorbell_count = 0
+        self.last_command = 0
+        self.last_payload: List[int] = []
+
+    def read(self, offset: int, size: int) -> int:
+        if offset == 0x00:
+            return 0x01 # Doorbell ready / enabled
+        elif offset == 0x04:
+            return self.doorbell_count
+        return 0
+
+    def write(self, offset: int, size: int, val: int):
+        if offset == 0x04:
+            self.doorbell_count = val & 0xFFFFFFFF
+            # Fetch 16-byte mailbox descriptor from DDR shared memory
+            try:
+                raw = self.bus.read_mem(self.mailbox_base_addr, 16)
+                cmd, arg0, arg1, arg2 = struct.unpack("<4I", raw)
+                self.last_command = cmd
+                self.last_payload = [arg0, arg1, arg2]
+                if self.coprocessor and hasattr(self.coprocessor, "handle_c2c_command"):
+                    self.coprocessor.handle_c2c_command(cmd, [arg0, arg1, arg2])
+            except Exception:
+                pass

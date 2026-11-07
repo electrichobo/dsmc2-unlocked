@@ -159,6 +159,15 @@ class Iob0Coprocessor(XtensaCore):
         elif cmd == 0x20: # Query Tilt
             pitch, roll, level = self.get_tilt_angles()
             return [int(pitch * 10), int(roll * 10), 1 if level else 0]
+        elif cmd == 0x26: # Monitor Pipeline Config
+            mode_flag = payload[1] if len(payload) > 1 else 0
+            if mode_flag == 1:
+                self.hdmi_mode = "BROADCAST_TALLY"
+            elif mode_flag == 2:
+                self.hdmi_mode = "FRAME_GUIDES"
+            else:
+                self.hdmi_mode = "CLEAN"
+            return [0x00000000]
         return [0x00]
 
     def get_status(self) -> Dict[str, Any]:
@@ -208,6 +217,12 @@ class Iob1Coprocessor(XtensaCore):
         self.factory_defects: List[Tuple[int, int]] = [(1024, 768), (2048, 1152), (3072, 1536)]
         self.user_defects: List[Tuple[int, int]] = []
         self.pixels_corrected_total = 0
+
+    def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
+        """Handle C2C calibration and defect table commands."""
+        if cmd == 0x30 or cmd == 0x31:
+            return [0x00000000]
+        return [0x00000000]
 
     def run_black_shading(self, sensor_temp_c: float = 39.0, exposure: str = "1/48") -> Dict[str, Any]:
         """
