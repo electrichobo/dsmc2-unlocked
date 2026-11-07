@@ -135,6 +135,9 @@ class Dsmc2Camera:
         self.thermal = Tmp411Thermal(0x4C)
         self.i2c[1].attach_slave(self.pmic)
         self.i2c[1].attach_slave(self.thermal)
+        # TWL4030 RTC sub-pages (0x1B and 0x4B)
+        self.i2c[1].attach_slave(Twl4030Pmic(0x1B))
+        self.i2c[1].attach_slave(Twl4030Pmic(0x4B))
 
         # I2C2: Optical Low Pass Filter (OLPF EEPROM @ 0x54)
         self.olpf = OlpfEeprom(0x54)

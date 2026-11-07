@@ -41,6 +41,9 @@ class Twl4030Pmic(I2cSlave):
         self.registers[self.REG_VBUS_STATUS] = 0x07 if self.is_dc_in_connected else 0x00
         self.registers[self.REG_POWER_STATUS] = 0x1F # VDD1, VDD2, VPLL, VAUX all active
         self.registers[self.REG_PBR_STATUS] = 0x00
+        # TWL4030 RTC Subsystem: 0x29 = RTC_CTRL_REG, 0x2A = RTC_STATUS_REG (bit 1 RUN = 1)
+        self.registers[0x29] = 0x01
+        self.registers[0x2A] = 0x02
         self._update_battery_adc_registers()
 
     def _update_battery_adc_registers(self):

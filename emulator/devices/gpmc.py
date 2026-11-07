@@ -73,6 +73,8 @@ class OmapGpmc(Device):
         """Handle 8/16/32-bit MMIO reads from GPMC register space."""
         if offset == self.REG_SYSSTATUS:
             return self.sysstatus
+        elif offset == 0x54: # GPMC_STATUS (WAIT0STATUS = 1, EMPTYWRITEBUFFER = 1)
+            return 0x00000101
         elif offset == self.REG_SYSCONFIG:
             return self.sysconfig
         elif offset == self.REG_IRQSTATUS:
@@ -130,5 +132,11 @@ class OmapGpmc(Device):
         elif cmd == 0x70: # Read Status
             self.nand_buffer.clear()
             self.nand_buffer.append(0xE0) # Ready, Write-protect disabled
+        elif cmd == 0xEC: # Read Parameter Page (ONFI)
+            self.nand_buffer.clear()
+            self.nand_buffer.append(0x49464E4F) # 'ONFI' signature
+            self.nand_buffer.append(0x00020000) # ONFI 2.0
+            self.nand_buffer.append(0x00000800) # 2048-byte page size
+            self.nand_buffer.append(0x00400040) # 64-byte OOB, 64 pages per block
         elif cmd == 0xFF: # Reset
             self.nand_buffer.clear()
