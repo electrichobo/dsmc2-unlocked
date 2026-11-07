@@ -72,7 +72,11 @@ class OmapI2c(Device):
         elif offset == 0x10: # SYSS
             return self.syss
         elif offset == 0x14: # BUF
-            return self.buf
+            rx_count = len(self.rx_fifo)
+            rx_stat = max(0, rx_count - 1) & 0x3F
+            tx_remaining = max(0, self.cnt - len(self.tx_fifo))
+            tx_stat = max(0, tx_remaining - 1) & 0x3F
+            return (self.buf & ~0x3F3F) | (rx_stat << 8) | tx_stat
         elif offset == 0x18: # CNT
             return self.cnt
         elif offset == 0x1C: # DATA (RRDY / FIFO read)
@@ -80,6 +84,9 @@ class OmapI2c(Device):
                 val = self.rx_fifo.popleft()
                 if not self.rx_fifo:
                     self.stat &= ~0x08 # Clear RRDY
+                    self.stat |= 0x04  # Assert ARDY (transfer complete)
+                    if (self.ie & 0x04) and self.intc:
+                        self.intc.assert_irq(self.irq_num)
                 return val
             return 0x00
         elif offset == 0x20: # SYSC
@@ -104,6 +111,8 @@ class OmapI2c(Device):
             self.ie = val
         elif offset == 0x08: # STAT (write 1 to clear)
             self.stat &= ~val
+            if val & 0x04: # Clearing ARDY clears TX FIFO
+                self.tx_fifo.clear()
             if not (self.stat & self.ie) and self.intc:
                 self.intc.deassert_irq(self.irq_num)
         elif offset == 0x14: # BUF
@@ -113,15 +122,15 @@ class OmapI2c(Device):
         elif offset == 0x1C: # DATA (TX FIFO write)
             byte_val = val & 0xFF
             self.tx_fifo.append(byte_val)
-            slave = self.slaves.get(self.sa)
-            if slave and bool(self.con & 0x0200): # Master Transmit
-                if len(self.tx_fifo) == 1:
-                    self.current_reg_addr = byte_val
-                elif len(self.tx_fifo) == 2 and self.cnt > 2:
-                    self.current_reg_addr = (self.current_reg_addr << 8) | byte_val
-                elif len(self.tx_fifo) > 2:
-                    slave.write(self.current_reg_addr, bytes([byte_val]))
             if self.cnt > 0 and len(self.tx_fifo) >= self.cnt:
+                slave = self.slaves.get(self.sa)
+                fifo_list = list(self.tx_fifo)
+                if slave and bool(self.con & 0x0200): # Master Transmit
+                    if len(fifo_list) == 1:
+                        self.current_reg_addr = fifo_list[0]
+                    else:
+                        self.current_reg_addr = fifo_list[0]
+                        slave.write(self.current_reg_addr, bytes(fifo_list[1:]))
                 self.stat |= 0x04 # ARDY
                 self.stat &= ~0x10 # Clear XRDY
                 if (self.ie & 0x04) and self.intc:
@@ -162,36 +171,47 @@ class OmapI2c(Device):
 
         if is_tx:
             # Master Transmit
-            if self.tx_fifo:
-                tx_bytes = bytes(self.tx_fifo)
-                self.tx_fifo.clear()
-                if len(tx_bytes) >= 2 and byte_count > 2:
-                    self.current_reg_addr = (tx_bytes[0] << 8) | tx_bytes[1]
-                    payload = tx_bytes[2:]
-                elif len(tx_bytes) >= 1:
-                    self.current_reg_addr = tx_bytes[0]
-                    payload = tx_bytes[1:]
-                else:
-                    payload = b""
-                slave.write(self.current_reg_addr, payload)
+            slave = self.slaves.get(slave_addr)
+            if self.cnt > 0 and len(self.tx_fifo) >= self.cnt:
+                # Pre-loaded TX FIFO: commit transmit immediately
+                fifo_list = list(self.tx_fifo)
+                if slave:
+                    if len(fifo_list) == 1:
+                        self.current_reg_addr = fifo_list[0]
+                    else:
+                        self.current_reg_addr = fifo_list[0]
+                        slave.write(self.current_reg_addr, bytes(fifo_list[1:]))
                 self.stat |= 0x04 # ARDY
+                self.stat &= ~0x10 # Clear XRDY
                 if (self.ie & 0x04) and self.intc:
                     self.intc.assert_irq(self.irq_num)
-            else:
-                # Transmit buffer empty, request data via XRDY
-                self.stat |= 0x10 # XRDY
+            elif self.cnt > 0:
+                self.tx_fifo.clear()
+                self.stat |= 0x10 # XRDY (Request TX data from CPU)
+                self.stat &= ~0x04
                 if (self.ie & 0x10) and self.intc:
+                    self.intc.assert_irq(self.irq_num)
+            else:
+                self.tx_fifo.clear()
+                self.stat |= 0x04 # ARDY (Empty transfer complete)
+                if (self.ie & 0x04) and self.intc:
                     self.intc.assert_irq(self.irq_num)
         else:
             # Master Receive: fetch bytes from slave
-            rx_bytes = slave.read(self.current_reg_addr, byte_count if byte_count > 0 else 1)
+            count = byte_count if byte_count > 0 else 1
+            rx_bytes = slave.read(self.current_reg_addr, count)
             self.rx_fifo.clear()
             for b in rx_bytes:
                 self.rx_fifo.append(b)
-            self.stat |= 0x08 # RRDY
-            self.stat |= 0x04 # ARDY
-            if (self.ie & 0x0C) and self.intc: # ARDY or RRDY interrupt
-                self.intc.assert_irq(self.irq_num)
+            if self.rx_fifo:
+                self.stat |= 0x08 # RRDY (Data Ready)
+                # Two-phase receive: ARDY will be asserted when the CPU drains rx_fifo via 0x1C
+                if (self.ie & 0x08) and self.intc:
+                    self.intc.assert_irq(self.irq_num)
+            else:
+                self.stat |= 0x04 # ARDY (Empty transfer complete)
+                if (self.ie & 0x04) and self.intc:
+                    self.intc.assert_irq(self.irq_num)
 
         if self.on_transaction_finished:
             self.on_transaction_finished(slave_addr, is_tx, byte_count)

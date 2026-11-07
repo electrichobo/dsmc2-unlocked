@@ -4,6 +4,7 @@ Integrates ARM CPU, system bus, peripheral models, storage, display, and control
 """
 
 import os
+import unicorn
 import struct
 import threading
 import time
@@ -22,6 +23,7 @@ from emulator.devices.i2c_pmic import Twl4030Pmic
 from emulator.devices.i2c_thermal import Tmp411Thermal
 from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
+from emulator.devices.sdma import OmapSdma
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
@@ -98,6 +100,17 @@ class Dsmc2Camera:
         # 2. Interrupt Controller
         self.intc = OmapIntc()
 
+        # Fast IRQ wake hook: if waiting in scheduler idle loop with no ready thread and pending IRQ, wake Unicorn
+        def _idle_wake_hook(uc, address, size, user_data):
+            try:
+                exec_ptr = struct.unpack("<I", uc.mem_read(0x8149CE60, 4))[0]
+            except Exception:
+                exec_ptr = 0
+            if exec_ptr == 0 and self.intc.has_pending_irq() and self.cpu.are_interrupts_enabled():
+                uc.emu_stop()
+
+        self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, 0x80E9C368, 0x80E9C368)
+
         # 3. PRCM (Clock & Reset)
         self.prcm = OmapPrcm(self.cpu)
         self.bus.register_device(OmapPrcm.BASE_ADDR, OmapPrcm.SIZE, self.prcm)
@@ -135,9 +148,10 @@ class Dsmc2Camera:
         self.thermal = Tmp411Thermal(0x4C)
         self.i2c[1].attach_slave(self.pmic)
         self.i2c[1].attach_slave(self.thermal)
-        # TWL4030 RTC sub-pages (0x1B and 0x4B)
-        self.i2c[1].attach_slave(Twl4030Pmic(0x1B))
+        self.i2c[1].attach_slave(Twl4030Pmic(0x49))
+        self.i2c[1].attach_slave(Twl4030Pmic(0x4A))
         self.i2c[1].attach_slave(Twl4030Pmic(0x4B))
+        self.i2c[1].attach_slave(Twl4030Pmic(0x1B))
 
         # I2C2: Optical Low Pass Filter (OLPF EEPROM @ 0x54)
         self.olpf = OlpfEeprom(0x54)
@@ -148,8 +162,10 @@ class Dsmc2Camera:
         self.edid = EdidEeprom(0x50)
         self.i2c[3].attach_slave(self.maxtouch)
         self.i2c[3].attach_slave(self.edid)
+        self.i2c[3].attach_slave(Twl4030Pmic(0x48))
+        self.i2c[3].attach_slave(Twl4030Pmic(0x49))
+        self.i2c[3].attach_slave(Twl4030Pmic(0x4A))
         self.i2c[3].attach_slave(Twl4030Pmic(0x1B))
-        self.i2c[3].attach_slave(self.pmic)
         self.i2c[3].attach_slave(self.thermal)
 
         # 8. GPIO Controllers (1..6)
@@ -166,6 +182,10 @@ class Dsmc2Camera:
         # 10. General Purpose Memory Controller (GPMC)
         self.gpmc = OmapGpmc(intc=self.intc)
         self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
+
+        # 10b. System DMA (sDMA Controller @ 0x48056000)
+        self.sdma = OmapSdma(intc=self.intc)
+        self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
 
         # 11. Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
         self.c2c = C2cTransport(intc=self.intc)
@@ -473,7 +493,7 @@ class Dsmc2Camera:
         if not self.is_booted:
             return threads
 
-        tcbs = [0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0]
+        tcbs = [0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0, 0x81E51F5C, 0x814C6B28]
         state_names = {
             0: "READY", 1: "COMPLETED", 2: "TERMINATED", 3: "SUSPENDED",
             4: "SLEEP", 5: "QUEUE", 6: "SEMAPHORE", 7: "EVENT_FLAG",

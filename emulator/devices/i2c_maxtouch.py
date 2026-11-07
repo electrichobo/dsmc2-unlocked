@@ -2,22 +2,26 @@
 Atmel maXTouch Multi-Touch Controller Emulation (mXT) for RED DSMC2.
 Implements the I2C multi-touch device at address 0x4B (and 0x4A).
 Simulates object table, message processor (T5), and touch report generation (T9).
+Also provides TWL4030 RTC/Power register fallback for shared physical bus address 0x4B.
 """
 
 from typing import List, Optional
 from collections import deque
 from emulator.devices.i2c import I2cSlave
+from emulator.devices.i2c_pmic import Twl4030Pmic
 
 
 class MaXTouchDevice(I2cSlave):
     """
     Atmel maXTouch I2C Touch Controller.
     Addresses: 0x4B (primary RED Touch LCD), 0x4A (secondary).
+    Shares physical I2C3 bus address 0x4B with the TWL4030 RTC/Power module.
     """
 
     def __init__(self, address: int = 0x4B, irq_callback: Optional[callable] = None):
         super().__init__(address)
         self.irq_callback = irq_callback
+        self.pmic_fallback = Twl4030Pmic(address)
 
         # Object table layout for DSMC2 touch panels (1024x576)
         # Information block (Address 0x0000, 7 bytes)
@@ -122,6 +126,10 @@ class MaXTouchDevice(I2cSlave):
                 return msg[:length]
             return b"\xFF" * length # 0xFF indicates no more messages in queue
 
+        # TWL4030 RTC/Power subsystem register handling
+        if reg_addr in (0x44, 0x29, 0x2A, 0x3B, 0x3F, 0x45, 0x80) or (0x1C <= reg_addr <= 0x22):
+            return self.pmic_fallback.read(reg_addr, length)
+
         # Standard register map read
         end = min(reg_addr + length, len(self.reg_map))
         data = bytes(self.reg_map[reg_addr:end])
@@ -130,6 +138,9 @@ class MaXTouchDevice(I2cSlave):
         return data
 
     def write(self, reg_addr: int, data: bytes) -> bool:
+        # Pass through to TWL4030 RTC/Power model
+        self.pmic_fallback.write(reg_addr, data)
+
         end = min(reg_addr + len(data), len(self.reg_map))
         self.reg_map[reg_addr:end] = data
         return True

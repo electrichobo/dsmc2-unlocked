@@ -12,7 +12,7 @@
 
 A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~1.6 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful multi-bus I2C communication (TWL4030 PMIC, TMP411 thermal, OLPF 24C02 EEPROM, EDID EEPROM, maXTouch), OMAP3630 GPMC NAND Flash controller with BCH hardware ECC, Tensilica Xtensa coprocessor ASICs (IOB0, IOB1, dual ISP) over C2C mailbox transport, the TI TMS320C64x+ DSP Vision Engine parsing genuine COFF binaries, DSMC2 Accessory Bus module enumeration, 48kHz live audio and 1080p60 HDMI broadcast streaming, and scriptable RCP automation with multi-camera Genlock orchestration.
 
-**All 99 automated unit and integration tests pass cleanly (100% pass rate).**
+**All 102 automated unit and integration tests pass cleanly (100% pass rate).**
 
 ---
 
@@ -45,6 +45,8 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M22** | Advanced RCP Automation & Multi-Camera Studio Orchestration | Built `RcpScriptEngine` parsing human-readable DSL (`SET`, `GET`, `ASSERT`, `WAIT`, `RAMP`, `TRIGGER`) with sub-millisecond execution trace, assertion verification, production presets (Rack Focus, Production Slate & Record Cycle, Exposure Bracketing, Multi-Cam Array), and `MultiCameraNetwork` with Tri-Level Genlock lock, timecode distribution, and simultaneous multi-body record triggering. | **COMPLETE** |
 | **M23** | Hardware Micron SLC NAND FIFO, GPMC Registers & YAFFS `/env` Mount | Implemented byte-oriented FIFO streaming in `OmapGpmc` for ONFI Read ID (`0x90`), Status (`0x70`), and commands, added GPMC prefetch engine and BCH ECC hardware registers (`0x1E0..0x220`), and pre-seeded genuine NAND geometry descriptor in DDR (`0x81EF7824`), unblocking YAFFS `/env` mount in driver thread 4. | **COMPLETE** |
 | **M24** | OMAP3 I2C IRQ 61 Dispatch & ThreadX SystemInitThread Synchronization | Corrected OMAP3 TRM I2C register layout (IE `0x04`, STAT `0x08`, CON `0x24`, SA `0x2C`), wired INTC IRQ 61 assertion on ARDY/XRDY/RRDY, connected PMIC sub-bus on I2C3 (`0x48060000`), and added live interrupt delivery in `boot()`, driving ISR `0x80688D70`, releasing completion semaphore and transitioning `SystemInitThread` to READY (17+ execution slices) with authentic UART4 logging. | **COMPLETE** |
+| **M25** | OMAP3630 System DMA (sDMA Controller @ 0x48056000, IRQ 15 Line 3) | Implemented full 32-channel OMAP3 sDMA controller (`OmapSdma`) at `0x48056000` with OCP soft-reset handshake (`DMA4_SYSSTATUS` resetdone), channel control (`CCR`), write-1-to-clear status (`CSR`), and Line 3 interrupt steering to INTC IRQ 15, unblocking `dma_init` (`0x80675364`) and `dma_request_channel` (`0x80675604`). | **COMPLETE** |
+| **M26** | I2C BUF FIFO Fidelity, TWL4030 Protect Key FSM & Complete `bsp_Init` | Implemented dynamic `I2C_BUF` TXSTAT/RXSTAT threshold calculation, dual-mode (preloaded vs interrupt-driven) transmit support, TI TWL4030 dual protect key unlock state machine (`0xC0->0x0C` and `0x0E->0xE0`), driving `bsp_Init` (`0x8066B4B0`) to return 1 (SUCCESS), creating `BSP INIT Sem` and launching `Driver thread` (`0x81E51F5C`). | **COMPLETE** |
 
 ---
 
@@ -57,7 +59,7 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 99 items
+collected 102 items
 
 tests/test_audio_video_streams.py ...                                    [  3%]
 tests/test_camera_boot.py ..                                             [  5%]
@@ -79,10 +81,11 @@ tests/test_rcp_automation.py .....                                       [ 65%]
 tests/test_rcp_network.py ......                                         [ 71%]
 tests/test_redui.py ...........                                          [ 82%]
 tests/test_rtos_timer_tick.py .                                          [ 83%]
+tests/test_sdma.py ...                                                   [ 84%]
 tests/test_storage.py ...                                                [ 86%]
 tests/test_web_studio.py .............                                   [100%]
 
-============================= 99 passed in 41.38s =============================
+============================ 102 passed in 32.84s =============================
 ```
 
 ---
