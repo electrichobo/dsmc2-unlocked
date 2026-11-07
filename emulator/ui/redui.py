@@ -140,7 +140,8 @@ class RedUiEngine:
         "POWER": {
             "Power In": ["DC IN 14.8V", "Low Battery Warning", "Min Voltage Alert", "Battery Level: 100%"],
             "Power Out": ["Aux 12V DC Out (2.0A)", "RS 24V Run/Stop Out", "USB 5V Power ON", "Power Out All OFF"],
-            "Power Save": ["Auto Sleep: 15 Min", "Auto Sleep: Never", "LCD Dimmer: 60s", "Low Power Fan Mode ON"]
+            "Power Save": ["Auto Sleep: 15 Min", "Auto Sleep: Never", "LCD Dimmer: 60s", "Low Power Fan Mode ON"],
+            "Shutdown": ["Power Off Camera", "Cancel"]
         },
         "PLAYBACK": {
             "Playback Screen": ["Browse Recorded Clips", "Play / Pause", "Shuttle 2x / 4x", "Frame Step Forward", "Frame Step Backward", "In/Out Marker", "Clip Metadata Inspector"]
@@ -1029,6 +1030,16 @@ class RedUiEngine:
             self.camera.log_system(f"[MONITORING] Sensor Look-Around margin: {item}")
 
         # 11. Power & Playback & Presets
+        elif item in ("Power Off Camera", "Shutdown") or (last_cat == "Shutdown" and "Power Off" in item):
+            self.menu_open = False
+            self.menu_path = ["Menu"]
+            self.camera.log_system("[PWR] Shutdown requested from on-screen monitor menu.")
+            self.camera.power_off()
+
+        elif last_cat == "Shutdown" and "Cancel" in item:
+            if len(self.menu_path) > 1:
+                self.menu_path.pop()
+
         elif "Power" in last_cat or "Power" in item:
             self.camera.log_system(f"[POWER] Power management profile: {item}")
 

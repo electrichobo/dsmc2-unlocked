@@ -140,16 +140,26 @@ class ScreenCompositor:
         return buf.getvalue()
 
     def _render_standby_screen(self) -> Image.Image:
-        img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (8, 8, 8))
+        img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (6, 6, 6))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([(10, 10), (1014, 566)], outline=(25, 25, 25), width=2)
-        cx, cy = 512, 288
-        draw.rectangle([(cx - 260, cy - 90), (cx + 260, cy + 90)], fill=(16, 16, 16), outline=(40, 40, 40), width=2)
+        draw.rectangle([(10, 10), (self.NATIVE_WIDTH - 10, self.NATIVE_HEIGHT - 10)], outline=(30, 30, 30), width=2)
+        cx, cy = self.NATIVE_WIDTH // 2, self.NATIVE_HEIGHT // 2
+
+        card_w, card_h = 560, 200
+        x1, y1 = cx - card_w // 2, cy - card_h // 2
+        x2, y2 = cx + card_w // 2, cy + card_h // 2
+
+        draw.rectangle([(x1, y1), (x2, y2)], fill=(16, 16, 16), outline=(48, 48, 48), width=2)
+        draw.rectangle([(x1, y1), (x1 + 6, y2)], fill=(200, 20, 20)) # Red DSMC2 accent bar
+
         model_name = self.camera.vfs.env.get("CAMERA_NAME", "SCARLET-W 5K")
-        draw.text((cx - 150, cy - 70), f"RED DIGITAL CINEMA  |  {model_name}", fill=(200, 200, 200))
-        draw.text((cx - 100, cy - 35), "[ SYSTEM IN STANDBY ]", fill=(255, 170, 0))
-        draw.text((cx - 120, cy + 0), "DC IN 14.8V  •  Hardware Ready", fill=(100, 100, 100))
-        draw.text((cx - 165, cy + 40), ">>> CLICK [POWER ON] BUTTON BELOW TO BOOT <<<", fill=(0, 255, 120))
+        draw.text((x1 + 30, y1 + 22), "RED DIGITAL CINEMA", fill=(170, 170, 170), font=HUD_FONT_SM)
+        draw.text((x1 + 30, y1 + 42), f"DSMC2 BRAIN: {model_name}", fill=(240, 240, 240), font=HUD_FONT_LG)
+        draw.text((x1 + 30, y1 + 75), "[ SYSTEM IN STANDBY ]", fill=(255, 170, 0), font=HUD_FONT_MED)
+        draw.text((x1 + 30, y1 + 105), "DC IN 14.8V  •  Sensors & Display Sleeping  •  Hardware Ready", fill=(130, 130, 130), font=HUD_FONT_SM)
+
+        draw.rectangle([(x1 + 25, y1 + 140), (x2 - 25, y1 + 175)], fill=(20, 35, 20), outline=(0, 180, 80), width=1)
+        draw.text((x1 + 55, y1 + 150), ">>> TAP MONITOR OR CLICK [POWER ON] BELOW TO WAKE <<<", fill=(0, 255, 120), font=HUD_FONT_BOLD_SM)
         return img
 
     def _render_booting_screen(self) -> Image.Image:
@@ -376,6 +386,12 @@ class WebStudio:
 
     def handle_touch(self, x: int, y: int, pressed: bool, action: str = "down"):
         with self.lock:
+            if self.camera.power_state == self.camera.POWER_STANDBY:
+                if action == "down":
+                    self.camera.log_system("[PWR] Touch event received in standby -> Resuming RED DSMC2...")
+                    self.camera.power_on()
+                return
+
             self.camera.touch(x, y, pressed=pressed)
             self.compositor.redui.handle_touch(x, y, pressed=pressed, action=action)
             if action == "down":
@@ -385,6 +401,12 @@ class WebStudio:
 
     def handle_button(self, btn_name: str):
         with self.lock:
+            if self.camera.power_state == self.camera.POWER_STANDBY:
+                if btn_name in ("MENU", "REC", "1:1 MAG", "USER 1", "USER 2"):
+                    self.camera.log_system(f"[PWR] Physical [{btn_name}] pressed in standby -> Resuming RED DSMC2...")
+                    self.camera.power_on()
+                return
+
             pin_map = {
                 "MENU": 10, "1:1 MAG": 11, "USER 1": 14, "USER 2": 15,
                 "NAV UP": 20, "NAV LEFT": 21, "NAV ENTER": 22, "NAV RIGHT": 23, "NAV DOWN": 24
@@ -1268,10 +1290,28 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
   /* Power Button */
   button.power-btn {
-    background: linear-gradient(180deg, #1e3a1e, #132413);
-    color: #66ff88;
-    border: 1px solid #2e602e;
+    background: linear-gradient(180deg, #242424, #181818);
+    color: #ccc;
+    border: 1px solid #444;
     font-family: monospace;
+    font-weight: bold;
+    transition: all 0.15s ease;
+  }
+  button.power-btn:hover {
+    background: #2e2e2e;
+    color: #ff5555;
+    border-color: #773333;
+  }
+  button.power-btn.standby {
+    background: linear-gradient(180deg, #16361a, #0e2010);
+    color: #00ff77;
+    border: 1px solid #00bb55;
+    box-shadow: 0 0 10px rgba(0, 255, 119, 0.25);
+  }
+  button.power-btn.standby:hover {
+    background: linear-gradient(180deg, #1f4a24, #142e17);
+    color: #ffffff;
+    box-shadow: 0 0 14px rgba(0, 255, 119, 0.45);
   }
 
   /* D-Pad Container */
@@ -2064,8 +2104,18 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   }
 
   document.getElementById('rec-btn').addEventListener('click', () => sendBtn('REC'));
-  document.getElementById('pwr-btn').addEventListener('click', () => {
-    fetch('/api/power', {method: 'POST'}).catch(() => {});
+  document.getElementById('pwr-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('pwr-btn');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/power', {method: 'POST'});
+      const data = await res.json();
+      await pollStatus();
+    } catch (e) {
+      console.error('Power toggle failed:', e);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // Keyboard Shortcuts
@@ -2111,18 +2161,22 @@ STUDIO_HTML = r"""<!DOCTYPE html>
 
       if (data.power_state === 'STANDBY') {
         pwrText.textContent = 'STANDBY';
+        pwrText.style.color = '#ffaa00';
         pwrBtn.textContent = 'POWER ON';
-        pwrBtn.style.color = '#66ff88';
+        pwrBtn.classList.add('standby');
         ledDot.className = 'led-dot';
       } else if (data.power_state === 'BOOTING') {
         const pct = Math.round(data.boot_progress * 100);
         pwrText.textContent = `BOOTING ${pct}%`;
+        pwrText.style.color = '#ffaa00';
         pwrBtn.textContent = 'BOOTING...';
+        pwrBtn.classList.remove('standby');
         ledDot.className = 'led-dot';
       } else {
         pwrText.textContent = 'ONLINE';
+        pwrText.style.color = '#00ff77';
         pwrBtn.textContent = 'POWER OFF';
-        pwrBtn.style.color = '#ccc';
+        pwrBtn.classList.remove('standby');
         ledDot.className = 'led-dot online';
       }
 
@@ -2586,6 +2640,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   }
 
   async function selectCameraModel(modelId) {
+    const cards = document.querySelectorAll('.cam-card');
+    cards.forEach(c => c.style.pointerEvents = 'none');
+    const note = document.querySelector('.modal-foot-note');
+    if (note) note.innerHTML = '<span style="color: #00ff77; font-weight: bold;">Booting selected DSMC2 personality & firmware into DDR...</span>';
+
     try {
       const res = await fetch('/api/camera/select', {
         method: 'POST',
@@ -2594,12 +2653,21 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       });
       const data = await res.json();
       if (data.status === 'ok') {
-        localStorage.setItem('dsmc2_model_initialized', 'true');
         closeModelModal();
-        pollStatus();
+        await pollStatus();
+        const canvas = document.getElementById('touchCanvas');
+        if (canvas) {
+          canvas.src = '/api/stream?t=' + Date.now();
+        }
+      } else {
+        alert('Failed to boot camera model: ' + (data.message || 'unknown error'));
       }
     } catch (e) {
       console.error('Error selecting camera model:', e);
+    } finally {
+      const cards = document.querySelectorAll('.cam-card');
+      cards.forEach(c => c.style.pointerEvents = 'auto');
+      if (note) note.textContent = 'Firmware assets extracted from stock RED Combo Build v7.4.1.';
     }
   }
 
@@ -2608,10 +2676,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   loadClips();
   setInterval(loadClips, 2000);
 
-  // Auto-prompt camera chooser on initial session if not initialized
-  if (!localStorage.getItem('dsmc2_model_initialized')) {
-    setTimeout(openModelModal, 400);
-  }
+  // Prompt camera chooser on launch before user interaction
+  setTimeout(openModelModal, 250);
 
   // Start telemetry loop
   pollStatus();

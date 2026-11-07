@@ -10,9 +10,9 @@
 
 ## 1. Executive Summary
 
-A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~2.0 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful I2C communication and ARDY interrupt semaphore wake-ups, satisfies monitor presence detection via Atmel maXTouch (`0x4B`) and EDID EEPROM (`0x50`), renders authentic 1024x576 display imagery and overlays, and provides synchronized Desktop GUI, CLI, and Web Virtual Camera Studio interfaces.
+A fully functional, locally buildable, authentic RED DSMC2 full-system virtual camera emulator has been constructed, validated, and documented. The emulator executes genuine imported ARM machine code from stock RED DSMC2 firmware (`v7.4.1`), executes through C runtime startup and BSS zeroing (45,000,000 instructions in ~1.6 seconds), initializes the genuine ThreadX RTOS kernel, discovers and inspects authentic ThreadX threads, models the 96-channel OMAP interrupt controller, handles stateful I2C communication and ARDY interrupt semaphore wake-ups, satisfies monitor presence detection via Atmel maXTouch (`0x4B`) and EDID EEPROM (`0x50`), renders authentic 1024x576 display imagery and overlays, and provides synchronized Desktop GUI, CLI, and Web Virtual Camera Studio interfaces.
 
-**All 50 automated unit and integration tests pass cleanly (100% pass rate).**
+**All 53 automated unit and integration tests pass cleanly (100% pass rate).**
 
 ---
 
@@ -28,13 +28,15 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M5** | Firmware-visible peripheral models | Stateful I2C1..3 master controllers; Atmel maXTouch multi-touch controller on `0x4B` with 7-object table; 24C02 EDID EEPROM on `0x50` with authentic "RED TOUCH 7.0" 128-byte block. Satisfies `isMonitorAttached` at `0x80754DC0`. | **COMPLETE** |
 | **M6** | Authentic UI pipeline | Verified 1024x576 native LCD resolution from decompressed `slot/res/splash_screen.bin` (1,769,480 bytes, format REDZLIB0); DISPC DDR framebuffer extraction; Atmel maXTouch T5/T9 packet injection. Interactive `RedUiEngine` with visual touch feedback reticles, quick-selection dialogs (ISO, FPS, Shutter, Format, Media, Audio), full DSMC2 system menu, and cinema exposure tools (1:1 Mag, False Color LUT, Zebras 95%). | **COMPLETE** |
 | **M7** | Operational virtual camera | Full desktop application (`emulator/ui/app.py`): Virtual RED Camera zone (1024x576 screen + tactile buttons: REC, POWER, MENU, MAG, NAV) and synchronized Developer Dashboard (Console, RCP, ThreadX inspector, MMIO, Faults, Snapshots). | **COMPLETE** |
-| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (50 passed). | **COMPLETE** |
+| **M8** | Firmware development lab | CLI interface (`emulator/cli.py` with `boot`, `run`, `inspect`, `snapshot`, `test`); compressed state snapshots (`SnapshotManager`); fault injection engine (monitor detach, I2C NACK, corrupt `/env`, watchdog reset); automated test suite (53 passed). | **COMPLETE** |
 | **M9** | Complete, distributable local product | Authoritative documentation suite complete (`README.md`, `docs/ARCHITECTURE.md`, `docs/BOOT_TRACE.md`, `docs/UI_RESEARCH.md`, `docs/TESTING.md`, `STATUS.md`, `HANDOFF.md`). All proprietary assets untracked. | **COMPLETE** |
 | **M10** | Extended fidelity | Multi-model profile foundations prepared in `CameraEnvironment` and lens mount database (230+ models). | **COMPLETE** |
 | **M11** | Web-Based Virtual Camera Studio | Zero-dependency standard library web studio (`emulator/ui/web.py`) on dedicated port with fluid responsive 16:9 screen bezel, crosshair coordinate mapping, and full developer workbench. | **COMPLETE** |
 | **M12** | Master DSMC2 Menu Tree & Look Tiles | Complete hierarchical DSMC2 menu tree (IMAGE, MONITORING, OVERLAYS, POWER, PLAYBACK, MEDIA, PRESETS, SETTINGS) with 8-tile `Settings > Look >` matrix and authentic False Color dropdown ribbon. | **COMPLETE** |
 | **M13** | Vertical RED MINI-MAG Firmware Loader Slot | Anodized brushed aluminum vertical cartridge slot positioned to the left of the screen viewport. Defaults to confirmed working v7.4.1 firmware (`dsmc_program.mem`), accepts custom firmware mods via drag-and-drop or file upload, and provides instant 1-click baseline revert. | **COMPLETE** |
 | **M14** | Multi-Model DSMC2 Selection & Adaptive UI | Extracted all 5 DSMC2 cameras (`WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, `EPIC-W 8K`) from `combo_7.4.1.bin`. Added camera selection modal panel, dynamic profile switching (`/api/camera/select`), adaptive button text auto-fitting/wrapping (zero overflow), and streamlined touch action dispatch (`down`, `move`, `up`). | **COMPLETE** |
+| **M15** | Hardware Re-initialization & Dynamic Firmware DDR Reloading | Implemented `_init_hardware()` in `Dsmc2Camera` to cleanly re-create CPU JIT state, PRCM registers, INTC vectors, GPTimers, and DISPC framebuffers on camera model switch, booting any of the 5 models in ~1.6s without translation block caching deadlocks. | **COMPLETE** |
+| **M16** | Standby Power Lifecycle & Auto-Prompt Launch Modal | Enabled full Standby power management via web button (`#pwr-btn`), touch screen wake, physical key wake, and on-screen `Menu > Power > Shutdown` confirmation. Replaced one-time `localStorage` suppression with auto-prompt camera selection panel on studio launch before user interaction. | **COMPLETE** |
 
 ---
 
@@ -47,20 +49,20 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 50 items
+collected 53 items
 
-tests\test_camera_boot.py ..                                             [  4%]
-tests\test_fault_injection.py .                                          [  6%]
-tests\test_gui_interaction.py .                                          [  8%]
-tests\test_lens_mount.py ......                                          [ 20%]
-tests\test_peripherals.py ......                                         [ 32%]
-tests\test_r3d_recording.py ....                                         [ 40%]
-tests\test_rcp_network.py ......                                         [ 52%]
-tests\test_redui.py ..........                                           [ 72%]
-tests\test_storage.py ...                                                [ 78%]
-tests\test_web_studio.py ...........                                     [100%]
+tests\test_camera_boot.py ..                                             [  3%]
+tests\test_fault_injection.py .                                          [  5%]
+tests\test_gui_interaction.py .                                          [  7%]
+tests\test_lens_mount.py ......                                          [ 18%]
+tests\test_peripherals.py ......                                         [ 30%]
+tests\test_r3d_recording.py ....                                         [ 37%]
+tests\test_rcp_network.py ......                                         [ 49%]
+tests\test_redui.py ...........                                          [ 69%]
+tests\test_storage.py ...                                                [ 75%]
+tests\test_web_studio.py .............                                   [100%]
 
-======================= 50 passed, 1 warning in 14.15s ========================
+======================= 53 passed, 1 warning in 14.48s ========================
 ```
 
 ---

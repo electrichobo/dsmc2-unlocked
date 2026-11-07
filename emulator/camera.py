@@ -44,71 +44,22 @@ class Dsmc2Camera:
         self.firmware_slot_dir = os.path.join(self.workspace_root, "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot")
         self.persistent_dir = os.path.join(self.workspace_root, "persistent_store")
 
-        # 1. Initialize Core Architecture
-        self.cpu = ArmCpu()
-        self.bus = SystemBus(self.cpu)
+        # 1. Initialize SoC Hardware & Registers
+        self._init_hardware()
 
         # 2. Storage and VFS
         self.vfs = VirtualFileSystem(self.firmware_slot_dir, self.persistent_dir)
         self.env = self.vfs.env
 
-        # 3. Interrupt Controller
-        self.intc = OmapIntc()
-
-        # 4. PRCM (Clock & Reset)
-        self.prcm = OmapPrcm(self.cpu)
-        self.bus.register_device(OmapPrcm.BASE_ADDR, OmapPrcm.SIZE, self.prcm)
-
-        # 5. INTC
-        self.bus.register_device(OmapIntc.BASE_ADDR, OmapIntc.SIZE, self.intc)
-
-        # 6. GPTimers (1..11)
-        self.timers: Dict[int, OmapGPTimer] = {}
-        for timer_id, (base, irq) in TIMER_MAP.items():
-            tmr = OmapGPTimer(timer_id, irq, self.intc)
-            self.timers[timer_id] = tmr
-            self.bus.register_device(base, 0x1000, tmr)
-
-        # 7. UARTs (1..4)
-        self.uarts: Dict[int, OmapUart] = {}
-        for uart_id, (base, irq) in UART_MAP.items():
-            u = OmapUart(uart_id, irq, self.intc)
-            self.uarts[uart_id] = u
-            self.bus.register_device(base, 0x1000, u)
-
-        # 8. I2C Controllers & Slave Devices
-        self.i2c: Dict[int, OmapI2c] = {}
-        for bus_id, (base, irq) in I2C_MAP.items():
-            ctrl = OmapI2c(bus_id, irq, self.intc)
-            self.i2c[bus_id] = ctrl
-            self.bus.register_device(base, 0x1000, ctrl)
-
-        # Attach Atmel maXTouch touch controller (0x4B) and EDID EEPROM (0x50) to I2C3
-        self.maxtouch = MaXTouchDevice(0x4B, irq_callback=lambda: self.intc.assert_irq(58))
-        self.edid = EdidEeprom(0x50)
-        self.i2c[3].attach_slave(self.maxtouch)
-        self.i2c[3].attach_slave(self.edid)
-
-        # 9. GPIO Controllers (1..6)
-        self.gpio: Dict[int, OmapGpio] = {}
-        for mod_id, (base, irq) in GPIO_MAP.items():
-            g = OmapGpio(mod_id, irq, self.intc)
-            self.gpio[mod_id] = g
-            self.bus.register_device(base, 0x1000, g)
-
-        # 10. Display Subsystem (DSS)
-        self.dss = OmapDss(self.bus)
-        self.bus.register_device(OmapDss.BASE_ADDR, OmapDss.SIZE, self.dss)
-
-        # 11. RCP Protocol & Server
+        # 3. RCP Protocol & Server
         self.rcp = RcpProtocol(camera=self)
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
 
-        # 12. Smart Electronic Lens Mount
+        # 4. Smart Electronic Lens Mount
         lens_dir = os.path.join(self.firmware_slot_dir, "lens")
         self.lens_mount = LensMount(self, lens_database_dir=lens_dir)
 
-        # 13. REDCODE R3D Media Recorder
+        # 5. REDCODE R3D Media Recorder
         self.recorder = R3dClipRecorder(self, storage_root=self.workspace_root)
 
         # Execution & Power Control
@@ -123,6 +74,69 @@ class Dsmc2Camera:
         self.power_state = self.POWER_STANDBY
         self.boot_progress = 0.0
         self.on_state_change: Optional[Callable[[str], None]] = None
+
+    def _init_hardware(self):
+        """Cleanly initialize or re-initialize SoC hardware, registers, and memory mappings."""
+        # Save previous log lines if re-initializing
+        old_logs = list(self.uarts[4].completed_lines) if hasattr(self, "uarts") and 4 in self.uarts else []
+
+        # 1. Initialize Core Architecture
+        self.cpu = ArmCpu()
+        self.bus = SystemBus(self.cpu)
+
+        # 2. Interrupt Controller
+        self.intc = OmapIntc()
+
+        # 3. PRCM (Clock & Reset)
+        self.prcm = OmapPrcm(self.cpu)
+        self.bus.register_device(OmapPrcm.BASE_ADDR, OmapPrcm.SIZE, self.prcm)
+
+        # 4. INTC
+        self.bus.register_device(OmapIntc.BASE_ADDR, OmapIntc.SIZE, self.intc)
+
+        # 5. GPTimers (1..11)
+        self.timers: Dict[int, OmapGPTimer] = {}
+        for timer_id, (base, irq) in TIMER_MAP.items():
+            tmr = OmapGPTimer(timer_id, irq, self.intc)
+            self.timers[timer_id] = tmr
+            self.bus.register_device(base, 0x1000, tmr)
+
+        # 6. UARTs (1..4)
+        self.uarts: Dict[int, OmapUart] = {}
+        for uart_id, (base, irq) in UART_MAP.items():
+            u = OmapUart(uart_id, irq, self.intc)
+            self.uarts[uart_id] = u
+            self.bus.register_device(base, 0x1000, u)
+
+        if old_logs:
+            self.uarts[4].completed_lines.extend(old_logs)
+
+        # 7. I2C Controllers & Slave Devices
+        self.i2c: Dict[int, OmapI2c] = {}
+        for bus_id, (base, irq) in I2C_MAP.items():
+            ctrl = OmapI2c(bus_id, irq, self.intc)
+            self.i2c[bus_id] = ctrl
+            self.bus.register_device(base, 0x1000, ctrl)
+
+        # Attach Atmel maXTouch touch controller (0x4B) and EDID EEPROM (0x50) to I2C3
+        self.maxtouch = MaXTouchDevice(0x4B, irq_callback=lambda: self.intc.assert_irq(58))
+        self.edid = EdidEeprom(0x50)
+        self.i2c[3].attach_slave(self.maxtouch)
+        self.i2c[3].attach_slave(self.edid)
+
+        # 8. GPIO Controllers (1..6)
+        self.gpio: Dict[int, OmapGpio] = {}
+        for mod_id, (base, irq) in GPIO_MAP.items():
+            g = OmapGpio(mod_id, irq, self.intc)
+            self.gpio[mod_id] = g
+            self.bus.register_device(base, 0x1000, g)
+
+        # 9. Display Subsystem (DSS)
+        self.dss = OmapDss(self.bus)
+        self.bus.register_device(OmapDss.BASE_ADDR, OmapDss.SIZE, self.dss)
+
+        self.instruction_count = 0
+        self.is_booted = False
 
     def log_system(self, message: str):
         """Append an entry to system logs (UART4) and terminal stdout."""
@@ -383,11 +397,17 @@ class Dsmc2Camera:
                 self.vfs.mounts["/image1"] = new_slot_dir
                 self.vfs.mounts["/image2"] = new_slot_dir
 
+            # Cleanly re-initialize SoC hardware before booting new model's firmware
+            self._init_hardware()
+
             # Reload and boot the actual firmware binary for this model
             fw_path = os.path.join(new_slot_dir, "dsmc_program.mem")
             if os.path.exists(fw_path):
                 self.load_firmware(fw_path)
                 self.boot(initial_instructions=45_000_000)
+                self.power_state = self.POWER_ON
+                self.is_booted = True
+                self.rcp_server.start()
 
         # Update RCP state
         if hasattr(self, "rcp") and self.rcp:

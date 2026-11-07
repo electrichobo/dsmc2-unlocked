@@ -227,3 +227,71 @@ def test_web_studio_firmware_loader_lifecycle(web_server):
     status_json2 = json.loads(status_resp2.read().decode("utf-8"))
     assert status_json2["firmware"]["is_custom"] is False
 
+
+def test_web_studio_power_lifecycle(web_server):
+    """Verify camera power standby toggling, standby frame rendering, and wake from standby."""
+    base_url = web_server["url"]
+
+    # 1. Power Off into Standby
+    req_pwr = urllib.request.Request(base_url + "/api/power", data=b"{}", headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req_pwr)
+    assert resp.status == 200
+    res_data = json.loads(resp.read().decode("utf-8"))
+    assert res_data["status"] == "ok"
+    assert res_data["power_state"] == "STANDBY"
+
+    # Status check
+    st_resp = urllib.request.urlopen(base_url + "/api/status")
+    st_data = json.loads(st_resp.read().decode("utf-8"))
+    assert st_data["power_state"] == "STANDBY"
+
+    # Frame check (JPEG format)
+    frame_resp = urllib.request.urlopen(base_url + "/api/frame")
+    assert frame_resp.status == 200
+    assert frame_resp.read()[:2] == b"\xff\xd8"
+
+    # 2. Power Back On
+    req_pwr2 = urllib.request.Request(base_url + "/api/power", data=b"{}", headers={"Content-Type": "application/json"})
+    resp2 = urllib.request.urlopen(req_pwr2)
+    assert resp2.status == 200
+    res_data2 = json.loads(resp2.read().decode("utf-8"))
+    assert res_data2["status"] == "ok"
+    assert res_data2["power_state"] == "ON"
+
+
+def test_web_studio_camera_model_switching(web_server):
+    """Verify dynamic DSMC2 camera personality switching, firmware DDR reloading, and sensor configuration."""
+    base_url = web_server["url"]
+
+    # Switch to RED RAVEN 4.5K (0x15)
+    req_sel = urllib.request.Request(
+        base_url + "/api/camera/select",
+        data=json.dumps({"model": "0x15"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    resp = urllib.request.urlopen(req_sel)
+    assert resp.status == 200
+    res_data = json.loads(resp.read().decode("utf-8"))
+    assert res_data["status"] == "ok"
+    assert res_data["camera_name"] == "RED RAVEN 4.5K"
+
+    # Verify status telemetry
+    st_resp = urllib.request.urlopen(base_url + "/api/status")
+    st_data = json.loads(st_resp.read().decode("utf-8"))
+    assert st_data["camera_name"] == "RED RAVEN 4.5K"
+    assert st_data["camera_type"] == "0x15"
+    assert st_data["power_state"] == "ON"
+
+    # Switch back to SCARLET-W 5K (0x16)
+    req_sel2 = urllib.request.Request(
+        base_url + "/api/camera/select",
+        data=json.dumps({"model": "0x16"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    resp2 = urllib.request.urlopen(req_sel2)
+    assert resp2.status == 200
+    res_data2 = json.loads(resp2.read().decode("utf-8"))
+    assert res_data2["status"] == "ok"
+    assert res_data2["camera_name"] == "SCARLET-W 5K"
+
+
