@@ -40,6 +40,12 @@ class OmapGpmc(Device):
     REG_NAND_ADDRESS_0 = 0x80
     REG_NAND_DATA_0 = 0x84
 
+    # Prefetch and Write-Posting Engine
+    REG_PREFETCH_CONFIG1 = 0x1E0
+    REG_PREFETCH_CONFIG2 = 0x1E4
+    REG_PREFETCH_CONTROL = 0x1EC
+    REG_PREFETCH_STATUS = 0x1F0
+
     # ECC Hardware Engine
     REG_ECC_CONFIG = 0x1F4
     REG_ECC_CONTROL = 0x1F8
@@ -63,10 +69,20 @@ class OmapGpmc(Device):
         # NAND Flash transaction state
         self.nand_cmd = 0x00
         self.nand_addr = 0x00
-        self.nand_buffer = deque()
+        self.nand_buffer: deque = deque()
+        self.features: Dict[int, list] = {
+            0x01: [0x00, 0x00, 0x00, 0x00] # Timing mode feature
+        }
+
+        # Prefetch engine state
+        self.prefetch_config1 = 0x00
+        self.prefetch_config2 = 0x00
+        self.prefetch_control = 0x00
 
         # Hardware ECC state
+        self.ecc_config = 0x00
         self.ecc_control = 0x00
+        self.ecc_size_config = 0x00
         self.ecc1_result = 0x00000000
 
     def read(self, offset: int, size: int) -> int:
@@ -82,11 +98,28 @@ class OmapGpmc(Device):
         elif offset == self.REG_IRQENABLE:
             return self.irqenable
         elif offset == self.REG_NAND_DATA_0:
-            if self.nand_buffer:
-                return self.nand_buffer.popleft()
+            val = 0
+            for i in range(size):
+                if self.nand_buffer:
+                    b = self.nand_buffer.popleft()
+                else:
+                    b = 0x00
+                val |= (b << (i * 8))
+            return val
+        elif offset == self.REG_PREFETCH_CONFIG1:
+            return self.prefetch_config1
+        elif offset == self.REG_PREFETCH_CONFIG2:
+            return self.prefetch_config2
+        elif offset == self.REG_PREFETCH_CONTROL:
+            return self.prefetch_control
+        elif offset == self.REG_PREFETCH_STATUS:
             return 0x00000000
+        elif offset == self.REG_ECC_CONFIG:
+            return self.ecc_config
         elif offset == self.REG_ECC_CONTROL:
             return self.ecc_control
+        elif offset == self.REG_ECC_SIZE_CONFIG:
+            return self.ecc_size_config
         elif offset == self.REG_ECC1_RESULT:
             return self.ecc1_result
         elif offset in self.cs_configs:
@@ -110,13 +143,25 @@ class OmapGpmc(Device):
         elif offset == self.REG_NAND_ADDRESS_0:
             self.nand_addr = val
         elif offset == self.REG_NAND_DATA_0:
-            self.nand_buffer.append(val)
+            for i in range(size):
+                b = (val >> (i * 8)) & 0xFF
+                self.nand_buffer.append(b)
             # Update ECC calculation
             self.ecc1_result ^= val
+        elif offset == self.REG_PREFETCH_CONFIG1:
+            self.prefetch_config1 = val
+        elif offset == self.REG_PREFETCH_CONFIG2:
+            self.prefetch_config2 = val
+        elif offset == self.REG_PREFETCH_CONTROL:
+            self.prefetch_control = val
+        elif offset == self.REG_ECC_CONFIG:
+            self.ecc_config = val
         elif offset == self.REG_ECC_CONTROL:
             self.ecc_control = val
             if val & 0x01: # Clear ECC
                 self.ecc1_result = 0x00000000
+        elif offset == self.REG_ECC_SIZE_CONFIG:
+            self.ecc_size_config = val
         elif offset in (self.REG_CONFIG1_0, self.REG_CONFIG2_0, self.REG_CONFIG3_0,
                         self.REG_CONFIG4_0, self.REG_CONFIG5_0, self.REG_CONFIG6_0,
                         self.REG_CONFIG7_0):
@@ -127,16 +172,34 @@ class OmapGpmc(Device):
         if cmd == 0x90: # Read ID
             # Returns Manufacturer ID 0x2C (Micron) and Device ID 0xBA (256MB SLC)
             self.nand_buffer.clear()
-            self.nand_buffer.append(0xBA2C0000)
-            self.nand_buffer.append(0x1590A500)
+            self.nand_buffer.extend([0x2C, 0xBA, 0x90, 0xA5, 0x15])
         elif cmd == 0x70: # Read Status
             self.nand_buffer.clear()
-            self.nand_buffer.append(0xE0) # Ready, Write-protect disabled
+            # 0xE0: Ready (bit 6 = 1), Write-protect inactive (bit 7 = 1), Pass (bit 0 = 0)
+            self.nand_buffer.append(0xE0)
+        elif cmd == 0xEE: # Get Features
+            self.nand_buffer.clear()
+            feat = self.features.get(self.nand_addr, [0x00, 0x00, 0x00, 0x00])
+            self.nand_buffer.extend(feat)
+        elif cmd == 0xEF: # Set Features
+            self.nand_buffer.clear()
         elif cmd == 0xEC: # Read Parameter Page (ONFI)
             self.nand_buffer.clear()
-            self.nand_buffer.append(0x49464E4F) # 'ONFI' signature
-            self.nand_buffer.append(0x00020000) # ONFI 2.0
-            self.nand_buffer.append(0x00000800) # 2048-byte page size
-            self.nand_buffer.append(0x00400040) # 64-byte OOB, 64 pages per block
+            onfi_page = bytearray(256)
+            onfi_page[0:4] = b"ONFI"
+            onfi_page[4:6] = (2).to_bytes(2, "little") # Revision 2.0
+            onfi_page[80:84] = (2048).to_bytes(4, "little") # 2048 bytes per page
+            onfi_page[84:86] = (64).to_bytes(2, "little") # 64 OOB bytes per page
+            onfi_page[92:96] = (64).to_bytes(4, "little") # 64 pages per block
+            onfi_page[96:100] = (2048).to_bytes(4, "little") # 2048 blocks per LUN
+            self.nand_buffer.extend(onfi_page)
         elif cmd == 0xFF: # Reset
             self.nand_buffer.clear()
+        elif cmd in (0x00, 0x30, 0x23): # Read Setup / Confirm / Random Read
+            if not self.nand_buffer:
+                # Supply 2048 bytes of flash content (default blank 0xFF)
+                self.nand_buffer.extend([0xFF] * 2048)
+        elif cmd in (0x60, 0xD0, 0x2A): # Block Erase Setup / Confirm
+            self.nand_buffer.clear()
+        elif cmd in (0x80, 0x10): # Page Program Setup / Confirm
+            pass

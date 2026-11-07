@@ -42,27 +42,35 @@ class OmapGPTimer(Device):
             return self.tiocp_cfg
         elif offset == 0x14: # TISTAT
             return 0x01 # RESETDONE
-        elif offset == 0x18 or offset == 0x28: # TISR (offset varies in OMAP docs)
-            return self.tisr
-        elif offset == 0x1C: # TIER
+        elif offset == 0x18: # TISR (Timers 2..11) or TIER (Timer 1)
+            return self.tier if self.timer_id == 1 else self.tisr
+        elif offset == 0x1C: # TIER (Timers 2..11)
             return self.tier
         elif offset == 0x20: # TWER
             return self.twer
         elif offset == 0x24: # TCLR
             return self.tclr
-        elif offset == 0x28 or offset == 0x3C: # TCRR / TCVR
+        elif offset == 0x28: # TCRR (Timers 2..11) or TISR (Timer 1)
+            return self.tisr if self.timer_id == 1 else self.tcrr
+        elif offset == 0x2C: # TLDR (Timers 2..11)
+            return self.tldr
+        elif offset == 0x34: # TWPS (Write posting status)
+            return 0
+        elif offset == 0x3C: # TCRR (Timer 1)
             return self.tcrr
-        elif offset == 0x2C: # TLDR
+        elif offset == 0x40: # TLDR (Timer 1)
             return self.tldr
         return 0
 
     def write(self, offset: int, size: int, value: int):
         if offset == 0x10:
             self.tiocp_cfg = value
-        elif offset == 0x18 or offset == 0x28: # TISR (write 1 to clear)
-            self.tisr &= ~value
-            if not (self.tisr & self.tier):
-                if self.intc:
+        elif offset == 0x18:
+            if self.timer_id == 1:
+                self.tier = value
+            else:
+                self.tisr &= ~value
+                if not (self.tisr & self.tier) and self.intc:
                     self.intc.deassert_irq(self.irq_num)
         elif offset == 0x1C:
             self.tier = value
@@ -70,9 +78,19 @@ class OmapGPTimer(Device):
             self.twer = value
         elif offset == 0x24:
             self.tclr = value
-        elif offset == 0x28 or offset == 0x3C:
-            self.tcrr = value
+        elif offset == 0x28:
+            if self.timer_id == 1:
+                self.tisr &= ~value
+                if not (self.tisr & self.tier) and self.intc:
+                    self.intc.deassert_irq(self.irq_num)
+            else:
+                self.tcrr = value
         elif offset == 0x2C:
+            self.tldr = value
+            self.tcrr = value
+        elif offset == 0x3C:
+            self.tcrr = value
+        elif offset == 0x40:
             self.tldr = value
             self.tcrr = value
 

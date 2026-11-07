@@ -232,6 +232,14 @@ class Dsmc2Camera:
         self.cpu.sp = 0x881D2690
         self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0 # Supervisor mode, IRQ/FIQ disabled
 
+        # Seed authentic NAND flash geometry descriptor in DDR (Micron MT29F8G08 256MB SLC)
+        # 0x81ef7818 = 1 (driver initialized flag)
+        # 0x81ef7820 = 0x2C (Micron), 0x81ef7821 = 0xBA (256MB SLC)
+        # 0x81ef7824 = 0x80FCEBF6 (pointer to geometry struct: page=2048, blk_pages=64, blks=2048, oob=64)
+        self.bus.write(0x81EF7818, 4, 0x00000001)
+        self.bus.write(0x81EF7820, 4, 0x0000BA2C)
+        self.bus.write(0x81EF7824, 4, 0x80FCEBF6)
+
         # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
         splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
         if not os.path.exists(splash_file):

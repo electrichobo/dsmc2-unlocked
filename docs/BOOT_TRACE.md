@@ -136,3 +136,12 @@ Between 34.5M and 45.0M instructions, the firmware invokes ThreadX kernel setup 
    - IOB1 Doorbell: MMIO at `0x4FFE8000` (write to `0x4FFE8004` dispatches descriptors from DDR at `0x800B17FC`).
    - Command `0x26` configures monitor pipeline modes (`CLEAN`, `BROADCAST_TALLY`, `FRAME_GUIDES`).
    - GPIO 130 (`MONITOR_HDMI_MUX`, Bank 5 Pin 2) dynamically multiplexes HDMI and LCD outputs.
+
+4. **NAND Flash & YAFFS File System Initialization (`bsp_Init` / `driverinit.c`)**:
+   - `bsp_Init` (`0x8066B714`) invokes `nand_init` (`0x8067AEFC`).
+   - `nand_init` issues NAND Reset (`0xFF`) and verifies `GPMC_STATUS` (`0x6E000054`) bit 8 (`WAIT0STATUS = 1`).
+   - `0x8067BC04` issues ONFI Read ID (`0x90`, address `0x00`) and streams 5 identification bytes from `0x6E000084` via 8-bit `ldrb`: Byte 0 = `0x2C` (Micron), Byte 1 = `0xBA` (256MB SLC), Byte 2 = `0x90`, Byte 3 = `0xA5`, Byte 4 = `0x15`.
+   - The device is matched against the firmware hardware table at `0x80FCEBF4` (Entry 0: `2C BA 00 08 40 00 00 08 40 00`).
+   - Stores the geometry descriptor pointer at `0x81EF7824` pointing to `0x80FCEBF6`: `page_size = 2048`, `pages_per_block = 64`, `total_blocks = 2048`, `oob_size = 64`.
+   - Hardware BCH ECC registers (`0x6E0001FC`, `0x6E0001F8`, `0x6E0001F4`) and prefetch engine (`0x6E0001E0`) are programmed.
+   - Driver thread 4 (`NAND File System`, `0x80008310`) invokes `0x80A0F468` (`init_filesystem`), reading `0x81EF7824` via `0x8067D170` and successfully mounting `/env` via YAFFS (`0x80A0F1D0` / `0x80A0CEE0`).

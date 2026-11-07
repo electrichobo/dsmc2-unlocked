@@ -164,9 +164,9 @@ def test_omap_gpmc_nand_and_bch_ecc():
     # ONFI NAND Command: Read ID (0x90)
     gpmc.write(gpmc.REG_NAND_CMD_0, 4, 0x90)
     word0 = gpmc.read(gpmc.REG_NAND_DATA_0, 4)
-    assert word0 == 0xBA2C0000 # Micron ID 0x2C, Device ID 0xBA
-    word1 = gpmc.read(gpmc.REG_NAND_DATA_0, 4)
-    assert word1 == 0x1590A500
+    assert word0 == 0xA590BA2C # Little-endian 32-bit: Byte 0=0x2C (Micron), Byte 1=0xBA (256MB SLC)
+    byte4 = gpmc.read(gpmc.REG_NAND_DATA_0, 1)
+    assert byte4 == 0x15
 
     # ONFI NAND Command: Read Status (0x70)
     gpmc.write(gpmc.REG_NAND_CMD_0, 4, 0x70)

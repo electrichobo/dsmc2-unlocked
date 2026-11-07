@@ -117,6 +117,38 @@ class SystemBus:
     def write_mem(self, address: int, data: bytes):
         self.mu.mem_write(address, data)
 
+    def read(self, address: int, size: int = 4) -> int:
+        """Read 1, 2, or 4-byte integer from memory or peripheral device."""
+        match = self._find_device(address)
+        if match is not None:
+            offset, dev = match
+            return dev.read(offset, size)
+        data = self.mu.mem_read(address, size)
+        if size == 1:
+            return data[0]
+        elif size == 2:
+            return struct.unpack("<H", data)[0]
+        elif size == 4:
+            return struct.unpack("<I", data)[0]
+        return int.from_bytes(data, "little")
+
+    def write(self, address: int, size: int, val: int):
+        """Write 1, 2, or 4-byte integer to memory or peripheral device."""
+        match = self._find_device(address)
+        if match is not None:
+            offset, dev = match
+            dev.write(offset, size, val)
+            return
+        if size == 1:
+            data = bytes([val & 0xFF])
+        elif size == 2:
+            data = struct.pack("<H", val & 0xFFFF)
+        elif size == 4:
+            data = struct.pack("<I", val & 0xFFFFFFFF)
+        else:
+            data = val.to_bytes(size, "little")
+        self.mu.mem_write(address, data)
+
     def read_u32(self, address: int) -> int:
         match = self._find_device(address)
         if match is not None:

@@ -20,7 +20,7 @@ Every component, peripheral model, and test result in this project explicitly de
 | **CRT & ThreadX RTOS** | **REAL CODE** | REAL CODE | Genuine GHS CRT startup, BSS zeroing (~34.5M instrs), ThreadX kernel bringup, 4 TCBs verified |
 | **OMAP3 INTC (Interrupts)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Bit-exact SPRUF98Y register layout across banks 0..2 (`ITR`, `MIR`, `MIR_CLEAR`, `MIR_SET`, `ISR_SET`, `ISR_CLEAR`, `PENDING_IRQ`), active IRQ dynamic deassertion |
 | **OMAP3 PRCM (Power/Reset/Clock)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | CM_FCLKEN, CM_ICLKEN, PRM_RSTST, dynamic DPLL lock sequencing resolving polling at `0x80674A00` / `0x80674A64` |
-| **OMAP3 GPTimers (1..11)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Timer 2 (IRQ 38) ThreadX 1000Hz RTOS system clock tick driving `_tx_timer_interrupt()`, Timer 11 system tick IRQ 47 |
+| **OMAP3 GPTimers (1..11)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Timer 2 (IRQ 38) ThreadX 1000Hz RTOS system clock tick driving `_tx_timer_interrupt()`, distinct Timer 1 (WKUP) vs Timers 2..11 TCRR/TISR register offsets |
 | **OMAP3 UARTs (1, 2, 3, 4)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | 16550 UARTs with TX line buffering, RX injection, LSR/SSR status flags, UART3 RCP, UART4 system log (`0x49042000`) |
 | **OMAP3 I2C Controllers (1, 2, 3)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Master TX/RX with XRDY/RRDY interrupt assertion, dynamic byte-stream FIFO collection, TWL4030 RTC sub-pages `0x1B`/`0x4B` |
 | **Atmel maXTouch Multi-Touch** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | I2C3 `0x4B`, 7-object table (T5, T6, T7, T8, T9, T15, T40), 1024x576 touch coordinates, T5 message queue |
@@ -28,7 +28,7 @@ Every component, peripheral model, and test result in this project explicitly de
 | **OMAP3 GPIO Modules (1..6)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Direction control, data in/out, edge detection, pin change callbacks, GPIO 130 (`MONITOR_HDMI_MUX`) toggle |
 | **OMAP3 Display Subsystem (DSS)** | **REAL CODE (Render)** | REAL CODE (Render) | 6 authentic display pipelines (`0x8266316C`), DDR framebuffers (`0x87400000` LCD, `0x87000000` HDMI, `0x87200000` HDSDI) |
 | **RedUi Virtual Display** | **REAL CODE (Render)** | REAL CODE (Render) | 1024x576 native LCD canvas rendering authentic `splash_screen.bin` and live DDR framebuffers, touch injection |
-| **OMAP3 GPMC & NAND Controller** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | `GPMC_STATUS` (0x54) reporting WAIT0STATUS ready, ONFI parameter page (0xEC), BCH ECC hardware calculation |
+| **OMAP3 GPMC & NAND Controller** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Micron MT29F8G08 SLC 256MB byte-oriented FIFO (ID 0x2C, 0xBA), GPMC_STATUS WAIT0STATUS ready, hardware BCH ECC / prefetch registers, DDR geometry descriptor at 0x81EF7824 pointing to 0x80FCEBF6 |
 | **Tensilica Xtensa (IOB0, IOB1, ISP)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | C2C Doorbell MMIO (`0x3FFE8000`, `0x4FFE8000`), shared DDR mailbox (`0x800B0FFC`, `0x800B17FC`), monitor command 0x26 |
 | **Flash Filesystem / VFS** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Path resolution for `/env`, `/image1`, `/image2`, `/data`, `/log`, `/pdata`, reading slot files, writing persistent data |
 | **RED Command Protocol (RCP)** | **DEVICE-ACCURATE MODEL** | DEVICE-ACCURATE MODEL | Multi-threaded TCP server on port 1111 and UART3, parameter GET/SET, RECORD toggle |
