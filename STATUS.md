@@ -97,3 +97,4 @@ tests\test_web_studio.py ...........                                     [100%]
 
 1. **Custom Firmware Execution Harness**: Implement boot-time branching in `Dsmc2Camera` to selectively map staged custom firmware binaries from `firmware_store/custom/` into `0x80000000` memory.
 2. **Firmware Integrity Validator**: Add binary header inspection for RED package checksums, entry vector validation, and symbol table parsing.
+3. **Hardware Peripherals & Coprocessor ASICs Roadmap**: Execute staged implementation plan documented in [`docs/HARDWARE_PERIPHERALS_PLAN.md`](docs/HARDWARE_PERIPHERALS_PLAN.md) covering OMAP GPMC/McBSP, Tensilica Xtensa IOB0/IOB1/ISP coprocessors, and multi-channel I2C PMIC/thermal sensors.
