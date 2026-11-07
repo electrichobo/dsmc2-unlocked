@@ -2051,8 +2051,6 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       body: JSON.stringify({x, y, pressed, action})
     }).catch(() => {});
   }
-    }).catch(() => {});
-  }
 
   function sendBtn(name) {
     fetch('/api/button', {
