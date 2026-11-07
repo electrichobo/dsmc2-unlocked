@@ -190,9 +190,11 @@ def test_web_studio_firmware_loader_lifecycle(web_server):
     assert info["is_custom"] is False
     assert info["slot_mounted"] is True
 
-    # 2. Upload custom firmware image
+    # 2. Upload valid custom firmware image
     import base64
-    test_fw_bytes = b"RED_CUSTOM_FIRMWARE_HEADER\x00\x01\x02\x03THREADX_IMAGE_DATA"
+    import struct
+    vecs = [0xEA000006] + [0xE59FF024]*7 + [0xE59FD000, 0xE59FF000, 0x881D2690, 0x80000040]
+    test_fw_bytes = struct.pack("<12I", *vecs) + b"\x00"*16 + struct.pack("<2I", 0xE3A0002A, 0xEAFFFFFE)
     b64_content = base64.b64encode(test_fw_bytes).decode("ascii")
     upload_url = base_url + "/api/firmware/upload"
     payload = json.dumps({"filename": "custom_mod_build101.bin", "data": b64_content}).encode("utf-8")
@@ -202,6 +204,16 @@ def test_web_studio_firmware_loader_lifecycle(web_server):
     res_data = json.loads(upload_resp.read().decode("utf-8"))
     assert res_data["status"] == "ok"
     assert "custom_mod_build101.bin" in res_data["active_name"]
+    assert "metadata" in res_data
+    assert res_data["metadata"]["is_valid"] is True
+
+    # 3. Boot staged custom firmware via /api/firmware/boot
+    boot_url = base_url + "/api/firmware/boot"
+    req_boot = urllib.request.Request(boot_url, data=b"{}", headers={"Content-Type": "application/json"})
+    boot_resp = urllib.request.urlopen(req_boot)
+    assert boot_resp.status == 200
+    boot_data = json.loads(boot_resp.read().decode("utf-8"))
+    assert boot_data["status"] == "ok"
 
     # Verify /api/status telemetry reflects custom firmware
     status_resp = urllib.request.urlopen(base_url + "/api/status")
@@ -213,7 +225,7 @@ def test_web_studio_firmware_loader_lifecycle(web_server):
     dest_path = os.path.join(REPO_ROOT, "firmware_store", "custom", "custom_mod_build101.bin")
     assert os.path.exists(dest_path)
 
-    # 3. Reset to confirmed baseline
+    # 4. Reset to confirmed baseline
     reset_url = base_url + "/api/firmware/reset"
     req_reset = urllib.request.Request(reset_url, data=b"{}", headers={"Content-Type": "application/json"})
     reset_resp = urllib.request.urlopen(req_reset)

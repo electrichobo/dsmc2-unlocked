@@ -640,6 +640,7 @@ def create_handler(studio: WebStudio):
 
             elif path == "/api/firmware/upload":
                 import base64
+                from emulator.core.firmware import FirmwareManager
                 filename = str(data.get("filename", "custom_firmware.bin"))
                 filename = os.path.basename(filename)
                 b64_data = data.get("data", "")
@@ -653,30 +654,53 @@ def create_handler(studio: WebStudio):
                 with open(dest_path, "wb") as f:
                     f.write(file_bytes)
 
+                meta = FirmwareManager.inspect(dest_path, filename=filename)
+
                 with studio.lock:
                     studio.active_firmware_name = f"Custom: {filename}"
                     studio.active_firmware_file = filename
                     studio.active_firmware_size = len(file_bytes)
                     studio.active_firmware_is_custom = True
                     studio.custom_firmware_path = dest_path
-                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG: Custom firmware image loaded: {filename} ({len(file_bytes)} bytes)")
-                    studio.camera.log_system("[FIRMWARE-LOADER] Target ready for DSMC2 firmware verification & staging.")
+                    studio.camera.staged_firmware_path = dest_path
+                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG: Custom firmware image staged: {filename} ({meta.size_mb:.2f} MB)")
+                    studio.camera.log_system(f"[FIRMWARE-LOADER] Format: {meta.format_name} | SP: 0x{meta.sp:08X} | Reset PC: 0x{meta.reset_pc:08X}")
+                    studio.camera.log_system("[FIRMWARE-LOADER] Ready for flash & execution into DDR RAM (0x80000000).")
 
                 self._send_json({
                     "status": "ok",
                     "active_name": studio.active_firmware_name,
                     "filename": filename,
-                    "size": len(file_bytes)
+                    "size": len(file_bytes),
+                    "metadata": meta.to_dict()
                 })
+
+            elif path == "/api/firmware/boot":
+                if not studio.custom_firmware_path or not os.path.exists(studio.custom_firmware_path):
+                    self._send_json({"status": "error", "message": "No custom firmware staged in RED MINI-MAG slot"}, status=400)
+                    return
+
+                with studio.lock:
+                    res = studio.camera.load_and_boot_custom_firmware(studio.custom_firmware_path)
+                    if res.get("status") == "ok":
+                        studio.active_firmware_name = f"Custom: {os.path.basename(studio.custom_firmware_path)} (Running)"
+                        studio.active_firmware_is_custom = True
+                    else:
+                        studio.active_firmware_name = f"Custom: {os.path.basename(studio.custom_firmware_path)} (Crashed)"
+                self._send_json(res)
 
             elif path == "/api/firmware/reset":
                 with studio.lock:
-                    studio.active_firmware_name = studio.confirmed_baseline_name
-                    studio.active_firmware_file = studio.confirmed_baseline_file
-                    studio.active_firmware_size = 18972672
+                    current_model = studio.camera.env.get("CAMERA_TYPE", "0x16")
+                    studio.camera.select_camera_model(current_model)
+                    current_name = studio.camera.env.get("CAMERA_NAME", "SCARLET-W 5K")
+                    studio.active_firmware_name = f"{current_name} (v7.4.1)"
+                    studio.active_firmware_file = "dsmc_program.mem"
+                    studio.active_firmware_size = 21614152
                     studio.active_firmware_is_custom = False
                     studio.custom_firmware_path = None
-                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG slot reset to confirmed working baseline: {studio.confirmed_baseline_name} ({studio.confirmed_baseline_file})")
+                    studio.camera.staged_firmware_path = None
+                    studio.camera.log_system(f"[MEDIA-BAY] RED MINI-MAG slot reset to confirmed working baseline: {studio.active_firmware_name}")
                 self._send_json({
                     "status": "ok",
                     "active_name": studio.active_firmware_name,
@@ -1720,13 +1744,18 @@ STUDIO_HTML = r"""<!DOCTYPE html>
           </div>
 
           <!-- Slot Action Controls -->
-          <div class="mag-controls">
-            <button class="cam-btn mag-btn-reset" id="btn-revert-fw" onclick="revertFirmwareBaseline()" title="Reset to confirmed working v7.4.1 firmware">
-              &circlearrowleft; Revert to v7.4.1
+          <div class="mag-controls" style="flex-direction: column; gap: 5px;">
+            <button class="cam-btn" id="btn-boot-custom" onclick="bootCustomFirmware()" style="display: none; background: linear-gradient(180deg, #0088cc, #005588); color: #fff; font-weight: bold; border-color: #00b0ff; width: 100%; padding: 6px;" title="Flash staged custom firmware directly into DDR RAM (0x80000000)">
+              ⚡ Flash &amp; Boot Mod
             </button>
-            <button class="cam-btn" style="padding: 5px 8px; font-size: 10px; flex: 1;" onclick="document.getElementById('fw-file-input').click()">
-              Load Image...
-            </button>
+            <div style="display: flex; gap: 4px; width: 100%;">
+              <button class="cam-btn mag-btn-reset" id="btn-revert-fw" onclick="revertFirmwareBaseline()" title="Reset to confirmed working baseline firmware">
+                &circlearrowleft; Revert Baseline
+              </button>
+              <button class="cam-btn" style="padding: 5px 8px; font-size: 10px; flex: 1;" onclick="document.getElementById('fw-file-input').click()">
+                Load Image...
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2540,12 +2569,52 @@ STUDIO_HTML = r"""<!DOCTYPE html>
             active_name: res.active_name,
             active_file: res.filename,
             active_size: res.size,
-            is_custom: true
+            is_custom: true,
+            metadata: res.metadata
           });
+          pollStatus();
         }
       });
     };
     reader.readAsDataURL(file);
+  }
+
+  async function bootCustomFirmware() {
+    const btn = document.getElementById('btn-boot-custom');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'BOOTING INTO DDR...';
+    }
+    try {
+      const res = await fetch('/api/firmware/boot', {method: 'POST'});
+      const data = await res.json();
+      if (data.status === 'ok') {
+        const statusEl = document.getElementById('fw-active-status');
+        if (statusEl) {
+          statusEl.textContent = 'Active in DDR (0x80000000)';
+          statusEl.style.color = '#00ff77';
+        }
+        await pollStatus();
+        const canvas = document.getElementById('touchCanvas');
+        if (canvas) canvas.src = '/api/stream?t=' + Date.now();
+      } else if (data.status === 'crash') {
+        alert(`CUSTOM FIRMWARE CRASHED / HALTED!\n\nFault Address: ${data.pc}\nError: ${data.error}\n\nRegister dump and disassembly logged to terminal.\nClick 'Revert Baseline' to restore confirmed stock firmware.`);
+        const statusEl = document.getElementById('fw-active-status');
+        if (statusEl) {
+          statusEl.textContent = `CRASHED at ${data.pc}`;
+          statusEl.style.color = '#ff4444';
+        }
+      } else {
+        alert('Boot error: ' + (data.message || 'unknown error'));
+      }
+    } catch (e) {
+      console.error('Custom boot request failed:', e);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '⚡ Flash & Boot Mod';
+      }
+    }
   }
 
   function revertFirmwareBaseline() {
@@ -2554,9 +2623,12 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         updateFirmwareDisplay({
           active_name: res.active_name,
           active_file: 'dsmc_program.mem',
-          active_size: 18972672,
+          active_size: 21614152,
           is_custom: false
         });
+        pollStatus();
+        const canvas = document.getElementById('touchCanvas');
+        if (canvas) canvas.src = '/api/stream?t=' + Date.now();
       }
     });
   }
@@ -2568,12 +2640,16 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     const detailsEl = document.getElementById('fw-active-details');
     const ledEl = document.getElementById('mag-led');
     const ledText = document.getElementById('mag-led-text');
+    const bootBtn = document.getElementById('btn-boot-custom');
 
     if (nameEl) nameEl.textContent = fw.active_name;
     if (statusEl) statusEl.textContent = fw.is_custom ? 'Custom Mod Staged' : 'Confirmed Working Baseline';
     if (detailsEl) {
       const mb = (fw.active_size / (1024 * 1024)).toFixed(1);
       detailsEl.textContent = `${fw.active_file} • ${mb} MB`;
+    }
+    if (bootBtn) {
+      bootBtn.style.display = fw.is_custom ? 'block' : 'none';
     }
     if (ledEl) {
       if (fw.is_custom) {

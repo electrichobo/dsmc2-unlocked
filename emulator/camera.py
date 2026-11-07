@@ -435,3 +435,9 @@ class Dsmc2Camera:
         self.log_system(f"[SENSOR] Active Sensor: {profile['SENSOR_NAME']} ({profile['SENSOR_WIDTH']}x{profile['SENSOR_HEIGHT']}, Max {profile['MAX_FPS']} FPS)")
         self.log_system(f"[FIRMWARE] Active Firmware: v7.4.1 ({profile['CAMERA_NAME']}) from {profile['FIRMWARE_DIR']}")
         return True
+
+    def load_and_boot_custom_firmware(self, custom_path: str) -> Dict[str, Any]:
+        """Validate, load, and execute custom firmware binary from RED MINI-MAG slot into DDR."""
+        from emulator.core.firmware import FirmwareManager
+        self.staged_firmware_path = custom_path
+        return FirmwareManager.boot_custom(self, custom_path)

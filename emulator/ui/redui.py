@@ -1050,9 +1050,18 @@ class RedUiEngine:
             self.camera.log_system(f"[PRESETS] Preset configuration: {item}")
 
         # 12. Maintenance & Upgrades
-        elif "Upgrade" in item or "Firmware" in item:
-            self.camera.log_system(f"[UPGRADE] Checking RED MINI-MAG slot for firmware packages: {item}")
-            self.camera.log_system("[UPGRADE] Staged firmware package verified in slot. Ready for flash.")
+        elif "Upgrade" in item or "Firmware" in item or last_cat == "Upgrade":
+            staged = getattr(self.camera, "staged_firmware_path", None)
+            if staged and os.path.exists(staged):
+                self.camera.log_system(f"[UPGRADE] Flashing staged custom firmware from RED MINI-MAG: {os.path.basename(staged)}")
+                res = self.camera.load_and_boot_custom_firmware(staged)
+                if res.get("status") == "ok":
+                    self.camera.log_system("[UPGRADE] Camera upgrade complete. Running custom build in DDR.")
+                else:
+                    self.camera.log_system(f"[UPGRADE] Firmware flash halted: {res.get('error', 'execution fault')}")
+            else:
+                self.camera.log_system(f"[UPGRADE] Checking RED MINI-MAG slot for firmware packages: {item}")
+                self.camera.log_system("[UPGRADE] Stock firmware verified in slot. System up to date.")
 
         elif "Wipe Camera" in item:
             self.camera.log_system("[MAINTENANCE] Camera user config wiped. Clean DSMC2 baseline restored.")

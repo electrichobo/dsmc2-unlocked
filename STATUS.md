@@ -37,6 +37,7 @@ A fully functional, locally buildable, authentic RED DSMC2 full-system virtual c
 | **M14** | Multi-Model DSMC2 Selection & Adaptive UI | Extracted all 5 DSMC2 cameras (`WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, `EPIC-W 8K`) from `combo_7.4.1.bin`. Added camera selection modal panel, dynamic profile switching (`/api/camera/select`), adaptive button text auto-fitting/wrapping (zero overflow), and streamlined touch action dispatch (`down`, `move`, `up`). | **COMPLETE** |
 | **M15** | Hardware Re-initialization & Dynamic Firmware DDR Reloading | Implemented `_init_hardware()` in `Dsmc2Camera` to cleanly re-create CPU JIT state, PRCM registers, INTC vectors, GPTimers, and DISPC framebuffers on camera model switch, booting any of the 5 models in ~1.6s without translation block caching deadlocks. | **COMPLETE** |
 | **M16** | Standby Power Lifecycle & Auto-Prompt Launch Modal | Enabled full Standby power management via web button (`#pwr-btn`), touch screen wake, physical key wake, and on-screen `Menu > Power > Shutdown` confirmation. Replaced one-time `localStorage` suppression with auto-prompt camera selection panel on studio launch before user interaction. | **COMPLETE** |
+| **M17** | Custom Firmware Inspection, Staging & Boot Execution Engine | Built `FirmwareManager` in `emulator/core/firmware.py` parsing vector tables, entry points (SP Word 10, Reset PC Word 11), SHA-256 hashes, and binary formats. Added `POST /api/firmware/boot` enabling direct flash & boot of staged custom firmware mods from RED MINI-MAG bay with register crash diagnostics and 1-click baseline revert. | **COMPLETE** |
 
 ---
 
@@ -49,20 +50,21 @@ platform win32 -- Python 3.14.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: E:\emulator
 configfile: pytest.ini
 testpaths: tests
-collected 53 items
+collected 57 items
 
 tests\test_camera_boot.py ..                                             [  3%]
 tests\test_fault_injection.py .                                          [  5%]
-tests\test_gui_interaction.py .                                          [  7%]
-tests\test_lens_mount.py ......                                          [ 18%]
-tests\test_peripherals.py ......                                         [ 30%]
-tests\test_r3d_recording.py ....                                         [ 37%]
-tests\test_rcp_network.py ......                                         [ 49%]
-tests\test_redui.py ...........                                          [ 69%]
-tests\test_storage.py ...                                                [ 75%]
+tests\test_firmware_manager.py ....                                      [ 12%]
+tests\test_gui_interaction.py .                                          [ 14%]
+tests\test_lens_mount.py ......                                          [ 24%]
+tests\test_peripherals.py ......                                         [ 35%]
+tests\test_r3d_recording.py ....                                         [ 42%]
+tests\test_rcp_network.py ......                                         [ 52%]
+tests\test_redui.py ...........                                          [ 71%]
+tests\test_storage.py ...                                                [ 77%]
 tests\test_web_studio.py .............                                   [100%]
 
-======================= 53 passed, 1 warning in 14.48s ========================
+============================= 57 passed in 14.83s =============================
 ```
 
 ---
