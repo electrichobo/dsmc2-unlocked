@@ -14,7 +14,7 @@ class OmapDss(Device):
     """
 
     BASE_ADDR = 0x48050000
-    SIZE = 0x10000
+    SIZE = 0x1000
 
     # Authentic DSMC2 Firmware Pipeline Framebuffer Addresses
     FB_PIPELINE_LCD_PRIMARY = 0x87400000

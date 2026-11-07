@@ -24,6 +24,7 @@ from emulator.devices.i2c_thermal import Tmp411Thermal
 from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
 from emulator.devices.sdma import OmapSdma
+from emulator.devices.mcspi import OmapMcspi, MCSPI_MAP
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
@@ -152,6 +153,7 @@ class Dsmc2Camera:
         self.i2c[1].attach_slave(Twl4030Pmic(0x4A))
         self.i2c[1].attach_slave(Twl4030Pmic(0x4B))
         self.i2c[1].attach_slave(Twl4030Pmic(0x1B))
+        self.i2c[1].attach_slave(Twl4030Pmic(0x19))
 
         # I2C2: Optical Low Pass Filter (OLPF EEPROM @ 0x54)
         self.olpf = OlpfEeprom(0x54)
@@ -166,6 +168,7 @@ class Dsmc2Camera:
         self.i2c[3].attach_slave(Twl4030Pmic(0x49))
         self.i2c[3].attach_slave(Twl4030Pmic(0x4A))
         self.i2c[3].attach_slave(Twl4030Pmic(0x1B))
+        self.i2c[3].attach_slave(Twl4030Pmic(0x19))
         self.i2c[3].attach_slave(self.thermal)
 
         # 8. GPIO Controllers (1..6)
@@ -186,6 +189,13 @@ class Dsmc2Camera:
         # 10b. System DMA (sDMA Controller @ 0x48056000)
         self.sdma = OmapSdma(intc=self.intc)
         self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
+
+        # 10c. Multichannel SPI Controllers (McSPI 1..4)
+        self.mcspi: Dict[int, OmapMcspi] = {}
+        for port_id, (base, irq) in MCSPI_MAP.items():
+            spi = OmapMcspi(port_id, base, irq, intc=self.intc)
+            self.mcspi[port_id] = spi
+            self.bus.register_device(base, 0x1000, spi)
 
         # 11. Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
         self.c2c = C2cTransport(intc=self.intc)
@@ -511,10 +521,10 @@ class Dsmc2Camera:
                 sp = words[2]        # +0x08
                 stk_start = words[3] # +0x0C
                 stk_end = words[4]   # +0x10
-                state = words[6]     # +0x18
                 name_ptr = words[10] # +0x28
                 prio = words[11]     # +0x2C
-                entry = words[17]    # +0x44
+                state = words[12]    # +0x30: tx_thread_state
+                entry = words[17]    # +0x44: tx_thread_entry
 
                 try:
                     raw_name = self.bus.read_mem(name_ptr, 48)
