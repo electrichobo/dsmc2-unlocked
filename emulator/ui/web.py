@@ -286,9 +286,14 @@ class ScreenCompositor:
         draw.ellipse([(108, 553), (114, 559)], fill=(0, 220, 80)) # Fan/Electronics
 
         # Status text (x: 122)
-        draw.text((122, 526), "37°/54°", fill=(220, 220, 220), font=HUD_FONT_BOLD_SM)
+        thermal = getattr(self.camera, "thermal", None)
+        temp_str = thermal.get_status_str() if thermal else "39°/63°"
+        cal_ok = thermal.is_calibrated_temperature() if thermal else True
+        cal_fill = (0, 230, 90) if cal_ok else (240, 200, 20)
+
+        draw.text((122, 526), temp_str, fill=(220, 220, 220), font=HUD_FONT_BOLD_SM)
         draw.text((122, 540), "Cal: ", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
-        draw.text((148, 540), "T/E", fill=(0, 230, 90), font=HUD_FONT_BOLD_SM)
+        draw.text((148, 540), "T/E", fill=cal_fill, font=HUD_FONT_BOLD_SM)
         draw.text((122, 554), "Drop: 0", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
 
         # Badges cluster (x: 195..340)
@@ -314,9 +319,13 @@ class ScreenCompositor:
         draw.text((430, 535), "R3D", fill=(255, 255, 255), font=HUD_FONT_BOLD_SM)
 
         # Power Status (x: 480..575)
+        pmic = getattr(self.camera, "pmic", None)
+        pwr_source = "DC" if (pmic and pmic.is_dc_in_connected) else "BAT"
+        pwr_volts = pmic.get_battery_voltage() if pmic else 14.8
+        v_fill = (80, 240, 80) if pwr_volts >= 12.0 else (240, 50, 50)
         draw.rectangle([(480, 524), (575, 570)], fill=(20, 20, 20), outline=(45, 45, 45))
-        draw.text((490, 528), "DC", fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
-        draw.text((490, 542), "15.2V", fill=(80, 240, 80), font=HUD_FONT_MED)
+        draw.text((490, 528), pwr_source, fill=(180, 180, 180), font=HUD_FONT_BOLD_SM)
+        draw.text((490, 542), f"{pwr_volts:.1f}V", fill=v_fill, font=HUD_FONT_MED)
 
         # 4-Channel Audio Peak Meters (x: 585..770)
         audio_active = (self.redui.active_dialog == "AUDIO")
@@ -623,6 +632,33 @@ def create_handler(studio: WebStudio):
                     res = studio.camera.lens_mount.trigger_autofocus()
                 self._send_json({"status": "ok", "result": res, "distance": studio.camera.lens_mount.current_focus_distance})
 
+            elif path == "/api/hardware/thermal":
+                sensor_c = float(data.get("sensor_c", 39.0))
+                brain_c = float(data.get("brain_c", 63.0))
+                with studio.lock:
+                    studio.camera.set_sensor_temperature(sensor_c, brain_c)
+                    studio.camera.log_system(f"[THERMAL] Sensor temp set to {sensor_c:.1f}°C, BRAIN temp to {brain_c:.1f}°C")
+                self._send_json({"status": "ok", "sensor_c": sensor_c, "brain_c": brain_c})
+
+            elif path == "/api/hardware/power":
+                volts = float(data.get("voltage", 14.8))
+                dc_in = bool(data.get("dc_in", True)) if "dc_in" in data else None
+                with studio.lock:
+                    studio.camera.set_battery_voltage(volts)
+                    if dc_in is not None and hasattr(studio.camera, "pmic") and studio.camera.pmic:
+                        studio.camera.pmic.set_dc_in(dc_in)
+                    dc_stat = studio.camera.pmic.is_dc_in_connected if hasattr(studio.camera, "pmic") and studio.camera.pmic else True
+                    studio.camera.log_system(f"[PMIC] Supply updated: {volts:.1f}V (DC-IN: {dc_stat})")
+                self._send_json({"status": "ok", "voltage": volts, "dc_in": dc_stat})
+
+            elif path == "/api/hardware/olpf":
+                olpf_type = str(data.get("type", "Standard"))
+                with studio.lock:
+                    success = studio.camera.set_olpf_type(olpf_type)
+                    info = studio.camera.olpf.get_info() if hasattr(studio.camera, "olpf") and studio.camera.olpf else None
+                    studio.camera.log_system(f"[OLPF] Swapped OLPF filter module to {olpf_type}")
+                self._send_json({"status": "ok" if success else "error", "olpf": info})
+
             elif path == "/api/media/format":
                 with studio.lock:
                     res = studio.camera.recorder.format_media()
@@ -794,6 +830,20 @@ def create_handler(studio: WebStudio):
                         "active_size": studio.active_firmware_size,
                         "is_custom": studio.active_firmware_is_custom,
                         "baseline_name": studio.confirmed_baseline_name
+                    },
+                    "hardware": {
+                        "pmic": cam.pmic.get_status() if hasattr(cam, "pmic") and cam.pmic else None,
+                        "thermal": {
+                            "sensor_c": cam.thermal.sensor_temp_c,
+                            "brain_c": cam.thermal.brain_temp_c,
+                            "is_calibrated": cam.thermal.is_calibrated_temperature(),
+                            "status_str": cam.thermal.get_status_str()
+                        } if hasattr(cam, "thermal") and cam.thermal else None,
+                        "olpf": cam.olpf.get_info() if hasattr(cam, "olpf") and cam.olpf else None,
+                        "gpmc": {
+                            "sysstatus": cam.gpmc.sysstatus,
+                            "cs0_nand_valid": bool(cam.gpmc.cs_configs.get(0x78, 0) & 0x40)
+                        } if hasattr(cam, "gpmc") and cam.gpmc else None,
                     },
                     "threads": cam.get_threads(),
                     "unknown_mmio_count": len(cam.bus.unknown_mmio)
@@ -1822,6 +1872,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('serial', this)">Console / Serial</button>
       <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Parameters</button>
+      <button class="tab-btn" onclick="switchTab('hardware', this)">Hardware I/O & Peripherals</button>
       <button class="tab-btn" onclick="switchTab('lens', this)">Lens & Optics</button>
       <button class="tab-btn" onclick="switchTab('media', this)">Media & Clips</button>
       <button class="tab-btn" onclick="switchTab('threads', this)">ThreadX RTOS</button>
@@ -1862,6 +1913,141 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       <div class="cmd-bar">
         <input id="rcp-cmd-input" class="cmd-input" type="text" placeholder="Send RCP command (e.g. GET iso, SET iso 1600)..." onkeydown="if(event.key==='Enter') sendRcp()" />
         <button class="cam-btn" onclick="sendRcp()">Send</button>
+      </div>
+    </div>
+
+    <!-- Tab: Hardware I/O & Peripherals -->
+    <div id="tab-hardware" class="tab-content">
+      <div style="margin-bottom: 12px; font-size: 12px; color: #aaa;">
+        OMAP3630 Multi-Bus I2C Subsystem (I2C1/I2C2/I2C3) &amp; General Purpose Memory Controller (GPMC)
+      </div>
+
+      <!-- I2C Bus Topology Overview -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 10px 14px; margin-bottom: 12px; font-family: monospace; font-size: 11px; color: #bbb; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
+        <div style="background: #121212; padding: 8px; border-radius: 3px; border-left: 3px solid #00e676;">
+          <div style="color: #888; font-size: 10px;">I2C1 (0x48070000, IRQ 56)</div>
+          <div style="color: #fff; font-weight: bold; margin-top: 3px;">TWL4030 PMIC (0x48)</div>
+          <div style="color: #aaa; margin-top: 2px;">TMP411 Thermal (0x4C)</div>
+        </div>
+        <div style="background: #121212; padding: 8px; border-radius: 3px; border-left: 3px solid #00b0ff;">
+          <div style="color: #888; font-size: 10px;">I2C2 (0x48072000, IRQ 57)</div>
+          <div style="color: #fff; font-weight: bold; margin-top: 3px;">OLPF EEPROM (0x54)</div>
+          <div style="color: #aaa; margin-top: 2px;">Smart Lens Mount</div>
+        </div>
+        <div style="background: #121212; padding: 8px; border-radius: 3px; border-left: 3px solid #ffaa00;">
+          <div style="color: #888; font-size: 10px;">I2C3 (0x48060000, IRQ 61)</div>
+          <div style="color: #fff; font-weight: bold; margin-top: 3px;">maXTouch (0x4B)</div>
+          <div style="color: #aaa; margin-top: 2px;">EDID EEPROM (0x50)</div>
+        </div>
+        <div style="background: #121212; padding: 8px; border-radius: 3px; border-left: 3px solid #d11212;">
+          <div style="color: #888; font-size: 10px;">GPMC (0x6E000000)</div>
+          <div style="color: #fff; font-weight: bold; margin-top: 3px;">Micron NAND (CS0)</div>
+          <div style="color: #aaa; margin-top: 2px;">Hardware BCH ECC</div>
+        </div>
+      </div>
+
+      <!-- Device Cards Grid -->
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 12px;">
+
+        <!-- Card 1: PMIC TWL4030 -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #00e676;">TI TWL4030 / TPS65950 PMIC</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">I2C1 @ 0x48</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; font-size: 11.5px; font-family: monospace; margin-bottom: 10px;">
+            <div>Power Source: <strong id="hw-pmic-source" style="color: #00e676;">DC IN (15V)</strong></div>
+            <div>ADC Voltage: <strong id="hw-pmic-volts" style="color: #00e676;">14.8V</strong></div>
+            <div>VDD1 (MPU 1GHz): <strong id="hw-pmic-vdd1" style="color: #fff;">1.35V</strong></div>
+            <div>VDD2 (Core/L3): <strong id="hw-pmic-vdd2" style="color: #fff;">1.15V</strong></div>
+          </div>
+          <div style="margin-bottom: 8px;">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 4px;">
+              <span>Simulate Battery Drain / Supply Voltage:</span>
+              <span id="hw-pmic-slider-val" style="font-family: monospace; color: #fff;">14.8V</span>
+            </div>
+            <input id="hw-pmic-slider" type="range" min="10.0" max="16.8" step="0.1" value="14.8" style="width: 100%;" oninput="document.getElementById('hw-pmic-slider-val').textContent = parseFloat(this.value).toFixed(1)+'V'; setPmicVoltage(this.value);" />
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setPmicVoltage(15.2); document.getElementById('hw-pmic-slider').value=15.2; document.getElementById('hw-pmic-slider-val').textContent='15.2V';">15.2V (AC In)</button>
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setPmicVoltage(14.8); document.getElementById('hw-pmic-slider').value=14.8; document.getElementById('hw-pmic-slider-val').textContent='14.8V';">14.8V (RED BRICK)</button>
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setPmicVoltage(11.5); document.getElementById('hw-pmic-slider').value=11.5; document.getElementById('hw-pmic-slider-val').textContent='11.5V';">11.5V (Low Batt)</button>
+            <button id="hw-pmic-dc-toggle" class="cam-btn" style="padding: 4px 8px; font-size: 10px; background: #222;" onclick="toggleDcIn()">Toggle DC-IN / Battery</button>
+          </div>
+        </div>
+
+        <!-- Card 2: Thermal TMP411 -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #ffaa00;">TI TMP411 Dual-Channel Thermal</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">I2C1 @ 0x4C</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; font-family: monospace; margin-bottom: 10px;">
+            <div>Remote Sensor Die: <strong id="hw-temp-sensor" style="color: #00e676;">39°C</strong></div>
+            <div>BRAIN Core Ambient: <strong id="hw-temp-brain" style="color: #ffaa00;">63°C</strong></div>
+          </div>
+          <div id="hw-temp-cal" style="font-size: 11px; font-family: monospace; margin-bottom: 8px;">
+            <span style="color: #00e676;">● T/E Calibrated (Within &plusmn;2.5°C)</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 11px; color: #888; width: 80px;">Sensor Temp:</span>
+              <input id="hw-temp-sensor-slider" type="range" min="20" max="80" step="1" value="39" style="flex: 1;" oninput="onSensorTempSlider(this.value);" />
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 11px; color: #888; width: 80px;">BRAIN Core:</span>
+              <input id="hw-temp-brain-slider" type="range" min="30" max="95" step="1" value="63" style="flex: 1;" oninput="onBrainTempSlider(this.value);" />
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setThermalTemps(39, 63);">Reset Nominal (39°/63°)</button>
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setThermalTemps(46, 75);">Trigger T/E Drift (46°/75°)</button>
+          </div>
+        </div>
+
+        <!-- Card 3: OLPF EEPROM -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #00b0ff;">DSMC2 OLPF EEPROM (24C02)</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">I2C2 @ 0x54</span>
+          </div>
+          <div style="font-size: 12px; margin-bottom: 6px;">
+            Active Filter: <strong id="hw-olpf-name" style="color: #fff;">Standard OLPF</strong>
+            <span style="font-family: monospace; color: #888; font-size: 11px; margin-left: 6px;" id="hw-olpf-id">(0x01)</span>
+          </div>
+          <div id="hw-olpf-desc" style="font-size: 11px; color: #aaa; margin-bottom: 10px; line-height: 1.4;">
+            Balanced color reproduction, optimal sharpness and highlight retention.
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setOlpfProfile('Standard')">Standard</button>
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setOlpfProfile('Skin Tone-Highlight')">Skin Tone-Highlight</button>
+            <button class="cam-btn" style="padding: 4px 8px; font-size: 10px;" onclick="setOlpfProfile('Low Light Optimized')">Low Light Optimized</button>
+          </div>
+          <div style="background: #111; padding: 6px; border-radius: 3px; font-family: monospace; font-size: 10px; color: #666;">
+            EEPROM Header Magic: <strong>REDOLPF\x01</strong> &bull; Size: 256 bytes &bull; 9-float Color Matrix
+          </div>
+        </div>
+
+        <!-- Card 4: GPMC Memory Controller -->
+        <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 13px; font-weight: bold; color: #d11212;">OMAP3630 GPMC Controller</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">MMIO @ 0x6E000000</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; font-size: 11.5px; font-family: monospace; margin-bottom: 10px;">
+            <div>Controller Status: <strong id="hw-gpmc-status" style="color: #00e676;">READY (0x01)</strong></div>
+            <div>BCH Hardware ECC: <strong style="color: #00e676;">ACTIVE</strong></div>
+            <div>CS0 Base Window: <strong style="color: #fff;">0x08000000</strong></div>
+            <div>Flash Device: <strong style="color: #fff;">Micron 256MB SLC</strong></div>
+          </div>
+          <div style="background: #111; padding: 8px; border-radius: 3px; font-family: monospace; font-size: 10.5px; color: #aaa; margin-bottom: 8px;">
+            <div>&bull; NAND_CMD: <span style="color: #00e676;">0x6E00007C</span> | ONFI Command Bus</div>
+            <div>&bull; NAND_ADDRESS: <span style="color: #00e676;">0x6E000080</span> | 5-cycle Flash Addressing</div>
+            <div>&bull; NAND_DATA: <span style="color: #00e676;">0x6E000084</span> | 32-bit DMA / FIFO Window</div>
+            <div>&bull; ECC_RESULT: <span style="color: #00e676;">0x6E000200</span> | Hardware BCH8 Engine</div>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -2258,6 +2444,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         updateFirmwareDisplay(data.firmware);
       }
 
+      // Render Hardware Telemetry
+      if (data.hardware) {
+        renderHardware(data.hardware);
+      }
+
     } catch (e) {}
 
     // 2. Serial logs
@@ -2319,6 +2510,128 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       </tr>`;
     }
     tbody.innerHTML = html;
+  }
+
+  function renderHardware(hw) {
+    if (!hw) return;
+
+    // PMIC (TWL4030)
+    if (hw.pmic) {
+      const vEl = document.getElementById('hw-pmic-volts');
+      const srcEl = document.getElementById('hw-pmic-source');
+      const vdd1El = document.getElementById('hw-pmic-vdd1');
+      const vdd2El = document.getElementById('hw-pmic-vdd2');
+      const slider = document.getElementById('hw-pmic-slider');
+      const sliderVal = document.getElementById('hw-pmic-slider-val');
+      const toggleBtn = document.getElementById('hw-pmic-dc-toggle');
+
+      const v = hw.pmic.battery_voltage_v;
+      if (vEl) {
+        vEl.textContent = `${v.toFixed(1)}V`;
+        vEl.style.color = v >= 12.0 ? '#00e676' : '#ff4444';
+      }
+      if (srcEl) {
+        srcEl.textContent = hw.pmic.dc_in_connected ? 'DC IN (15V)' : 'BATTERY (V-Mount)';
+        srcEl.style.color = hw.pmic.dc_in_connected ? '#00e676' : '#ffb300';
+      }
+      if (vdd1El) vdd1El.textContent = `${hw.pmic.vdd1_v.toFixed(2)}V`;
+      if (vdd2El) vdd2El.textContent = `${hw.pmic.vdd2_v.toFixed(2)}V`;
+      if (slider && document.activeElement !== slider) {
+        slider.value = v;
+      }
+      if (sliderVal && document.activeElement !== slider) {
+        sliderVal.textContent = `${v.toFixed(1)}V`;
+      }
+      if (toggleBtn) {
+        toggleBtn.textContent = hw.pmic.dc_in_connected ? 'Disconnect DC-IN (Run on Battery)' : 'Connect DC-IN (External 15V)';
+      }
+    }
+
+    // Thermal (TMP411)
+    if (hw.thermal) {
+      const sTemp = document.getElementById('hw-temp-sensor');
+      const bTemp = document.getElementById('hw-temp-brain');
+      const calEl = document.getElementById('hw-temp-cal');
+      const sSlider = document.getElementById('hw-temp-sensor-slider');
+      const bSlider = document.getElementById('hw-temp-brain-slider');
+
+      if (sTemp) sTemp.textContent = `${Math.round(hw.thermal.sensor_c)}°C`;
+      if (bTemp) bTemp.textContent = `${Math.round(hw.thermal.brain_c)}°C`;
+      if (sSlider && document.activeElement !== sSlider) sSlider.value = hw.thermal.sensor_c;
+      if (bSlider && document.activeElement !== bSlider) bSlider.value = hw.thermal.brain_c;
+
+      if (calEl) {
+        if (hw.thermal.is_calibrated) {
+          calEl.innerHTML = '<span style="color: #00e676;">● T/E Calibrated (Within ±2.5°C)</span>';
+        } else {
+          calEl.innerHTML = '<span style="color: #ffaa00;">▲ Temperature Drift (Black Shading Recommended)</span>';
+        }
+      }
+    }
+
+    // OLPF EEPROM
+    if (hw.olpf) {
+      const nameEl = document.getElementById('hw-olpf-name');
+      const descEl = document.getElementById('hw-olpf-desc');
+      const idEl = document.getElementById('hw-olpf-id');
+      if (nameEl) nameEl.textContent = hw.olpf.type_name;
+      if (descEl) descEl.textContent = hw.olpf.description;
+      if (idEl) idEl.textContent = `(0x0${hw.olpf.type_id})`;
+    }
+
+    // GPMC
+    if (hw.gpmc) {
+      const gStat = document.getElementById('hw-gpmc-status');
+      if (gStat) gStat.textContent = hw.gpmc.sysstatus === 1 ? 'READY (0x01)' : 'RESETTING';
+    }
+  }
+
+  function setPmicVoltage(volts) {
+    fetch('/api/hardware/power', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({voltage: parseFloat(volts)})
+    });
+  }
+
+  function toggleDcIn() {
+    const srcEl = document.getElementById('hw-pmic-source');
+    const isDc = srcEl && srcEl.textContent.includes('DC IN');
+    fetch('/api/hardware/power', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dc_in: !isDc, voltage: !isDc ? 15.2 : 14.4})
+    });
+  }
+
+  function setThermalTemps(s_c, b_c) {
+    fetch('/api/hardware/thermal', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sensor_c: parseFloat(s_c), brain_c: parseFloat(b_c)})
+    });
+  }
+
+  function onSensorTempSlider(val) {
+    const bSlider = document.getElementById('hw-temp-brain-slider');
+    const b_c = bSlider ? bSlider.value : 63.0;
+    document.getElementById('hw-temp-sensor').textContent = `${Math.round(val)}°C`;
+    setThermalTemps(val, b_c);
+  }
+
+  function onBrainTempSlider(val) {
+    const sSlider = document.getElementById('hw-temp-sensor-slider');
+    const s_c = sSlider ? sSlider.value : 39.0;
+    document.getElementById('hw-temp-brain').textContent = `${Math.round(val)}°C`;
+    setThermalTemps(s_c, val);
+  }
+
+  function setOlpfProfile(typeStr) {
+    fetch('/api/hardware/olpf', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: typeStr})
+    });
   }
 
   function sendRcp() {

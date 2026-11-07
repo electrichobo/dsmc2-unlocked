@@ -118,8 +118,17 @@ class SystemBus:
         self.mu.mem_write(address, data)
 
     def read_u32(self, address: int) -> int:
+        match = self._find_device(address)
+        if match is not None:
+            offset, dev = match
+            return dev.read(offset, 4)
         data = self.mu.mem_read(address, 4)
         return struct.unpack("<I", data)[0]
 
     def write_u32(self, address: int, val: int):
+        match = self._find_device(address)
+        if match is not None:
+            offset, dev = match
+            dev.write(offset, 4, val)
+            return
         self.mu.mem_write(address, struct.pack("<I", val & 0xFFFFFFFF))

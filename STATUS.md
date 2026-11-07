@@ -100,11 +100,30 @@ tests\test_web_studio.py .............                                   [100%]
 6. **Adaptive Button Typography & Push-Through Elimination**:
    - Intelligent font scaling (12pt -> 10pt -> 9pt), multi-line wrapping, and truncation preventing button text overflow.
    - Strict `action: 'down'` / `action: 'move'` / `action: 'up'` event separation eliminating drag push-through activations.
+7. **Custom Firmware Inspection, Boot Stager & Crash Recovery**:
+   - `FirmwareManager`: Automated entry vector detection (`Word 10` = Initial SP `0x881D2690`, `Word 11` = Reset PC `0x80829F2C`), DDR address boundary checking (`0x80000000 - 0x9FFFFFFF`), and SHA-256/MD5 hashing.
+   - Direct DDR flash execution harness with register dump diagnostics (`PC`, `SP`, `LR`, `CPSR`, `R0`-`R12`) and disassembly capture on halt.
+   - One-click rollback button restoring confirmed stock baseline firmware in DDR.
+8. **Multi-Bus I2C Hardware Peripherals & OMAP GPMC Memory Controller**:
+   - **`Twl4030Pmic` (I2C1 @ `0x48`)**: TI TPS65950 companion PMIC modeling 10-bit MADC battery voltage conversion, VDD1 (1.35V MPU) and VDD2 (1.15V Core) regulators, and DC-IN external supply detection.
+   - **`Tmp411Thermal` (I2C1 @ `0x4C`)**: TI TMP411 dual-channel digital sensor monitoring remote sensor die temp (39°C) and local BRAIN core temp (63°C), integer/fractional registers, and black shading T/E calibration tolerance checking (±2.5°C).
+   - **`OlpfEeprom` (I2C2 @ `0x54`)**: 256-byte 24C02 I2C EEPROM on lens/sensor mount holding DSMC2 OLPF profiles (`Standard`, `Skin Tone-Highlight`, `Low Light Optimized`), 3x3 IEEE 754 color matrices, and `REDOLPF\x01` header magic.
+   - **`OmapGpmc` (MMIO @ `0x6E000000`)**: TI OMAP3630 General Purpose Memory Controller with CS0 256MB SLC NAND Flash window (`0x08000000`), ONFI command engine (ID Read `0xBA2C0000`, Status `0xE0`), and hardware BCH8 ECC calculation.
+   - **RedUi & HUD Synchronization**:
+     - RedUi `Menu > SETTINGS > MAINTENANCE > OLPF > OLPF Type` dynamically reprograms EEPROM profiles.
+     - RedUi `Project Status` displays live sensor and BRAIN temperatures.
+     - Monitor HUD bottom status bar reads live temperatures and DC/BAT voltage dynamically from peripheral models.
+   - **Web Studio Hardware Workbench**: Dedicated telemetry card and interactive sliders/presets for battery voltage drain simulation, thermal drift simulation, OLPF profile flashing, and GPMC memory status.
 
 ---
 
 ## 5. Next Steps
 
-1. **Custom Firmware Execution Harness**: Implement boot-time branching in `Dsmc2Camera` to selectively map staged custom firmware binaries from `firmware_store/custom/` into `0x80000000` memory.
-2. **Firmware Integrity Validator**: Add binary header inspection for RED package checksums, entry vector validation, and symbol table parsing.
-3. **Hardware Peripherals & Coprocessor ASICs Roadmap**: Execute staged implementation plan documented in [`docs/HARDWARE_PERIPHERALS_PLAN.md`](docs/HARDWARE_PERIPHERALS_PLAN.md) covering OMAP GPMC/McBSP, Tensilica Xtensa IOB0/IOB1/ISP coprocessors, and multi-channel I2C PMIC/thermal sensors.
+1. **Phase 3 Coprocessor ASICs (IOB0 & IOB1 Xtensa)**:
+   - Tensilica Xtensa instruction harness executing `iob0/iram.bin` and `iob1/iram.bin`.
+   - Emulate SATA 3.0 Host Bus Adapter (HBA) on IOB0 for asynchronous DMA frame acquisition.
+   - Emulate sensor calibration dark-level subtraction and bad-pixel defect mapping on IOB1.
+   - Implement bidirectional Chip-to-Chip (C2C) shared-memory mailbox and FIFO protocol between Cortex-A8 and IOB/ISP cores.
+2. **Phase 4 TI TMS320C64x+ DSP Vision Engine & Accessory Bus**:
+   - DSPLink IPC (`MSGQ` shared memory) for autofocus contrast metrics and Haar face detection.
+   - Accessory bus with base64 `ModuleDescriptor` binary TLV decoder for automatic expander discovery.

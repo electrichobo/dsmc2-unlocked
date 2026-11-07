@@ -18,6 +18,10 @@ from emulator.devices.uart import OmapUart, UART_MAP
 from emulator.devices.i2c import OmapI2c, I2C_MAP
 from emulator.devices.i2c_maxtouch import MaXTouchDevice
 from emulator.devices.i2c_eeprom import EdidEeprom
+from emulator.devices.i2c_pmic import Twl4030Pmic
+from emulator.devices.i2c_thermal import Tmp411Thermal
+from emulator.devices.i2c_olpf import OlpfEeprom
+from emulator.devices.gpmc import OmapGpmc
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
 from emulator.devices.dss import OmapDss
 from emulator.storage.vfs import VirtualFileSystem
@@ -118,7 +122,18 @@ class Dsmc2Camera:
             self.i2c[bus_id] = ctrl
             self.bus.register_device(base, 0x1000, ctrl)
 
-        # Attach Atmel maXTouch touch controller (0x4B) and EDID EEPROM (0x50) to I2C3
+        # Attach I2C Slaves:
+        # I2C1: Power Management (TWL4030 @ 0x48) & Thermal Monitoring (TMP411 @ 0x4C)
+        self.pmic = Twl4030Pmic(0x48)
+        self.thermal = Tmp411Thermal(0x4C)
+        self.i2c[1].attach_slave(self.pmic)
+        self.i2c[1].attach_slave(self.thermal)
+
+        # I2C2: Optical Low Pass Filter (OLPF EEPROM @ 0x54)
+        self.olpf = OlpfEeprom(0x54)
+        self.i2c[2].attach_slave(self.olpf)
+
+        # I2C3: Atmel maXTouch touch controller (0x4B) and EDID EEPROM (0x50)
         self.maxtouch = MaXTouchDevice(0x4B, irq_callback=lambda: self.intc.assert_irq(58))
         self.edid = EdidEeprom(0x50)
         self.i2c[3].attach_slave(self.maxtouch)
@@ -134,6 +149,10 @@ class Dsmc2Camera:
         # 9. Display Subsystem (DSS)
         self.dss = OmapDss(self.bus)
         self.bus.register_device(OmapDss.BASE_ADDR, OmapDss.SIZE, self.dss)
+
+        # 10. General Purpose Memory Controller (GPMC)
+        self.gpmc = OmapGpmc(intc=self.intc)
+        self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
 
         self.instruction_count = 0
         self.is_booted = False
@@ -223,6 +242,10 @@ class Dsmc2Camera:
                 self.log_system(f"[RTOS] Thread [{t['name']}] state={t['state']} prio={t['priority']}")
             self.log_system("[DSS] OMAP3630 DISPC online: 1024x576 32bpp frame stream ready.")
             self.log_system("[UI] RED Touch 7.0 online (maXTouch @ 0x4B, EDID @ 0x50).")
+            self.log_system(f"[PMIC] TI TWL4030 online (I2C1 @ 0x48): VDD1=1.35V, VDD2=1.15V, DC-IN {self.pmic.get_battery_voltage():.1f}V")
+            self.log_system(f"[THERMAL] TI TMP411 online (I2C1 @ 0x4C): Sensor={self.thermal.sensor_temp_c:.0f}°C, BRAIN={self.thermal.brain_temp_c:.0f}°C (Cal: T/E OK)")
+            self.log_system(f"[OLPF] DSMC2 OLPF EEPROM online (I2C2 @ 0x54): {self.olpf.get_info()['type_name']}")
+            self.log_system("[GPMC] OMAP3630 GPMC Controller online @ 0x6E000000 (CS0 Micron NAND Flash, BCH ECC Active)")
             if self.lens_mount and self.lens_mount.attached_lens:
                 self.log_system(f"[MOUNT] {self.lens_mount.mount_type} online: {self.lens_mount.attached_lens.model} ({self.lens_mount.attached_lens.serial})")
             if hasattr(self, "recorder") and self.recorder:
@@ -441,3 +464,19 @@ class Dsmc2Camera:
         from emulator.core.firmware import FirmwareManager
         self.staged_firmware_path = custom_path
         return FirmwareManager.boot_custom(self, custom_path)
+
+    def set_sensor_temperature(self, sensor_c: float, brain_c: float):
+        """Set sensor die and brain temperatures in thermal sensor."""
+        if hasattr(self, "thermal") and self.thermal:
+            self.thermal.set_temperatures(sensor_c, brain_c)
+
+    def set_battery_voltage(self, volts: float):
+        """Set battery / DC input voltage in PMIC."""
+        if hasattr(self, "pmic") and self.pmic:
+            self.pmic.set_battery_voltage(volts)
+
+    def set_olpf_type(self, olpf_name: str) -> bool:
+        """Change active OLPF profile in EEPROM."""
+        if hasattr(self, "olpf") and self.olpf:
+            return self.olpf.set_olpf_type(olpf_name)
+        return False

@@ -688,11 +688,13 @@ class RedUiEngine:
             fmt = rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9") if rcp else "5K 16:9"
             codec = rcp.state.get("record_file_format", "REDCODE 8:1") if rcp else "REDCODE 8:1"
             cam_name = getattr(self, "camera_model", "SCARLET-W 5K")
+            t_sensor = int(self.camera.thermal.sensor_temp_c) if hasattr(self.camera, "thermal") and self.camera.thermal else 39
+            t_brain = int(self.camera.thermal.brain_temp_c) if hasattr(self.camera, "thermal") and self.camera.thermal else 63
             return [
                 f"Camera Model: {cam_name}",
                 f"Active Resolution: {fmt}",
                 f"Active Codec: {codec}",
-                "Sensor Temp: 39°C / Core: 54°C"
+                f"Sensor Temp: {t_sensor}°C / Core: {t_brain}°C"
             ]
 
         if last_seg == "Camera Info":
@@ -1069,8 +1071,13 @@ class RedUiEngine:
         elif "Rediscover" in item:
             self.camera.log_system("[HARDWARE] Rediscovered expansion modules: RED Touch 7.0, Base Expander, SATA0 MINI-MAG.")
 
-        elif "OLPF" in item:
-            self.camera.log_system(f"[CALIBRATION] Optical Low Pass Filter (OLPF) profile set: {item}")
+        elif "OLPF" in item or last_cat == "OLPF" or "OLPF" in last_cat:
+            if hasattr(self.camera, "olpf") and self.camera.olpf:
+                self.camera.olpf.set_olpf_type(item)
+                olpf_info = self.camera.olpf.get_info()
+                self.camera.log_system(f"[OLPF] I2C2 @ 0x54 EEPROM updated: {olpf_info['type_name']} ({olpf_info['description']})")
+            else:
+                self.camera.log_system(f"[CALIBRATION] Optical Low Pass Filter (OLPF) profile set: {item}")
 
         elif "Genlock" in item or "Sync Phase" in item:
             self.camera.log_system(f"[SYNC] Genlock & Phase synchronized: {item}")
