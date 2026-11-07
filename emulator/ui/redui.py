@@ -345,7 +345,22 @@ class RedUiEngine:
         self.is_touching: bool = False
         self.focus_point: Optional[Tuple[int, int]] = (512, 288)
         self._last_action_time: float = 0.0
-        self.camera_model: str = getattr(self.camera.env, "get", lambda k, d="": d)("CAMERA_NAME", "SCARLET-W 5K") if hasattr(self.camera, "env") else "SCARLET-W 5K"
+        
+        # Camera Profile attributes
+        self.camera_model = "SCARLET-W 5K"
+        self.camera_type = "0x16"
+        self.sensor_name = "RED DRAGON 5K S35"
+        self.sensor_width = "5120"
+        self.sensor_height = "2700"
+        self.max_fps = "60"
+        self.format_options = list(self.FORMAT_OPTIONS)
+        self.fps_options = list(self.FPS_OPTIONS)
+
+        if hasattr(self.camera, "env") and hasattr(self.camera.env, "CAMERA_PROFILES"):
+            cam_type = self.camera.env.get("CAMERA_TYPE", "0x16")
+            prof = self.camera.env.CAMERA_PROFILES.get(cam_type)
+            if prof:
+                self.apply_camera_profile(prof)
 
         # Build False Color LUT and flat palette
         self._false_color_lut = self._build_false_color_lut()
@@ -402,6 +417,17 @@ class RedUiEngine:
             draw.line([(d, 0), (d + self.HEIGHT, self.HEIGHT)], fill=(255, 255, 255, 220), width=3)
             draw.line([(d + 3, 0), (d + self.HEIGHT + 3, self.HEIGHT)], fill=(220, 20, 20, 220), width=3)
         return pattern
+
+    def apply_camera_profile(self, profile: Dict[str, Any]):
+        """Dynamically update UI state, formats, and FPS options for active brain."""
+        self.camera_model = profile.get("CAMERA_NAME", "SCARLET-W 5K")
+        self.camera_type = profile.get("CAMERA_TYPE", "0x16")
+        self.sensor_name = profile.get("SENSOR_NAME", "RED DRAGON 5K S35")
+        self.sensor_width = profile.get("SENSOR_WIDTH", "5120")
+        self.sensor_height = profile.get("SENSOR_HEIGHT", "2700")
+        self.max_fps = profile.get("MAX_FPS", "60")
+        self.format_options = list(profile.get("FORMAT_OPTIONS", self.FORMAT_OPTIONS))
+        self.fps_options = list(profile.get("FPS_OPTIONS", self.FPS_OPTIONS))
 
     def toggle_menu(self):
         """Toggle DSMC2 system menu on/off."""
@@ -539,7 +565,7 @@ class RedUiEngine:
         # Handle specific dialog options
         rcp = self.camera.rcp
         if self.active_dialog == "FPS":
-            items = self.FPS_OPTIONS
+            items = getattr(self, "fps_options", self.FPS_OPTIONS)
             clicked_idx = self._get_grid_clicked_index(x, y, dx1 + 30, dy1 + 60, len(items), cols=3, item_w=200, item_h=45)
             if clicked_idx is not None and clicked_idx < len(items):
                 val = items[clicked_idx]
@@ -586,7 +612,7 @@ class RedUiEngine:
                 return True
 
         elif self.active_dialog == "FORMAT":
-            items = self.FORMAT_OPTIONS
+            items = getattr(self, "format_options", self.FORMAT_OPTIONS)
             clicked_idx = self._get_grid_clicked_index(x, y, dx1 + 30, dy1 + 60, len(items), cols=3, item_w=200, item_h=45)
             if clicked_idx is not None and clicked_idx < len(items):
                 val = items[clicked_idx]
@@ -653,6 +679,39 @@ class RedUiEngine:
 
     def _get_current_items(self) -> List[str]:
         """Return list of item strings for current menu path."""
+        last_seg = self.menu_path[-1] if self.menu_path else ""
+
+        # Dynamic brain-specific menu items
+        if last_seg == "Project Status":
+            rcp = getattr(self.camera, "rcp", None)
+            fmt = rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9") if rcp else "5K 16:9"
+            codec = rcp.state.get("record_file_format", "REDCODE 8:1") if rcp else "REDCODE 8:1"
+            cam_name = getattr(self, "camera_model", "SCARLET-W 5K")
+            return [
+                f"Camera Model: {cam_name}",
+                f"Active Resolution: {fmt}",
+                f"Active Codec: {codec}",
+                "Sensor Temp: 39°C / Core: 54°C"
+            ]
+
+        if last_seg == "Camera Info":
+            cam_name = getattr(self, "camera_model", "SCARLET-W 5K")
+            sensor = getattr(self, "sensor_name", "RED DRAGON 5K S35")
+            sw = getattr(self, "sensor_width", "5120")
+            sh = getattr(self, "sensor_height", "2700")
+            return [
+                f"Firmware: v7.4.1 ({cam_name})",
+                "RTOS: ThreadX ARMv7-A",
+                "Bootloader: RED U-Boot v2016.03",
+                f"Sensor: {sensor} ({sw}x{sh})"
+            ]
+
+        if last_seg in ("Format", "Recording Format") and len(self.menu_path) >= 3 and self.menu_path[1] == "SETTINGS":
+            return list(getattr(self, "format_options", self.FORMAT_OPTIONS))
+
+        if last_seg in ("Frame Rate", "Recording Frame Rate") and len(self.menu_path) >= 3 and self.menu_path[1] == "SETTINGS":
+            return list(getattr(self, "fps_options", self.FPS_OPTIONS))
+
         node = self._get_menu_node(self.menu_path)
         if isinstance(node, dict):
             return list(node.keys())
@@ -831,7 +890,7 @@ class RedUiEngine:
         last_cat = self.menu_path[-1]
 
         # 1. Project Frame Rate, Shutter, ISO, Format
-        if last_cat in ("Frame Rate", "Recording Frame Rate") or item in self.FPS_OPTIONS:
+        if last_cat in ("Frame Rate", "Recording Frame Rate") or item in getattr(self, "fps_options", self.FPS_OPTIONS):
             val = item.replace(" FPS", "").strip()
             rcp.state[RcpProtocol.PARAM_FPS] = val
             self.camera.log_system(f"[UI] Project Frame Rate set to {val} FPS")
@@ -840,7 +899,7 @@ class RedUiEngine:
             rcp.state[RcpProtocol.PARAM_SHUTTER] = item
             self.camera.log_system(f"[UI] Shutter Speed set to {item}")
 
-        elif last_cat in ("Format", "Recording Format") or item in self.FORMAT_OPTIONS:
+        elif last_cat in ("Format", "Recording Format") or item in getattr(self, "format_options", self.FORMAT_OPTIONS):
             rcp.state[RcpProtocol.PARAM_FORMAT] = item
             self.camera.log_system(f"[UI] Recording Format set to {item}")
 
@@ -1254,7 +1313,7 @@ class RedUiEngine:
         rcp = self.camera.rcp
 
         if self.active_dialog == "FPS":
-            items = self.FPS_OPTIONS
+            items = getattr(self, "fps_options", self.FPS_OPTIONS)
             curr_val = rcp.state.get(RcpProtocol.PARAM_FPS, "24.00")
             self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=3, item_w=200, item_h=45, unit="FPS")
 
@@ -1283,7 +1342,7 @@ class RedUiEngine:
             self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=5, item_w=120, item_h=45, unit="ISO")
 
         elif self.active_dialog == "FORMAT":
-            items = self.FORMAT_OPTIONS
+            items = getattr(self, "format_options", self.FORMAT_OPTIONS)
             curr_val = rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9")
             self._draw_grid_buttons(draw, dx1 + 30, dy1 + 60, items, curr_val, cols=3, item_w=200, item_h=45, unit="")
 

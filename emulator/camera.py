@@ -365,7 +365,7 @@ class Dsmc2Camera:
             self.is_booted = False
 
     def select_camera_model(self, model_id: str) -> bool:
-        """Dynamically switch camera model personality, /env, and slot assets."""
+        """Dynamically switch camera model personality, /env, slot assets, and active firmware binary."""
         if not self.env.apply_profile(model_id):
             return False
 
@@ -383,17 +383,35 @@ class Dsmc2Camera:
                 self.vfs.mounts["/image1"] = new_slot_dir
                 self.vfs.mounts["/image2"] = new_slot_dir
 
+            # Reload and boot the actual firmware binary for this model
+            fw_path = os.path.join(new_slot_dir, "dsmc_program.mem")
+            if os.path.exists(fw_path):
+                self.load_firmware(fw_path)
+                self.boot(initial_instructions=45_000_000)
+
         # Update RCP state
         if hasattr(self, "rcp") and self.rcp:
             self.rcp.state[RcpProtocol.PARAM_CAMERA_NAME] = profile["CAMERA_NAME"]
             self.rcp.state[RcpProtocol.PARAM_FORMAT] = profile.get("DEFAULT_FORMAT", "5K 16:9")
             self.rcp.state["camera_type"] = profile["CAMERA_TYPE"]
             self.rcp.state["sensor_name"] = profile["SENSOR_NAME"]
+            self.rcp.state["sensor_width"] = profile["SENSOR_WIDTH"]
+            self.rcp.state["sensor_height"] = profile["SENSOR_HEIGHT"]
+            self.rcp.state["max_fps"] = profile["MAX_FPS"]
 
-        # Update RedUi top model text
-        if hasattr(self, "compositor") and hasattr(self.compositor, "redui"):
-            self.compositor.redui.camera_model = profile["CAMERA_NAME"]
+        # Hardware Mount constraint: RED RAVEN has fixed integrated Canon EF mount
+        if profile.get("CAMERA_TYPE") == "0x15" and hasattr(self, "lens_mount") and self.lens_mount:
+            self.lens_mount.set_mount_type("Canon EF")
+
+        # Update RedUi and Compositor
+        comp = getattr(self, "compositor", None)
+        if comp:
+            if hasattr(comp, "_load_splash_screen"):
+                comp.splash_image = comp._load_splash_screen()
+            if hasattr(comp, "redui") and comp.redui:
+                comp.redui.apply_camera_profile(profile)
 
         self.log_system(f"[CAMERA] Switched DSMC2 BRAIN Model to {profile['CAMERA_NAME']} ({profile['RELEASE_TAG']}, Type {profile['CAMERA_TYPE']})")
         self.log_system(f"[SENSOR] Active Sensor: {profile['SENSOR_NAME']} ({profile['SENSOR_WIDTH']}x{profile['SENSOR_HEIGHT']}, Max {profile['MAX_FPS']} FPS)")
+        self.log_system(f"[FIRMWARE] Active Firmware: v7.4.1 ({profile['CAMERA_NAME']}) from {profile['FIRMWARE_DIR']}")
         return True

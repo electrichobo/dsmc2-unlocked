@@ -61,10 +61,12 @@ class ScreenCompositor:
         self._zero_fb_buf = b"\x00" * (self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4)
 
     def _load_splash_screen(self) -> Optional[Image.Image]:
-        splash_path = os.path.join(
-            self.camera.workspace_root,
-            "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "res", "splash_screen.bin"
-        )
+        splash_path = os.path.join(self.camera.firmware_slot_dir, "res", "splash_screen.bin")
+        if not os.path.exists(splash_path):
+            splash_path = os.path.join(
+                self.camera.workspace_root,
+                "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "res", "splash_screen.bin"
+            )
         if not os.path.exists(splash_path):
             return None
         try:
@@ -338,6 +340,7 @@ class WebStudio:
         self.port = port
         self.camera = Dsmc2Camera(self.workspace_root)
         self.compositor = ScreenCompositor(self.camera)
+        self.camera.compositor = self.compositor
 
         self.running = False
         self.worker_thread: Optional[threading.Thread] = None
@@ -699,7 +702,7 @@ def create_handler(studio: WebStudio):
                     self.wfile.write(frame_bytes)
                     self.wfile.write(b"\r\n")
                     time.sleep(0.04) # ~25 FPS
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
                 pass
 
         def _serve_status_json(self):

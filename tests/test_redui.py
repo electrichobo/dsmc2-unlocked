@@ -234,3 +234,60 @@ def test_dsmc2_overlays_tools_ribbon_and_dropdown(redui, camera):
     redui.handle_touch(780, 70, pressed=True)
     assert redui.is_zebras_on is True
 
+
+def test_dynamic_brain_specific_menus_and_firmware_switch(redui, camera):
+    """Verify switching brain dynamically updates active firmware, menu items, sensor info and format options."""
+    # 1. Switch to RED RAVEN 4.5K (0x15)
+    success = camera.select_camera_model("0x15")
+    assert success is True
+    redui.apply_camera_profile(camera.env.CAMERA_PROFILES["0x15"])
+    assert redui.camera_model == "RED RAVEN 4.5K"
+
+    # Verify System Status > Project Status dynamically shows RAVEN
+    redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE", "System Status", "Project Status"]
+    items = redui._get_current_items()
+    assert any("RED RAVEN 4.5K" in item for item in items)
+    assert any("Active Resolution: 4.5K 16:9" in item for item in items)
+
+    # Verify System Status > Camera Info shows RAVEN sensor and firmware
+    redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE", "System Status", "Camera Info"]
+    info_items = redui._get_current_items()
+    assert any("RED RAVEN 4.5K" in item for item in info_items)
+    assert any("RED DRAGON 4.5K S35 (4608x2160)" in item for item in info_items)
+
+    # Verify Project > Format does NOT offer 5K or 8K, offers 4.5K
+    redui.menu_path = ["Menu", "SETTINGS", "PROJECT", "Format"]
+    fmt_items = redui._get_current_items()
+    assert "4.5K 16:9" in fmt_items
+    assert "5K 16:9" not in fmt_items
+    assert "8K 16:9" not in fmt_items
+
+    # Verify Project > Frame Rate offers 120 FPS
+    redui.menu_path = ["Menu", "SETTINGS", "PROJECT", "Frame Rate"]
+    fps_items = redui._get_current_items()
+    assert "120.00" in fps_items
+
+    # 2. Switch to WEAPON 8K VV (0x11)
+    success8k = camera.select_camera_model("0x11")
+    assert success8k is True
+    redui.apply_camera_profile(camera.env.CAMERA_PROFILES["0x11"])
+    assert redui.camera_model == "WEAPON 8K VV"
+
+    # Verify System Status > Project Status dynamically shows WEAPON 8K VV
+    redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE", "System Status", "Project Status"]
+    items8k = redui._get_current_items()
+    assert any("WEAPON 8K VV" in item for item in items8k)
+    assert any("Active Resolution: 8K 16:9" in item for item in items8k)
+
+    # Verify Project > Format offers 8K
+    redui.menu_path = ["Menu", "SETTINGS", "PROJECT", "Format"]
+    fmt8k_items = redui._get_current_items()
+    assert "8K 16:9" in fmt8k_items
+    assert "8K 2.4:1" in fmt8k_items
+
+    # 3. Revert back to SCARLET-W 5K (0x16)
+    camera.select_camera_model("0x16")
+    redui.apply_camera_profile(camera.env.CAMERA_PROFILES["0x16"])
+    assert redui.camera_model == "SCARLET-W 5K"
+
+

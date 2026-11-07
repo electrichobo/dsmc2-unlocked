@@ -83,10 +83,16 @@ tests\test_web_studio.py ...........                                     [100%]
 4. **Cinematic Sensor Frame Stream**:
    - Renders authentic cinema portrait frame (`res/sensor_feed_cinema.jpg`) during active camera power in place of abstract boot splashes.
    - Responsive fluid aspect-ratio scaling (16:9) with pixel-accurate touch coordinate transformation.
-5. **Multi-Model DSMC2 Camera Personality Switcher**:
+5. **Multi-Model DSMC2 Camera Personality & Firmware Engine**:
    - Extracted all 5 DSMC2 models from `combo_7.4.1.bin`: `WEAPON 8K VV`, `DRAGON-X 5K`, `RAVEN 4.5K`, `SCARLET-W 5K`, and `EPIC-W 8K`.
-   - Dynamic `/env` partition reconfiguration, RCP camera ID updates, and RedUi model badge reflection.
-   - Interactive modal switcher dialog displayed on launch and accessible at any time from the top header model badge.
+   - Dynamic `/env` partition reconfiguration, slot remounting (`/image1`, `/image2`), and direct firmware binary reload (`dsmc_program.mem` into DDR `0x80000000`) with CPU register reset and ThreadX initialization.
+   - Dynamic brain-tailored RedUi menus:
+     - `System Status > Project Status` reflects the active camera model, active resolution, and current codec.
+     - `System Status > Camera Info` reflects the active camera model, firmware version, and physical sensor dimensions.
+     - `Project > Format` dynamically scopes format offerings (e.g. 4.5K on RAVEN with no 5K/8K; 8K on WEAPON/EPIC-W; 5K on SCARLET-W/DRAGON-X).
+     - `Project > Frame Rate` dynamically exposes high-speed sensor modes (e.g. 120 FPS on RAVEN, 96 FPS on DRAGON-X).
+     - Fixed mount enforcement on RED RAVEN (locks to Canon EF mount).
+   - Graceful connection handling silencing Windows host socket aborts (`WinError 10053`).
 6. **Adaptive Button Typography & Push-Through Elimination**:
    - Intelligent font scaling (12pt -> 10pt -> 9pt), multi-line wrapping, and truncation preventing button text overflow.
    - Strict `action: 'down'` / `action: 'move'` / `action: 'up'` event separation eliminating drag push-through activations.
