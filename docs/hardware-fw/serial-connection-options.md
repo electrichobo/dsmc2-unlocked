@@ -24,7 +24,7 @@ you must have the MAX3232. (FT232 alone works only if you tap the TTL side inter
 ## 2. Internal UART (1.8V TTL) — low-level / bench
 The camera SoC's own UART is plain **1.8 V TTL** at the silicon — **no RS-232, no MAX3232.**
 To reach it:
-- A USB-serial adapter (FT232 preferred) **plus a 1.8 ↔ 3.3 V level translation.**
+- A USB-serial adapter **plus a 1.8 ↔ 3.3 V level translation.**
 - **Never put 3.3 V straight on the SoC RX pin — it damages the SoC.**
 
 Cheapest level fixes (no dedicated shifter chip):
@@ -32,6 +32,10 @@ Cheapest level fixes (no dedicated shifter chip):
 - **Series resistor** (~4.7 kΩ) on the adapter-TX → SoC-RX line (relies on the SoC input clamp,
   current-limited, safe), or a 2-resistor divider (3.3→1.8). SoC-TX → adapter-RX usually direct.
 - GND common. Adapter at 3.3 V logic (never 5 V).
+
+Adapter choice: cheap USB-serial dongles (e.g. bare FT232 breakouts) can brown out and drop off USB
+on the camera's power-on inrush, which matters if you need to catch a boot-time window. A board with
+its own regulator (e.g. an RP2040) is more robust for that. For plain console reads, any adapter is fine.
 
 This internal UART is for bench / recovery work; the exact pads and the boot/recovery procedure
 are board-specific and covered separately. For normal use, the CTRL port above is the one you want.
