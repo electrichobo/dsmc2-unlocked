@@ -33,6 +33,7 @@ to the camera.
 
 ## Repair / identification note
 A control (CTRL) expander board using an RS-232 transceiver (e.g. MAX3221) to the camera's serial
-connector is one of these STM32F303 units: the transceiver's logic side goes to the STM32, and the
-STM32 carries the link to the camera on a second UART. The STM32 I/O is 3.3 V; the camera's own SoC
+connector is one of these STM32F303 units: the transceiver's logic side goes to the STM32. How the
+STM32 then carries the link to the camera (which UART, pass-through vs re-framed) is board-specific
+and best confirmed by tracing. The STM32 I/O is 3.3 V; the camera's own SoC
 UART is 1.8 V, so any direct SoC-side tap needs a 1.8↔3.3 V level shifter, never an RS-232 driver.
