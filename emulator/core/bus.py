@@ -4,7 +4,7 @@ Routes memory accesses and dispatches MMIO transactions to peripheral models.
 """
 
 import struct
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List, Any
 import unicorn
 
 

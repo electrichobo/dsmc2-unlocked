@@ -153,3 +153,31 @@ Between 34.5M and 45.0M instructions, the firmware invokes ThreadX kernel setup 
    - Interrupt dispatcher (`0x80672B18`) reads `INTC_SIR_IRQ` (`0x48200040`) and dispatches vector table entry 61 (`0x81406D1C + 61*4`) -> `0x80688D70`.
    - ISR calls `0x80688860`, releasing the completion semaphore (`tx_semaphore_put`).
    - `SystemInitThread` transitions from `SEMAPHORE_SUSP` to `READY`, advancing its run count (17+ execution slices) and unblocking background RTOS logging to UART4 (`0x49042000`).
+
+---
+
+## 6. Default 45M-Instruction Park State & Behavioral Verification Harness
+
+1. **Where Default `boot(45_000_000)` Parks**:
+   - At the end of the default 45M-instruction budget, the core sits at PC `0x80E9C368` (SP `0x814CAB14`, CPSR `0x60000053`) inside the ThreadX scheduler idle loop (`_tx_thread_schedule`).
+   - Thread state at this park boundary is pre-full-init: `System Timer Thread` (`0x8149D494`) is `SUSPENDED`, `SystemInitThread` (`0x814CAD40`) is blocked on a semaphore, `QueueDispatcher helper thread` (`0x827109B0`) is `READY`, and `log_thread` (`0x82710CA0`) is `SUSPENDED`.
+   - Because `SystemInitThread` has not finished its late initialization stages at this point, globals populated by later init stages—such as the hardware capability global `hw_cap` at `0x815811F4`—still read `0x00000000`.
+
+2. **Why Static Memory Pokes at the Park PC Do Not Prove Behavioral or Flash Safety**:
+   - `cam.bus` exposes direct read/write helpers (`read_u32`, `write_u32`, `read_mem`, `write_mem`) to any mapped address.
+   - Writing a value to `0x815811F4` while parked at `0x80E9C368` and reading it back only proves the mapped RAM cell is writable. The firmware never re-reads `0x815811F4` while parked in the idle loop, and if execution continues into the init routine that populates `0x815811F4` from configuration data, the firmware's own initialization store overwrites the poked value.
+   - Furthermore, DDR is mapped as 512 MB at `0x80000000` (vs 128 MB on physical silicon), so out-of-range pointer accesses above 128 MB will not fault in the default virtual map.
+
+3. **Behavioral Execution Harness (`boot_until` & PC / Memory Hooks)**:
+   - `Dsmc2Camera` provides `boot_until(target_pc, max_instructions=..., on_hit=...)`, `add_pc_hook(addr, callback, one_shot=...)`, `add_mem_read_hook(addr, size, callback)`, and `add_mem_write_hook(addr, size, callback)`.
+   - To validate a real behavioral or capability modification:
+     ```python
+     # 1. Run past the initialization routine that writes the default value
+     cam.boot_until(post_init_pc, max_instructions=60_000_000)
+
+     # 2. Poke the capability global after init has completed
+     cam.bus.write_u32(0x815811F4, 0xFFFFFFFF)
+
+     # 3. Hook the consuming read site or run to the consumer branch target
+     cam.boot_until(consumer_pc, max_instructions=10_000_000)
+     ```

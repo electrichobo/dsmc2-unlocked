@@ -8,7 +8,7 @@ import unicorn
 import struct
 import threading
 import time
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict, Callable, Any, Tuple, Union, Set, Iterable
 
 from emulator.core.cpu import ArmCpu
 from emulator.core.bus import SystemBus
@@ -377,6 +377,133 @@ class Dsmc2Camera:
             except Exception:
                 pass
 
+    def boot_until(
+        self,
+        target_pc: Union[int, Set[int], Iterable[int]],
+        max_instructions: int = 60_000_000,
+        step_size: int = 250_000,
+        on_hit: Optional[Callable[["Dsmc2Camera", int], None]] = None,
+    ) -> bool:
+        """Execute firmware slices (with IRQ and timer servicing) until PC reaches ``target_pc``.
+
+        Allows behavioral tests to run directly to a named initialization or consumer site,
+        inspect or poke registers/memory via ``on_hit(camera, pc)`` (or after return), and
+        continue execution. Returns ``True`` if ``target_pc`` was hit within ``max_instructions``.
+        """
+        targets: Set[int] = {target_pc} if isinstance(target_pc, int) else set(target_pc)
+        if not targets:
+            return False
+
+        hit_flag = {"hit": False, "pc": 0}
+
+        def _bp_hook(uc, address, size, user_data):
+            if address in targets:
+                hit_flag["hit"] = True
+                hit_flag["pc"] = address
+                uc.emu_stop()
+
+        min_pc = min(targets)
+        max_pc = max(targets)
+        hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _bp_hook, None, min_pc, max_pc)
+
+        done = 0
+        try:
+            while done < max_instructions and not hit_flag["hit"]:
+                if self.cpu.pc in targets:
+                    hit_flag["hit"] = True
+                    hit_flag["pc"] = self.cpu.pc
+                    break
+
+                n = min(step_size, max_instructions - done)
+                pc = self.cpu.pc
+                if pc in self.IDLE_LOOP_PCS and self.intc.has_pending_irq():
+                    if self.cpu.are_interrupts_enabled():
+                        self.cpu.inject_irq(vector=0x80829F00)
+
+                self.cpu.run(self.cpu.pc, 0, count=n)
+                done += n
+                self.instruction_count += n
+
+                if hit_flag["hit"]:
+                    break
+
+                # Service active hardware timers
+                for tmr in self.timers.values():
+                    if tmr.tclr & 0x01:
+                        if tmr.timer_id == 2:
+                            tmr.tick(steps=32)
+                        else:
+                            tmr.tick(steps=100)
+        finally:
+            try:
+                self.cpu.mu.hook_del(hook_handle)
+            except Exception:
+                pass
+
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        if hit_flag["hit"] and on_hit is not None:
+            on_hit(self, hit_flag["pc"])
+        return hit_flag["hit"]
+
+    def add_pc_hook(
+        self,
+        addr: int,
+        callback: Callable[["Dsmc2Camera", int], None],
+        one_shot: bool = False,
+    ) -> int:
+        """Register a PC code hook at ``addr`` invoking ``callback(camera, pc)``."""
+        handle_box: List[Optional[int]] = [None]
+
+        def _code_hook(uc, address, size, user_data):
+            if address == addr:
+                if one_shot and handle_box[0] is not None:
+                    try:
+                        uc.hook_del(handle_box[0])
+                    except Exception:
+                        pass
+                    handle_box[0] = None
+                callback(self, address)
+
+        h = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _code_hook, None, addr, addr)
+        handle_box[0] = h
+        return h
+
+    def add_mem_read_hook(
+        self,
+        addr: int,
+        size: int,
+        callback: Callable[["Dsmc2Camera", int, int], None],
+    ) -> int:
+        """Register a memory read hook on ``[addr, addr + size - 1]`` invoking ``callback(camera, address, access_size)``."""
+        end_addr = addr + max(1, size) - 1
+
+        def _read_hook(uc, access, address, access_size, value, user_data):
+            callback(self, address, access_size)
+
+        return self.cpu.mu.hook_add(unicorn.UC_HOOK_MEM_READ, _read_hook, None, addr, end_addr)
+
+    def add_mem_write_hook(
+        self,
+        addr: int,
+        size: int,
+        callback: Callable[["Dsmc2Camera", int, int, int], None],
+    ) -> int:
+        """Register a memory write hook on ``[addr, addr + size - 1]`` invoking ``callback(camera, address, access_size, value)``."""
+        end_addr = addr + max(1, size) - 1
+
+        def _write_hook(uc, access, address, access_size, value, user_data):
+            callback(self, address, access_size, value)
+
+        return self.cpu.mu.hook_add(unicorn.UC_HOOK_MEM_WRITE, _write_hook, None, addr, end_addr)
+
+    def remove_hook(self, handle: int):
+        """Remove a previously registered Unicorn hook handle."""
+        try:
+            self.cpu.mu.hook_del(handle)
+        except Exception:
+            pass
+
     def power_on(self, progress_cb: Optional[Callable[[float], None]] = None):
         """Power on camera to operational state."""
         if not self.is_booted:
@@ -607,24 +734,23 @@ class Dsmc2Camera:
         if not profile:
             return False
 
-        # Update firmware slot directory
+        # Update firmware slot directory and VFS mount target unconditionally
         new_slot_dir = os.path.join(self.workspace_root, profile["FIRMWARE_DIR"], "slot")
-        if os.path.exists(new_slot_dir):
-            self.firmware_slot_dir = new_slot_dir
-            if hasattr(self, "vfs") and self.vfs:
-                self.vfs.firmware_slot_dir = new_slot_dir
+        self.firmware_slot_dir = new_slot_dir
+        if hasattr(self, "vfs") and self.vfs:
+            self.vfs.firmware_slot_dir = new_slot_dir
 
+        fw_path = os.path.join(new_slot_dir, "dsmc_program.mem")
+        fw_reloaded = False
+        if os.path.exists(fw_path):
             # Cleanly re-initialize SoC hardware before booting new model's firmware
             self._init_hardware()
-
-            # Reload and boot the actual firmware binary for this model
-            fw_path = os.path.join(new_slot_dir, "dsmc_program.mem")
-            if os.path.exists(fw_path):
-                self.load_firmware(fw_path)
-                self.boot(initial_instructions=45_000_000)
-                self.power_state = self.POWER_ON
-                self.is_booted = True
-                self.rcp_server.start()
+            self.load_firmware(fw_path)
+            self.boot(initial_instructions=45_000_000)
+            self.power_state = self.POWER_ON
+            self.is_booted = True
+            self.rcp_server.start()
+            fw_reloaded = True
 
         # Update RCP state
         if hasattr(self, "rcp") and self.rcp:
@@ -650,7 +776,10 @@ class Dsmc2Camera:
 
         self.log_system(f"[CAMERA] Switched DSMC2 BRAIN Model to {profile['CAMERA_NAME']} ({profile['RELEASE_TAG']}, Type {profile['CAMERA_TYPE']})")
         self.log_system(f"[SENSOR] Active Sensor: {profile['SENSOR_NAME']} ({profile['SENSOR_WIDTH']}x{profile['SENSOR_HEIGHT']}, Max {profile['MAX_FPS']} FPS)")
-        self.log_system(f"[FIRMWARE] Active Firmware: v7.4.1 ({profile['CAMERA_NAME']}) from {profile['FIRMWARE_DIR']}")
+        if fw_reloaded:
+            self.log_system(f"[FIRMWARE] Active Firmware: v7.4.1 ({profile['CAMERA_NAME']}) from {profile['FIRMWARE_DIR']}")
+        else:
+            self.log_system(f"[FIRMWARE] Slot binary not staged at {profile['FIRMWARE_DIR']}/slot/dsmc_program.mem; profile metadata applied without firmware reload")
         return True
 
     def load_and_boot_custom_firmware(self, custom_path: str) -> Dict[str, Any]:
