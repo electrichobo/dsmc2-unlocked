@@ -43,15 +43,7 @@ class OmapIntc(Device):
 
     def _evaluate_irqs(self):
         """Find highest priority pending unmasked IRQ."""
-        next_irq = self._find_next_irq()
-        if self.active_irq is not None:
-            bank = self.active_irq // 32
-            bit = 1 << (self.active_irq % 32)
-            if (self.itr[bank] & ~self.mir[bank] & bit) == 0:
-                self.active_irq = next_irq
-        else:
-            self.active_irq = next_irq
-
+        self.active_irq = self._find_next_irq()
         if self.active_irq is not None and self.on_irq_asserted:
             self.on_irq_asserted()
 

@@ -1,41 +1,47 @@
 # DSMC2 Virtual Brain
 
-A faithful, full-system hardware and operating system emulator for the **RED DSMC2** cinema camera platform.
+DSMC2 Virtual Brain (`dsmc2-virtual-brain`, CLI: `dsmc2-vbrain`) is a full-system hardware and operating system emulator for the RED DSMC2 cinema camera platform.
 
-DSMC2 Virtual Brain (`dsmc2-virtual-brain`, CLI: `dsmc2-vbrain`) executes authentic ARMv7-A Cortex-A8 machine code extracted from genuine DSMC2 firmware packages, simulating Texas Instruments OMAP3530 / DM3730 SoC peripherals, coprocessors, display pipelines, and control interfaces.
+The emulator runs authentic ARMv7-A Cortex-A8 code from a user-supplied DSMC2 firmware (`dsmc_program.mem`). It models the Texas Instruments DM3725 / OMAP3630 system-on-chip (SoC) peripherals, coprocessors, display pipelines, and network control interfaces.
 
 ---
 
-## 1. What DSMC2 Virtual Brain Is
+## 1. System Overview
 
-DSMC2 Virtual Brain is an open, clean-room emulator and virtual engineering workbench designed to replicate the complete compute architecture and operating system environment of RED Digital Cinema DSMC2 camera bodies. It executes genuine user-supplied firmware binaries (`dsmc_program.mem`) inside a high-performance JIT CPU engine (Unicorn / QEMU core), models memory-mapped I/O peripherals, emulates real-time operating system (ThreadX RTOS) scheduler interactions, and provides rich graphical and network control interfaces.
+DSMC2 Virtual Brain is an open, clean-room emulator and engineering workbench. It replicates the compute architecture and operating system environment of RED DSMC2 camera bodies.
+
+The emulator performs these core functions:
+- It executes user-supplied firmware (`dsmc_program.mem`) in a Unicorn ARMv7-A JIT engine.
+- It models memory-mapped I/O (MMIO) peripherals across the `0x40000000`–`0x7FFFFFFF` address range.
+- It tracks the ThreadX real-time operating system (RTOS) scheduler and thread states.
+- It provides a browser-based Web Studio and a RED Command Protocol (RCP) TCP server.
 
 ---
 
 ## 2. Purpose
 
-RED Digital Cinema officially discontinued the sale of DSMC2 camera bodies in December 2022. As physical camera hardware ages and parts availability declines, developing custom firmware modifications, reverse-engineering undocumented subsystems, or building recovery tooling directly on physical cameras carries a catastrophic risk: an early-boot fault, corrupted memory partition, or erroneous register write can permanently brick rare and irreplaceable production equipment.
+RED Digital Cinema stopped selling DSMC2 camera bodies in December 2022. Testing custom firmware modifications directly on physical camera hardware carries a high risk. An early-boot fault or an invalid register write can stop a physical camera body from booting.
 
-DSMC2 Virtual Brain provides a safe, reproducible virtual target for:
-- **Firmware Development & Verification**: Test custom firmware builds, binary patches, and capability overrides without risking physical camera bodies.
-- **Remote Control & Automation**: Develop and test RED Command Protocol (RCP) scripts, multi-camera Genlock networks, and studio automation workflows.
-- **Reverse Engineering & Research**: Inspect ThreadX RTOS threads, task stacks, interrupt service routines, and inter-processor communication.
-- **Fault Injection & Robustness Testing**: Simulate hardware failures, I2C bus stalls, brownouts, and media degradation to verify error handling and recovery mechanisms.
+DSMC2 Virtual Brain provides a local virtual target for four tasks:
+- **Firmware verification**: Run and inspect custom firmware builds and binary patches before hardware tests.
+- **Remote control and automation**: Test RCP scripts, multi-camera Genlock sync, and studio control tools.
+- **Reverse engineering**: Inspect ThreadX RTOS threads, task stacks, interrupt service routines (ISRs), and coprocessor mailboxes.
+- **Fault injection**: Simulate I2C bus errors, monitor disconnects, `/env` corruption, and watchdog resets.
 
 ---
 
-## 3. Supported DSMC2 Models and Firmware Versions
+## 3. Supported DSMC2 Models and Firmware
 
 ### Reference Firmware
-- **RED DSMC2 Firmware v7.4.1** (Official Release Package)
-- Compatible with earlier DSMC2 v7.x releases and custom engineering builds.
+- **RED DSMC2 Firmware v7.4.1** (reference build, SHA-256: `2bfa1c5211910a30b656ee197e70498a4d7d3c52a0a2df3d85d774a1cb27f88e`).
+- Compatible with DSMC2 v7.x firmware builds.
 
-### Supported Models & Hardware Personalities
-The emulator supports switching between five genuine DSMC2 camera personalities, dynamically adjusting `/env` capability signatures, sensor geometry, frame rates, and clip metadata:
+### Supported Camera Models
+The emulator supports five DSMC2 camera profiles. Each profile sets the `/env` model identity, sensor dimensions, maximum frame rate, and clip metadata:
 
-| Model Name | Model ID | Sensor Name | Native Resolution | Max Framerate |
+| Model Name | Model ID | Sensor Name | Native Resolution | Max Frame Rate |
 |---|---|---|---|---|
-| **SCARLET-W 5K** (Reference Body) | `0x16` | RED DRAGON 5K S35 | 5120 × 2700 | 60 FPS |
+| **SCARLET-W 5K** (Reference) | `0x16` | RED DRAGON 5K S35 | 5120 × 2700 | 60 FPS |
 | **RED RAVEN 4.5K** | `0x15` | RED DRAGON 4.5K S35 | 4608 × 2160 | 120 FPS |
 | **WEAPON 8K VV** | `0x11` | RED MONSTRO 8K VV | 8192 × 4320 | 60 FPS |
 | **DSMC2 DRAGON-X 5K** | `0x14` | RED DRAGON 5K S35 | 5120 × 2700 | 96 FPS |
@@ -43,236 +49,179 @@ The emulator supports switching between five genuine DSMC2 camera personalities,
 
 ---
 
-## 4. Genuinely Working Capabilities
+## 4. Implemented Capabilities
 
-The following capabilities are fully implemented, verified, and backed by the automated test suite:
+The automated test suite (`emulator/tests/`, 114 tests) verifies these capabilities:
 
-- **ARMv7-A Cortex-A8 Execution**: High-performance Unicorn JIT engine executing authentic `dsmc_program.mem` code from `0x80000000` through 45,000,000+ instructions, performing BSS initialization, PLL configuration, and runtime startup.
-- **TrustZone SMC Monitor Interception**: Intercepts OMAP PPA Secure Monitor Calls (`smc #0`), maintaining proper CPSR execution modes and returning success codes without faulting.
-- **ThreadX RTOS Scheduler Tracking**: Dynamic scheduler monitoring with verified Thread Control Block (TCB) discovery, tracking `System Timer Thread`, `SystemInitThread`, `QueueDispatcher`, and `log_thread`.
-- **Hardware Interrupt Controller (INTC)**: Full 96-channel MPU interrupt controller (`0x48200000`), software IRQ assertion, vector calculation, priority masking, and ISR acknowledgment.
-- **OMAP Timers & PRCM**: GPTimer1, GPTimer2, GPTimer3 driving RTOS tick interrupts; dynamic DPLL lock sequencing resolving polling loops at `0x80674A00` and `0x80674A64`.
-- **Multi-Bus I2C Architecture**:
-  - **I2C1**: Texas Instruments TPS65950 PMIC (power rails, battery gauge) and LM75 digital thermal sensor (`0x48`) reporting real-time die and ambient temperatures.
-  - **I2C2**: OLPF (Optical Low Pass Filter) crypto-ROM / 24C02 EEPROM emulation (`0x50` / `0x51`).
-  - **I2C3**: Atmel maXTouch touchscreen digitizer (`0x4B`) and 128-byte VESA EDID 1.3 display EEPROM (`0x50`).
-- **GPMC NAND Flash**: Micron MT29F8G08 8Gb SLC NAND flash controller (`0x6E000000`) with Bad Block Table (BBT) mapping and hardware ECC emulation.
-- **Coprocessors & Peripheral ASICs**:
-  - Dual Xtensa LX6 IOB Coprocessors (`IOB0` at `0x480C0000`, `IOB1` at `0x480C1000`) and Xtensa ISP pipeline (`0x480C2000`) with mailbox registers and status telemetry.
-  - TI C64x+ DSP Subsystem (`0x480D0000`) with DSPLink IPC shared memory ring buffer and ping-pong audio streaming.
-  - DSMC2 Accessory Bus Controller (`0x480E0000`) with hotplug discovery and enumeration for RED EVF, Sidekick, Base I/O Expander, and Production Module.
-- **Broadcast Audio & Video Pipelines**:
-  - Real-time 48kHz PCM and 44-byte RIFF/WAVE audio streaming with a calibrated 1kHz reference test tone ($-20\text{ dBFS}$) and Web Audio API browser monitoring with HTML5 oscilloscope.
-  - 1080p60 HDMI broadcast output simulation supporting `CLEAN`, `BROADCAST_TALLY`, and `FRAME_GUIDES` modes.
-- **RED Command Protocol (RCP)**: Multi-threaded RCP TCP server on port 1111 and UART3 serial bridge; scriptable RCP automation engine with DSL script execution, assertions, 4 production presets, and multi-camera Tri-Level Genlock synchronization.
-- **Web Studio UI (Zero Freeze)**: Modern, standard-library browser interface on port 8765 featuring responsive 1024×576 LCD streaming, interactive touchscreen, physical camera controls, engineering workbench, vertical MINI-MAG loader with custom mod drag-and-drop, and 1-click baseline revert.
-- **Automated Regression Suite**: 82 passing tests covering CPU, memory bus, peripherals, RTOS, coprocessors, audio/video streams, storage, and UI.
+- **ARMv7-A Cortex-A8 CPU (`emulator/core/cpu.py`)**: Executes `dsmc_program.mem` from `0x80000000` through 45,000,000 instructions. Completes `.bss` clearing, clock setup, and ThreadX kernel startup.
+- **Behavioral Execution Harness (`emulator/camera.py`)**: Provides `boot_until(target_pc)`, `add_pc_hook`, `add_mem_read_hook`, and `add_mem_write_hook` to pause execution at specific code addresses and verify runtime behavior.
+- **TrustZone Monitor Handling**: Intercepts OMAP Secure Monitor Calls (`smc #0`), sets `R0 = 0`, and advances the program counter (`PC`).
+- **ThreadX RTOS Monitor**: Reads Thread Control Blocks (TCBs) in DDR to report `System Timer Thread`, `SystemInitThread`, `QueueDispatcher helper thread`, and `log_thread`.
+- **Interrupt Controller (`OmapIntc` at `0x48200000`)**: Implements 96 interrupt channels across three 32-bit banks (`ITR`, `MIR`, `MIR_CLEAR`, `MIR_SET`, `ISR_SET`, `PENDING_IRQ`).
+- **Timers and Clock Management (`OmapGPTimer`, `OmapPrcm`)**: Models GPTimer 1 through 11 with the standard OMAP3 register layout (`TISR` `0x18`, `TIER` `0x1C`, `TCLR` `0x24`, `TCRR` `0x28`, `TLDR` `0x2C`). Timer 2 asserts IRQ 38 for the ThreadX 1000 Hz tick. `OmapPrcm` models DPLL lock status at `0x48004024`.
+- **System DMA and McSPI (`OmapSdma`, `OmapMcspi`)**: Models the 32-channel sDMA controller at `0x48056000` (IRQ 15) and McSPI 1 through 4 (`0x48098000`, `0x4809A000`, `0x480B8000`, `0x480BA000`).
+- **Multi-Bus I2C (`OmapI2c`)**:
+  - **I2C1 (`0x48070000`)**: TI TWL4030 / TPS65950 PMIC (`0x48`, `0x49`, `0x4A`, `0x4B`) and TI TMP411 temperature sensor (`0x4C`).
+  - **I2C2 (`0x48072000`)**: Optical Low Pass Filter (OLPF) 24C02 EEPROM (`0x54`).
+  - **I2C3 (`0x48060000`)**: Atmel maXTouch digitizer (`0x4B`), VESA EDID 1.3 EEPROM (`0x50`), and PMIC sub-bus. Asserts IRQ 61 on `ARDY`, `XRDY`, and `RRDY`.
+- **GPMC NAND Flash (`OmapGpmc` at `0x6E000000`)**: Models the Micron MT29F8G08 256 MB SLC NAND flash with ONFI Read ID (`0x2C`, `0xBA`), BCH ECC registers, and YAFFS2 partition mounting.
+- **Coprocessors (`emulator/coprocessors/`)**:
+  - Models Tensilica Xtensa cores (`IOB0`, `IOB1`, `ISP1`, `ISP2`) and Chip-to-Chip (C2C) doorbells (`0x3FFE8000`, `0x4FFE8000`).
+  - Models the TI TMS320C64x+ DSP (`rdc_dsp_app.out` COFF loader), DSPLink IPC queues, `CImagingServer`, and `RAudioServer`.
+- **Audio and Video Streams**: Generates 48 kHz stereo PCM/WAV audio streams and 1080p HDMI output frames (`CLEAN`, `BROADCAST_TALLY`, `FRAME_GUIDES`).
+- **RED Command Protocol (`emulator/rcp/`)**: Runs a TCP server on port 1111 and a DSL automation engine (`SET`, `GET`, `ASSERT`, `WAIT`, `RAMP`, `TRIGGER`).
+- **Web Studio (`emulator/ui/web.py`)**: Serves a browser UI on port 8765 using the Python standard library. Provides a 1024 × 576 MJPEG display stream, touch input, physical buttons, MINI-MAG firmware loader, and diagnostic panels.
 
 ---
 
-## 5. Simulated, Incomplete, or Unverified Capabilities
+## 5. Fidelity Limits and Safety Constraints
 
-To maintain rigorous technical transparency, the following aspects are simulated or abstracted rather than gate-level silicon models:
+Review these limits before using the emulator for firmware safety analysis (see [docs/FIDELITY_MATRIX.md](docs/FIDELITY_MATRIX.md) for full details):
 
-- **REDCODE RAW (R3D) Wavelet Compression**: The mathematical container layout, metadata chunks, slice wrappers, and `.rmd` sidecars are authentic; however, the proprietary hardware wavelet transform bitstream implemented in RED's custom FPGA ASIC is not gate-level emulated.
-- **Sensor Silicon Physics**: Sensor feeds use authentic 4K/5K cinema reference frames (`res/sensor_feed_cinema.jpg`) and synthetic test patterns rather than physical CMOS pixel-array analog noise and photon transfer curves.
-- **Early-Boot to Native OMAP DISPC Handover**: While the emulator successfully boots 45M instructions into ThreadX RTOS initialization, transitioning from early boot into native display framebuffer drawing via proprietary RedUi DISPC overlay pipelines requires continuing MMIO register hooks (as documented in `docs/BOOT_TRACE.md`). In the meantime, the RedUi graphics and menu engine renders the authentic interface in the Web Studio compositor.
+- **Mapped DDR size (`512 MB` vs `128 MB` physical)**: `SystemBus` maps 512 MB at `0x80000000` (`0x80000000`–`0x9FFFFFFF`). Physical DSMC2 hardware has 128 MB of DDR. Out-of-range pointer accesses above 128 MB fault on physical hardware, but they read and write without error in the default virtual map.
+- **Early boot park (`0x80E9C368`)**: At the end of the default 45,000,000-instruction `boot()` budget, the CPU parks at `0x80E9C368` in the ThreadX idle loop before late driver initialization finishes. Globals populated by later stages—such as `hw_cap` at `0x815811F4`—still read `0x00000000` at this point. Writing a value to `0x815811F4` while parked at `0x80E9C368` only tests the RAM map, not firmware behavior. Use `boot_until()` and PC/memory hooks to test code paths after initialization.
+- **REDCODE wavelet compression**: The R3D container structure and `.rmd` XML sidecars match the format specification, but the FPGA wavelet bitstream is not gate-level emulated.
+- **Sensor image feed**: The display uses a reference frame (`emulator/res/sensor_feed_cinema.jpg`) rather than a physical CMOS sensor simulation.
 
 ---
 
-## 6. Installation & Build Instructions
+## 6. Installation Procedure
 
 ### Prerequisites
-- **Python 3.10+** (tested and verified on Python 3.10, 3.11, 3.12, 3.13, and 3.14 on Windows, Linux, and macOS).
-- **Git**
+- Python 3.10 or newer.
+- Git.
 
-### Installation
+### Steps
 1. Clone the repository:
    ```bash
    git clone https://github.com/electrichobo/dsmc2-unlocked.git
    cd dsmc2-unlocked
    ```
-2. Install required Python packages:
+2. Install the Python dependencies:
    ```bash
-   pip install unicorn pillow pytest
+   pip install unicorn capstone pillow pytest
    ```
-
-*(Note: The Web Studio interface runs entirely on Python standard libraries without requiring Node.js, npm, Flask, or external web frameworks.)*
 
 ---
 
-## 7. Supplying Legitimately Obtained Firmware Files
+## 7. Firmware Setup Procedure
 
-**Proprietary RED firmware binaries are never distributed with this repository.**
+**This repository does not contain proprietary RED firmware files.**
 
-To run the full ARM boot execution sequence or splash screen renderer, supply extracted firmware from an official RED release:
+To execute the ARM boot sequence, supply unpacked files from a DSMC2 firmware package:
 
-1. Obtain official DSMC2 firmware (e.g., `v7.4.1`) from RED or an authorized source.
-2. Unpack the firmware package using the included crypto tool:
+1. Obtain an official DSMC2 firmware package (such as `v7.4.1`).
+2. Unpack the firmware package into `firmware_store/`:
    ```bash
    python tools/fw-crypto/unpack_combo.py --input <path_to_firmware.pkg> --output firmware_store/unpacked/scarlet_w_7_4_1/
    ```
-3. Ensure the unpacked `slot/` directory contains:
-   - `dsmc_program.mem` (ARM Cortex-A8 executable)
-   - `bootloader_0x16.bin` (OMAP bootloader)
-   - `res/splash_screen.bin` (optional, 1024x576 splash screen)
-4. All `firmware_store/` contents are strictly excluded by `.gitignore` to prevent unauthorized redistribution.
+3. Verify that `firmware_store/unpacked/scarlet_w_7_4_1/slot/` contains these files:
+   - `dsmc_program.mem` (main ARM executable)
+   - `bootloader_0x16.bin` (bootloader binary)
+   - `res/splash_screen.bin` (optional 1024 × 576 splash image)
 
-Alternatively, you can drag and drop firmware mod binaries directly into the **MINI-MAG slot** in the Web Studio interface.
+`.gitignore` excludes `firmware_store/` and `user_firmware/` so proprietary files are never committed.
 
 ---
 
-## 8. How to Run the Emulator
+## 8. Operating Procedures
 
-### 1. Web Studio (Primary Interactive UI)
-```bash
-python -m emulator.cli run
-```
-This automatically boots the camera and opens the studio in your default web browser at `http://127.0.0.1:8765/`.
+### Start the Web Studio
+1. Run the `run` command from the repository root:
+   ```bash
+   python -m emulator.cli run
+   ```
+2. Open `http://127.0.0.1:8765/` in a web browser if it does not open automatically.
 
-Options:
+To run on a custom port without opening a browser:
 ```bash
-# Custom HTTP port and disable auto-browser launch:
 python -m emulator.cli run --web-port 8765 --no-browser
-
-# Launch directly via web module:
-python -m emulator.ui.web
 ```
 
-### 2. Headless Mode (RCP TCP Server Only)
-```bash
-python -m emulator.cli run --headless --port 1111
-```
-Runs the virtual camera headlessly with the RCP TCP server listening on port 1111 for remote control.
+### Start Headless Mode (RCP Server Only)
+1. Run the emulator with `--headless`:
+   ```bash
+   python -m emulator.cli run --headless --port 1111
+   ```
+2. Connect an RCP client to `127.0.0.1:1111`.
 
-### 3. Firmware Boot Execution Trace
-```bash
-python -m emulator.cli boot --instructions 45000000 --json
-```
-Executes the specified number of instructions through the Unicorn JIT engine and outputs structured JSON diagnostics (PC, SP, CPSR, RTOS threads discovered, unknown MMIO accesses).
+### Run a Headless Boot Trace
+1. Run the `boot` command with `--json`:
+   ```bash
+   python -m emulator.cli boot --instructions 45000000 --json
+   ```
+2. Inspect the JSON output for `pc`, `sp`, `cpsr`, `threads`, and `unknown_mmio_count`.
 
-### 4. Full-System State Snapshots
-```bash
-# Save snapshot
-python -m emulator.cli snapshot save snapshots/baseline.dsmc2 --desc "Booted 45M state"
-
-# Restore snapshot
-python -m emulator.cli snapshot restore snapshots/baseline.dsmc2
-```
+### Save and Restore State Snapshots
+1. Save a snapshot to disk:
+   ```bash
+   python -m emulator.cli snapshot save snapshots/baseline.dsmc2 --desc "Booted 45M state"
+   ```
+2. Restore a snapshot from disk:
+   ```bash
+   python -m emulator.cli snapshot restore snapshots/baseline.dsmc2
+   ```
 
 ---
 
-## 9. Accessing Camera UI and Diagnostics
+## 9. Running the Test Suite
 
-### Web Studio (`http://127.0.0.1:8765`)
-The browser interface provides a complete virtual camera studio:
-- **Virtual LCD Screen (1024×576)**: Live cinema sensor feed, authentic RED HUD indicators (Timecode, Shutter, ISO, Format, Iris, Battery, Media Gauge), and interactive touchscreen with pixel-perfect coordinate mapping.
-- **Physical Controls**: Authentic RED tactile controls (**● REC**, **POWER / RESET**, **MENU**, **1:1 MAG**, **USER 1**, **USER 2**, and **D-Pad** navigation).
-- **Vertical MINI-MAG Slot**: Authentic left-bay vertical cartridge slot with active LED, custom firmware mod drag-and-drop, and 1-click baseline revert.
-- **Engineering Workbench**:
-  - **Console / Serial Log**: Real-time UART4 camera log output.
-  - **RCP Inspector**: Live tree of camera parameters with set/query controls.
-  - **Lens & Optics**: Electronic iris, zoom, and ultrasonic autofocus controls.
-  - **48kHz Audio Stream**: Live Web Audio API monitor with HTML5 oscilloscope.
-  - **1080p60 HDMI Broadcast**: Real-time HDMI output stream viewer.
-  - **Media & R3D Storage**: Recorded clip browser with `.r3d` and `.rmd` metadata inspection.
-  - **ThreadX RTOS Monitor**: Active thread control blocks, priorities, and execution states.
-  - **MMIO Registers**: Memory-mapped I/O telemetry and unknown register access logger.
-  - **Fault Injection**: Disconnect monitor, simulate I2C bus errors, corrupt `/env`, trigger watchdog resets.
-  - **Snapshots**: Capture and restore complete virtual camera memory states.
+The test suite and `pytest.ini` configuration live inside `emulator/`.
 
-### RED Command Protocol (RCP)
-Connect any third-party RCP client or raw TCP socket to `127.0.0.1:1111` to control shutter, ISO, aperture, frame rate, and record state.
+1. Run the full test suite from the repository root:
+   ```bash
+   python -m pytest -c emulator/pytest.ini emulator/tests/
+   ```
+2. Or run the test suite through the CLI and write a JSON report:
+   ```bash
+   python -m emulator.cli test -o test_report.json
+   ```
+3. Run a single test file:
+   ```bash
+   python -m pytest -c emulator/pytest.ini emulator/tests/test_pr_fixes.py
+   ```
+
+*(Tests that require optional gitignored coprocessor or DSP binaries skip automatically when those binaries are absent.)*
 
 ---
 
-## 10. Running the Test Suite
+## 10. Directory Structure
 
-The emulator includes an extensive regression test suite executed via `pytest`:
-
-```bash
-# Run the complete test suite (82 tests):
-python -m pytest
-
-# Run with verbose output:
-python -m pytest -v
-
-# Run a specific subsystem test module:
-python -m pytest tests/test_coprocessors_and_dsp.py
-python -m pytest tests/test_rcp_automation.py
-python -m pytest tests/test_audio_video_streams.py
-python -m pytest tests/test_web_studio.py
-```
-
----
-
-## 11. Known Limitations
-
-- **Host Architecture**: ARMv7-A execution relies on the Unicorn Engine (QEMU-based JIT). Performance is highest on x86_64 and arm64 host architectures.
-- **Hardware Timing**: Instruction execution runs at host CPU speed rather than cycle-stepped OMAP clock frequency. Timers use wall-clock calibration to drive RTOS interrupts.
-- **ASIC Simulation**: FPGA bitstreams for REDCODE wavelet encoding and sensor de-bayering are modeled at protocol and container levels rather than gate-level RTL simulation.
-
----
-
-## 12. Project Architecture
+All emulator code, tests, documentation, assets, and test configuration reside inside `emulator/`:
 
 ```
 emulator/
-├── core/                  # Core CPU (Unicorn JIT), SystemBus, Snapshots, Firmware Loader
-│   ├── bus.py             # Memory address decoder and MMIO dispatch
-│   ├── cpu.py             # Unicorn Cortex-A8 CPU wrapper & SMC TrustZone handler
-│   ├── firmware.py        # Firmware binary parser and memory mapper
-│   └── snapshot.py        # Compressed full-system memory snapshot manager
-├── devices/               # OMAP3 peripherals and external IC models
-│   ├── intc.py            # 96-channel MPU Interrupt Controller
-│   ├── prcm.py            # Power, Reset, and Clock Management & DPLL lock logic
-│   ├── gptimer.py         # General-purpose dual-mode timers (1ms tick IRQ)
-│   ├── uart.py            # OMAP UART1..4 (UART3: RCP, UART4: Debug console)
-│   ├── i2c.py             # Multi-bus I2C controller (I2C1..3)
-│   ├── i2c_pmic.py        # TI TPS65950 PMIC (power rails, battery gauge)
-│   ├── i2c_thermal.py     # LM75 digital temperature sensor
-│   ├── i2c_olpf.py        # OLPF crypto-ROM / EEPROM
-│   ├── i2c_maxtouch.py    # Atmel maXTouch touchscreen digitizer
-│   ├── i2c_eeprom.py      # VESA EDID 1.3 display EEPROM
-│   ├── gpmc.py            # GPMC NAND Flash controller (Micron MT29F8G08)
-│   ├── accessory_bus.py   # DSMC2 accessory bus controller & peripheral enumeration
-│   ├── lens_mount.py      # Electronic lens mount (EF / PL / Sony E)
-│   └── dss.py             # OMAP Display Subsystem & framebuffers
-├── coprocessors/          # Dedicated coprocessor ASIC models
-│   ├── xtensa.py          # Dual Xtensa LX6 IOB0/IOB1 & Xtensa ISP ASICs
-│   ├── dsp.py             # TI C64x+ DSP, DSPLink IPC & 48kHz audio stream
-│   └── c2c.py             # Chip-to-Chip low-latency interconnect
-├── rcp/                   # RED Command Protocol implementation
-│   ├── protocol.py        # Packet framing, command IDs, and parameter encoding
-│   ├── server.py          # Multi-threaded TCP server (port 1111)
-│   └── automation.py      # RCP script engine, multi-camera Genlock, presets
-├── storage/               # Virtual storage and clip recording
-│   ├── env.py             # CameraEnvironment (/env capability flags)
-│   ├── vfs.py             # Virtual File System partition router
-│   └── r3d_recorder.py    # R3D clip container and .rmd sidecar generator
-├── ui/                    # User interface and graphics compositing
-│   ├── web.py             # Freeze-proof Web Studio (HTTP/MJPEG, port 8765)
-│   ├── redui.py           # Authentic DSMC2 menu hierarchy and overlay engine
-│   ├── screen.py          # Frame compositor (sensor feed, HUD, false color)
-│   ├── buttons.py         # Physical tactile button models
-│   └── app.py             # Synchronized desktop Tkinter GUI
-├── camera.py              # Dsmc2Camera top-level system orchestrator
-└── cli.py                 # Command Line Interface (dsmc2-vbrain)
+├── core/                  # CPU (Unicorn JIT), SystemBus, FirmwareManager, SnapshotManager, Faults
+├── devices/               # OMAP3630 peripherals (INTC, PRCM, GPTimer, sDMA, McSPI, UART, I2C, GPMC, GPIO, DSS)
+├── coprocessors/          # Xtensa (IOB0, IOB1, ISP), TI C64x+ DSP, and C2C interconnect
+├── rcp/                   # RED Command Protocol parser, TCP server, and script engine
+├── storage/               # CameraEnvironment (/env), VirtualFileSystem, and R3dClipRecorder
+├── ui/                    # Web Studio (web.py), RedUi menu engine, and Tkinter desktop UI
+├── docs/                  # Emulator technical documentation
+│   ├── ARCHITECTURE.md
+│   ├── BOOT_TRACE.md
+│   ├── EVIDENCE_LEDGER.md
+│   ├── FIDELITY_MATRIX.md
+│   ├── HARDWARE_PERIPHERALS_PLAN.md
+│   ├── LEGAL_AND_PROVENANCE.md
+│   ├── TESTING.md
+│   └── UI_RESEARCH.md
+├── res/                   # Reference cinema sensor frame (sensor_feed_cinema.jpg)
+├── tests/                 # Automated pytest suite (25 test modules)
+├── camera.py              # Dsmc2Camera top-level orchestrator
+├── cli.py                 # Command-line interface (dsmc2-vbrain)
+└── pytest.ini             # Pytest configuration scoped to emulator/tests
 ```
 
 ---
 
-## 13. Contribution Guidelines
+## 11. Documentation Index
 
-1. **Clean-Room Development**: All emulator source code must be clean-room developed based on public datasheets, documented architectures, and independent reverse-engineering research.
-2. **Zero Proprietary Blobs**: Never commit proprietary RED firmware binaries, decrypted code images, or private cryptographic keys.
-3. **Regression Testing**: All modifications must pass the full automated test suite (`python -m pytest`) prior to opening a pull request.
-4. **Code Quality**: Maintain comprehensive docstrings, type annotations, and descriptive commit messages following Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`).
-
----
-
-## 14. Licensing, Attribution, and Upstream Research References
-
-- **Upstream Research**: This emulator builds upon the independent DSMC2 reverse-engineering research documented in [radosek/dsmc2-unlocked](https://github.com/radosek/dsmc2-unlocked).
-- **Trademarks**: RED, DSMC2, SCARLET-W, WEAPON, RAVEN, DRAGON-X, EPIC-W, MONSTRO, HELIUM, DRAGON, REDCODE, and R3D are registered trademarks or trademarks of RED Digital Cinema / Nikon Corporation. Used here strictly for identification, interoperability research, and compatibility reference.
-- **License**: Refer to the project `LICENSE` file for distribution terms.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): System architecture, memory map, and peripheral descriptions.
+- [docs/BOOT_TRACE.md](docs/BOOT_TRACE.md): Chronological firmware execution trace and behavioral hook guide.
+- [docs/EVIDENCE_LEDGER.md](docs/EVIDENCE_LEDGER.md): Hardware and software evidence table with confidence ratings.
+- [docs/FIDELITY_MATRIX.md](docs/FIDELITY_MATRIX.md): Per-subsystem fidelity ratings and verification limits.
+- [docs/HARDWARE_PERIPHERALS_PLAN.md](docs/HARDWARE_PERIPHERALS_PLAN.md): Peripheral, coprocessor, I2C, and accessory bus specifications.
+- [docs/TESTING.md](docs/TESTING.md): Test suite organization, procedures, and coverage matrix.
+- [docs/UI_RESEARCH.md](docs/UI_RESEARCH.md): Display controller, maXTouch digitizer, EDID, and menu layout specifications.
+- [docs/LEGAL_AND_PROVENANCE.md](docs/LEGAL_AND_PROVENANCE.md): Clean-room boundaries and asset rules.

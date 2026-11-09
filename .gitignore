@@ -67,3 +67,4 @@ test_report.json
 
 # Research submodule / clone
 research/
+.dev_docs/

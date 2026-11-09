@@ -48,8 +48,8 @@ class Dsmc2Camera:
 
     # ThreadX Global Symbols
     TX_THREAD_CREATED_PTR = 0x8149CE68
-    TX_THREAD_CURRENT_PTR = 0x8149CE5C
-    TX_THREAD_EXECUTE_PTR = 0x8149CE60
+    TX_THREAD_CURRENT_PTR = 0x8149CE60
+    TX_THREAD_EXECUTE_PTR = 0x8149DDE8
 
     def __init__(self, workspace_root: str):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -104,13 +104,13 @@ class Dsmc2Camera:
         # Fast IRQ wake hook: if waiting in scheduler idle loop with no ready thread and pending IRQ, wake Unicorn
         def _idle_wake_hook(uc, address, size, user_data):
             try:
-                exec_ptr = struct.unpack("<I", uc.mem_read(0x8149CE60, 4))[0]
+                exec_ptr = struct.unpack("<I", uc.mem_read(self.TX_THREAD_EXECUTE_PTR, 4))[0]
             except Exception:
                 exec_ptr = 0
             if exec_ptr == 0 and self.intc.has_pending_irq() and self.cpu.are_interrupts_enabled():
                 uc.emu_stop()
 
-        self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, 0x80E9C368, 0x80E9C368)
+        self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, 0x80E9C368, 0x80E9C368)
 
         # 3. PRCM (Clock & Reset)
         self.prcm = OmapPrcm(self.cpu)
@@ -366,7 +366,9 @@ class Dsmc2Camera:
         self.boot_progress = 1.0
 
         # Stage live sensor feed into DDR primary LCD framebuffer (0x87400000)
-        sensor_path = os.path.join(self.workspace_root, "res", "sensor_feed_cinema.jpg")
+        sensor_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "res", "sensor_feed_cinema.jpg")
+        if not os.path.exists(sensor_path):
+            sensor_path = os.path.join(self.workspace_root, "emulator", "res", "sensor_feed_cinema.jpg")
         if os.path.exists(sensor_path):
             try:
                 from PIL import Image

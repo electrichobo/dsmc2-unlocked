@@ -171,11 +171,11 @@ def cmd_test(args):
     import pytest
     report_file = args.output_json or "test_report.json"
 
-    pytest_args = ["-q"]
+    pytest_args = ["-c", os.path.join(os.path.dirname(os.path.abspath(__file__)), "pytest.ini"), "-q"]
     if args.suite and args.suite != "all":
-        pytest_args.append(f"tests/test_{args.suite}.py")
+        pytest_args.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", f"test_{args.suite}.py"))
     else:
-        pytest_args.append("tests")
+        pytest_args.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests"))
 
     t0 = time.time()
     exit_code = pytest.main(pytest_args)

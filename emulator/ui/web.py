@@ -84,7 +84,9 @@ class ScreenCompositor:
 
     def _load_sensor_feed_image(self) -> Optional[Image.Image]:
         """Load authentic cinema sensor background in place of the gaussian swirl."""
-        sensor_path = os.path.join(self.camera.workspace_root, "res", "sensor_feed_cinema.jpg")
+        sensor_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "res", "sensor_feed_cinema.jpg")
+        if not os.path.exists(sensor_path):
+            sensor_path = os.path.join(self.camera.workspace_root, "emulator", "res", "sensor_feed_cinema.jpg")
         if not os.path.exists(sensor_path):
             return None
         try:
