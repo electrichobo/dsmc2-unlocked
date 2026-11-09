@@ -20,7 +20,7 @@ line to the exact processor that emitted it.
 | `iob0/iram.bin`, `iob0/dram.bin` | IOB0 (SATA / HDMI / SPI / C2C / XAUI-DMA / DDR test) |
 | `iob1/iram.bin`, `iob1/dram.bin` | IOB1: the black-shading / bad-pixel calibration engine |
 | `proio_iob0/` | PRO I/O (its data section is a zero-filled stub) |
-| `lsbfpga/wlsbfpga.4.bin`, `.5.bin` | Xilinx Kintex-7 LSB FPGA bitstreams (~5 MB each) |
+| `lsbfpga/wlsbfpga.4.bin`, `.5.bin` | **Left Side Board FPGA** bitstreams (Xilinx **Kintex-7 XC7K325T**, ~5 MB zlib on disk / ~11 MiB config). The LSB is the camera's video-routing + I/O hub — XAUI links to ISP/IOB, monitor outputs (MON0/EXP1/SDI), colour LUTs, SSD detect, audio clocks. It is **configuration, not CPU code**, but the camera drives it through a well-defined register interface and can reconfigure it in-system. |
 | `dsp/rdc_dsp_app.out` | TI **TMS320C64x+** DSP app (~1.2 MB): TI C6000 COFF (magic `0x00c2`), 56 sections, 7,951 symbols, `c6x/6.0.14` toolchain, **TI DSP/BIOS** kernel. The brain-module vision/audio DSP: Haar **face detection** (`FaceDetection/fd_algorithm`, TI VLIB pyramid), DoG **autofocus / video measurements** (`af_algorithm`), an on-DSP **audio server** (`RAudioServer`), an **imaging command server** (`CImagingServer`), and **sleep/power** coordination (`CSleepMgr`). IPC to the ARM over DSP/BIOS MSGQ/MPCS (DSPLink). Not disassembled (Ghidra has no C6x module) — role from COFF symbols + source paths |
 | `redpine/redpine-boot.1.bin`, `redpine.1.bin` | WiFi/BT module firmware — **RSI RS9113** (Redpine), fw `1.0.10MM`; boot sends `RS9113.NBZ…rps` |
 
