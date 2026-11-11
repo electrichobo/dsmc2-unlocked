@@ -221,6 +221,24 @@
       "action": "Inspect MINI-MAG connector pins for contamination or bent contacts."
     },
     {
+      "id": "STARTUP_ERROR_0x01",
+      "regex": "(?i)\\bError:?\\s*0x0?1\\b",
+      "title": "Startup Error: Primary Board Fault (0x01)",
+      "subsystem": "Hardware Boot / IOB & ISP",
+      "severity": "Fatal",
+      "meaning": "Critical startup exception (Code 0x01). The main ARM processor failed to establish communication or power-good handshake with an internal processing board (most commonly the IOB or ISP board). Camera halts into forced shutdown.",
+      "action": "Strip camera down to bare brain. Power strictly with official RED AC wall adapter (no battery plates). Inspect internal flex ribbon seating and IOB/ISP power rails."
+    },
+    {
+      "id": "STARTUP_ERROR_0x1D",
+      "regex": "(?i)\\bError:?\\s*0x1d\\b",
+      "title": "Startup Error: Peripheral / Accessory Bus Fault (0x1D)",
+      "subsystem": "Peripheral Bus / Accessories",
+      "severity": "Error",
+      "meaning": "Startup check exception (Code 0x1D). A peripheral, module, or accessory on the external communication bus (side handle, top plate, lens mount) timed out or experienced a communication pin fault.",
+      "action": "Detach all external modules, handles, and lens mount. Clean connector gold leaf pins and test booting with only direct RED LCD attached."
+    },
+    {
       "id": "HEX_ERROR_CODE",
       "regex": "(?i)\\bError:?\\s*(0x[0-9a-fA-F]+)",
       "title": "Hex Error Code",

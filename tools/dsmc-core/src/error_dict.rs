@@ -184,10 +184,20 @@ mod tests {
     }
 
     #[test]
-    fn decodes_hex_error() {
+    fn decodes_startup_error_0x01_and_0x1d() {
         let dict = ErrorDictionary::new();
-        let m = dict.match_line("[0:00:04:000] Error: 0x1d seen").unwrap();
+        let m1 = dict.match_line("[0:00:01:000] Startup Error: Error: 0x01").unwrap();
+        assert_eq!(m1.id, "STARTUP_ERROR_0x01");
+
+        let m2 = dict.match_line("[0:00:04:000] Error: 0x1d seen").unwrap();
+        assert_eq!(m2.id, "STARTUP_ERROR_0x1D");
+    }
+
+    #[test]
+    fn decodes_generic_hex_error() {
+        let dict = ErrorDictionary::new();
+        let m = dict.match_line("[0:00:04:000] Error: 0x4f seen").unwrap();
         assert_eq!(m.id, "HEX_ERROR_CODE");
-        assert_eq!(m.matched_code.as_deref(), Some("0x1d"));
+        assert_eq!(m.matched_code.as_deref(), Some("0x4f"));
     }
 }
