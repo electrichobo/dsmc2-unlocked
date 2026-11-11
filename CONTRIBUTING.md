@@ -31,7 +31,7 @@ hardware alive: repair, preservation, and understanding.
 **Never commit real hardware identifiers** (the owner's physical cameras/boards) —
 in docs, code, tests, comments, dumped data, logs, or filenames.
 
-- Body serial `130-XXX-YYY` → `XXX-XXX-YYY` (keep the trailing model token; use
+- Body serial (`130-<unit>-<model>`) → `XXX-XXX-<model>` — mask the unit prefix, KEEP the trailing model token (e.g. `XXX-XXX-59C`, `XXX-XXX-E49`); use
   `XXX-XXX-XXX` for bulk RAM-dumped factory serial tables with no doc value).
 - Board **serial-suffix** (`85V…`, `04D1…` next to a `131-07xx` part number) →
   `<serial>`. **Keep the part number** — it is public. The shipped-FW constants
@@ -41,5 +41,5 @@ in docs, code, tests, comments, dumped data, logs, or filenames.
   board/pairing context** → `<id>` (never a bare 14-digit number).
 - Do **not** mask `2d…` prefixes inside md5/sha hashes (those are file hashes).
 
-Full rule, serial→placeholder map, and the `git filter-repo` history-scrub recipe:
-`docs/PRIVACY_REDACTION.md`.
+The real serial→placeholder map and the git-history-scrub recipe are kept
+**local and uncommitted** (they would otherwise re-introduce the identifiers they redact). This repo and its history are verified clean.
