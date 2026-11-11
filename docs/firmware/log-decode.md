@@ -122,11 +122,16 @@ and triages each one:
 
 ```
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log sessions <decoded.txt>        # list boots
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log stats    <decoded.txt>        # error frequency across sessions + bloat analysis
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log analyze  <decoded.txt> -o out/ # per-boot files + SUMMARY.txt
-cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log digest   <decoded.txt>        # denoised event digest
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log digest   <decoded.txt>        # denoised event digest with error enrichment
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log health   <decoded.txt>        # PASS/FAIL on the ISP link per boot
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log diff  <good.txt> <bad.txt>    # compare a working vs a broken boot
 ```
+
+`stats` aggregates error occurrences across all boot sessions, decodes numeric
+codes into human meaning using the built-in error dictionary (e.g. `SYSTEM_ERROR (34)`,
+`PCS error 103`), and clusters repeated lines to eliminate log bloat.
 
 `analyze` writes one file per boot plus a summary table (line count, duration,
 error count, furthest boot state reached, failure signature). `health` is meant

@@ -1,0 +1,251 @@
+{
+  "version": 1,
+  "description": "RED DSMC2 camera error-code and numeric state dictionary extracted from firmware v7.4.1",
+  "states": {
+    "0": { "name": "NONE", "desc": "Uninitialized state" },
+    "1": { "name": "INITIALIZE", "desc": "Hardware boot initialization in progress" },
+    "2": { "name": "RUN", "desc": "Core operating system and background threads active" },
+    "3": { "name": "CAPTURE", "desc": "Sensor capture pipeline engaged" },
+    "4": { "name": "ACCEPT_SLA", "desc": "Waiting for user software license agreement acceptance" },
+    "5": { "name": "WAIT_FOR_CAL_AND_MONITOR_LUT_LOAD", "desc": "Loading sensor calibration map and monitor 3D LUTs" },
+    "6": { "name": "PREVIEW_START", "desc": "Starting preview rendering pipeline" },
+    "7": { "name": "WAIT_FOR_UPGRADES", "desc": "Checking peripheral and accessory firmware status" },
+    "8": { "name": "UPGRADES_COMPLETE", "desc": "All peripherals and accessories verified up to date" },
+    "9": { "name": "PREVIEW", "desc": "Live preview active on viewfinders and monitors" },
+    "10": { "name": "READY_TO_RECORD", "desc": "Camera armed and ready to capture footage" },
+    "11": { "name": "PREVIEW_RESTART", "desc": "Restarting preview pipeline following video mode or resolution change" },
+    "12": { "name": "REAPPLY_MONITOR_MAPPINGS", "desc": "Reapplying display LUTs and output color routing" },
+    "13": { "name": "ALGO_START", "desc": "Autofocus or auto-exposure algorithm started" },
+    "14": { "name": "ALGO_ABORT", "desc": "Autofocus or auto-exposure algorithm aborted" },
+    "15": { "name": "RECORD", "desc": "Recording in progress" },
+    "16": { "name": "RECORD_INIT", "desc": "Allocating frame buffers and initializing media writer" },
+    "17": { "name": "PRE_RECORD_ACTIVE", "desc": "Pre-record circular frame buffer actively spooling" },
+    "18": { "name": "BEGIN_RECORD", "desc": "Opening clip container and writing clip header" },
+    "19": { "name": "RECORD_ACTIVE", "desc": "Actively encoding and streaming R3D frames to media" },
+    "20": { "name": "FINALIZE", "desc": "Closing clip container and committing metadata to SSD" },
+    "21": { "name": "FINALIZE_FOR_SHUTDOWN", "desc": "Emergency clip finalization prior to system shutdown" },
+    "22": { "name": "STREAM_3DLUT", "desc": "Streaming 3D look-up table to LSB FPGA" },
+    "23": { "name": "CALIBRATE", "desc": "Executing sensor black shading calibration routine" },
+    "24": { "name": "POWER_SAVE", "desc": "Power saving mode active" },
+    "25": { "name": "POWER_SAVE_LEVEL_1", "desc": "Power save level 1: display dimmed" },
+    "26": { "name": "POWER_SAVE_LEVEL_2", "desc": "Power save level 2: display powered off, sensor idle" },
+    "27": { "name": "POWER_SAVE_LEVEL_3", "desc": "Power save level 3: deep standby" },
+    "28": { "name": "PLAYBACK", "desc": "Playback mode engaged" },
+    "29": { "name": "PLAYBACK_INIT", "desc": "Loading clip indices and R3D metadata for playback" },
+    "30": { "name": "PLAYBACK_ACTIVE", "desc": "Actively decoding and displaying recorded R3D clip" },
+    "31": { "name": "PLAYBACK_STOP", "desc": "Playback stream stopped" },
+    "32": { "name": "PLAYBACK_STOP_FOR_SHUTDOWN", "desc": "Halting playback to allow clean shutdown" },
+    "33": { "name": "UPGRADE", "desc": "Firmware upgrade or package write in progress" },
+    "34": { "name": "SYSTEM_ERROR", "desc": "System fault state - camera halted due to fatal error" },
+    "35": { "name": "SHUTDOWN", "desc": "Clean system shutdown sequence executing" }
+  },
+  "entries": [
+    {
+      "id": "SYSTEM_ERROR_34",
+      "regex": "(?i)SYSTEM_ERROR(?:\\s*\\(?34\\)?)?",
+      "title": "System Fault State (State 34)",
+      "subsystem": "System Control / RTOS",
+      "severity": "Fatal",
+      "meaning": "The camera state machine transitioned to state 34 (SYSTEM_ERROR). This halts camera operation and prevents preview/recording. Usually triggered by a coprocessor failure, link drop, or sensor timeout.",
+      "action": "Inspect previous log lines for specific trigger events (C2C_ERROR, FAILED_IOB, X12, SENS_INIT) to identify the failing board."
+    },
+    {
+      "id": "SYSTEM_ERROR_C2C_ERROR",
+      "regex": "SYSTEM_ERROR_C2C_ERROR",
+      "title": "System Error: C2C Mailbox Failure",
+      "subsystem": "Inter-processor Communication",
+      "severity": "Fatal",
+      "meaning": "Chip-to-Chip mailbox communication failed between the main OMAP processor and the ISP or IOB coprocessors.",
+      "action": "Check coprocessor heartbeat registers and ISP/IOB power supply rails."
+    },
+    {
+      "id": "SYSTEM_ERROR_RDS_ERROR",
+      "regex": "SYSTEM_ERROR_RDS_ERROR",
+      "title": "System Error: RED Data Stream Fault",
+      "subsystem": "Video Pipeline",
+      "severity": "Fatal",
+      "meaning": "Corrupted or missing frame packet sequence in the RED Data Stream pipeline from sensor to encoder.",
+      "action": "Verify sensor calibration and check for SERDES lane errors."
+    },
+    {
+      "id": "SYSTEM_ERROR_DDR_ERROR",
+      "regex": "SYSTEM_ERROR_DDR_ERROR",
+      "title": "System Error: DDR Memory Fault",
+      "subsystem": "Memory",
+      "severity": "Fatal",
+      "meaning": "DDR memory self-test or write leveling routine failed, or data parity error detected during operation.",
+      "action": "Check DDR supply voltages (ISP/Vcc_Isp 1.5V, IOB/Vcc 1.5V) and thermal readings."
+    },
+    {
+      "id": "SYSTEM_ERROR_DROPPED_FRAMES",
+      "regex": "SYSTEM_ERROR_DROPPED_FRAMES",
+      "title": "System Error: Dropped Frames",
+      "subsystem": "Recording / Media",
+      "severity": "Fatal",
+      "meaning": "Frame pipeline buffer overflow during recording. The media write speed could not sustain camera data rate.",
+      "action": "Check media write performance, SATA retry counts, and reduce REDCODE compression ratio."
+    },
+    {
+      "id": "SYSTEM_ERROR_FAILED_IOB",
+      "regex": "SYSTEM_ERROR_FAILED_IOB",
+      "title": "System Error: IOB Coprocessor Hang",
+      "subsystem": "I/O Board (IOB)",
+      "severity": "Fatal",
+      "meaning": "The I/O Board coprocessor (handling SATA, HDMI, SPI) became unresponsive or crashed.",
+      "action": "Inspect IOB core voltage (IOB/Vcc 1.0V) and check if SATA or HDMI peripheral caused a bus hang."
+    },
+    {
+      "id": "SYSTEM_ERROR_RECORDING_ERROR",
+      "regex": "SYSTEM_ERROR_RECORDING_ERROR",
+      "title": "System Error: Media Recording Failure",
+      "subsystem": "Recording / Media",
+      "severity": "Fatal",
+      "meaning": "Unrecoverable write error to the MINI-MAG media drive during active record.",
+      "action": "Verify MINI-MAG SSD health, inspect SATA connector pins, and check media format status."
+    },
+    {
+      "id": "SYSTEM_ERROR_IO_ERROR",
+      "regex": "SYSTEM_ERROR_IO_ERROR",
+      "title": "System Error: General I/O Error",
+      "subsystem": "Storage / VFS",
+      "severity": "Fatal",
+      "meaning": "Storage subsystem I/O error occurred on internal NAND Flash or filesystem mount.",
+      "action": "Check NAND bad block table and /env partition integrity."
+    },
+    {
+      "id": "SYSTEM_ERROR_AUDIO_OVERFLOW",
+      "regex": "SYSTEM_ERROR_AUDIO_OVERFLOW",
+      "title": "System Error: Audio Buffer Overflow",
+      "subsystem": "Audio Subsystem",
+      "severity": "Fatal",
+      "meaning": "Audio DSP DMA FIFO overrun; audio samples were lost during capture.",
+      "action": "Check DSP clock sync and brain audio board communication."
+    },
+    {
+      "id": "SYSTEM_ERROR_SENS_INIT",
+      "regex": "SYSTEM_ERROR_SENS_INIT",
+      "title": "System Error: Sensor Init Timeout",
+      "subsystem": "Sensor Board",
+      "severity": "Fatal",
+      "meaning": "Image sensor power-up, register sequencing, or reset release timed out.",
+      "action": "Inspect sensor analog and digital power rails (Vdda 5.0V, Vdd 1.8V, Vdd_Tx 5.0V)."
+    },
+    {
+      "id": "SYSTEM_ERROR_X12",
+      "regex": "SYSTEM_ERROR_X12",
+      "title": "System Error: X12 Sensor Link Failure",
+      "subsystem": "Sensor Link / SerDes",
+      "severity": "Fatal",
+      "meaning": "The 12-lane high-speed serial link between sensor and ISP failed to lock, align, or pass PRBS tests.",
+      "action": "Inspect sensor flexible interconnect cable, clean connector contacts, and run test x12 status."
+    },
+    {
+      "id": "SYSTEM_ERROR_UPGRADE_ERROR",
+      "regex": "SYSTEM_ERROR_UPGRADE_ERROR",
+      "title": "System Error: Firmware Upgrade Failed",
+      "subsystem": "Firmware / Bootloader",
+      "severity": "Fatal",
+      "meaning": "Firmware upgrade verification, signature check, or flash sector write failed.",
+      "action": "Re-stage clean upgrade package; do not power off before verifying bootloader slot status."
+    },
+    {
+      "id": "PCS_ERROR_103",
+      "regex": "(?i)PCS\\s+error\\s+(?:103|0x67)(?::\\s*0x([0-9a-fA-F]+))?",
+      "title": "XAUI PCS Lane Sync Loss (Code 103)",
+      "subsystem": "XAUI SerDes / IOB-ISP Link",
+      "severity": "Error",
+      "meaning": "Physical Coding Sublayer error 103 on the XAUI interconnect between IOB and ISP. Indicates loss of 8b/10b symbol alignment or lane disparity mismatch during DMA transfers.",
+      "action": "Check ISP/IOB high-speed link signals and verify XAUI PCS status registers."
+    },
+    {
+      "id": "PCS_ERROR_GENERIC",
+      "regex": "(?i)PCS\\s+error(?:\\s+(\\d+))?(?::\\s*0x([0-9a-fA-F]+))?",
+      "title": "XAUI PCS Transceiver Error",
+      "subsystem": "XAUI SerDes / IOB-ISP Link",
+      "severity": "Error",
+      "meaning": "Physical Coding Sublayer transmission error detected on inter-processor XAUI link.",
+      "action": "Run dsmcdbg log health or test x4 status to assess link degradation."
+    },
+    {
+      "id": "XAUI_PCS_STATUS_FAIL",
+      "regex": "(?i)ISP[12]_XAUI_PCS_STATUS\\(0x[0-9a-fA-F]+\\)\\s*=\\s*0xf",
+      "title": "XAUI PCS All Lanes Out of Sync",
+      "subsystem": "ISP XAUI SerDes",
+      "severity": "Critical",
+      "meaning": "All 4 XAUI receiver lanes report 0xf (unaligned / no lock). The ISP cannot receive video data from IOB.",
+      "action": "Check ISP power and clocks (0x88900034); check board seating."
+    },
+    {
+      "id": "XAUI_DMA_TIMEOUT",
+      "regex": "(?i)xaui\\s+dma\\s+timeout",
+      "title": "XAUI DMA Controller Timeout",
+      "subsystem": "IOB / ISP DMA",
+      "severity": "Error",
+      "meaning": "Direct memory access transfer over XAUI timed out waiting for FIFO ready flag.",
+      "action": "Check for buffer exhaustion or clock jitter on the coprocessor bus."
+    },
+    {
+      "id": "C2C_RX_ERROR",
+      "regex": "(?i)C2C\\s+RX\\s+ERROR|c2c\\s+rx\\s+error",
+      "title": "C2C Packet Receive Error",
+      "subsystem": "Inter-processor Communication",
+      "severity": "Warning",
+      "meaning": "Chip-to-Chip inter-core mailbox packet CRC failure or sequence number mismatch.",
+      "action": "Monitor frequency; isolated retries are tolerated, continuous bursts indicate dying core."
+    },
+    {
+      "id": "LANE_ERROR_COUNT",
+      "regex": "(?i)Lane\\s+Error\\s+Count\\s*=\\s*(\\d+)",
+      "title": "SERDES Lane Bit Errors",
+      "subsystem": "Sensor Link / SerDes",
+      "severity": "Warning",
+      "meaning": "Bit error counter on high-speed serial lane incremented.",
+      "action": "Check sensor cable termination and eye margin if count is high (>100)."
+    },
+    {
+      "id": "MEDIA_AUTH_ERROR",
+      "regex": "(?i)Media\\s+authentication\\s+error",
+      "title": "Media Authentication Failed",
+      "subsystem": "Media / Security",
+      "severity": "Error",
+      "meaning": "MINI-MAG failed hardware cryptographic challenge. Drive will mount read-only or be rejected.",
+      "action": "Verify media is genuine RED MINI-MAG or that custom media patch is active."
+    },
+    {
+      "id": "SATA_HBA_TIMEOUT",
+      "regex": "(?i)Failure\\s+after\\s+\\d+\\s+retries|SATA.*timeout",
+      "title": "SATA HBA Command Timeout",
+      "subsystem": "Media / SATA",
+      "severity": "Error",
+      "meaning": "SATA host bus adapter timed out issuing ATA read/write commands to SSD.",
+      "action": "Inspect MINI-MAG connector pins for contamination or bent contacts."
+    },
+    {
+      "id": "HEX_ERROR_CODE",
+      "regex": "(?i)\\bError:?\\s*(0x[0-9a-fA-F]+)",
+      "title": "Hex Error Code",
+      "subsystem": "System / Core",
+      "severity": "Warning",
+      "meaning": "Generic subsystem return code indicating a non-zero error condition.",
+      "action": "Correlate with contemporaneous subsystem lines to isolate fault origin."
+    },
+    {
+      "id": "SQLITE_ERROR",
+      "regex": "(?i)sqlite(?:2|3)?\\s+error:\\s*([^\\n\\r(]+)\\s*\\((\\d+)\\)",
+      "title": "CDB2 Parameter DB Error",
+      "subsystem": "Settings Database",
+      "severity": "Warning",
+      "meaning": "Settings database operational error occurred (e.g. database busy, schema constraint).",
+      "action": "Check factory.db and user preset file permissions."
+    },
+    {
+      "id": "RCP_PARSER_ERROR",
+      "regex": "(?i)RCP\\s+parser\\s+error:\\s*(\\d+)",
+      "title": "RCP Protocol Syntax Error",
+      "subsystem": "Control Protocol (RCP)",
+      "severity": "Warning",
+      "meaning": "RED Command Protocol parser encountered an invalid parameter ID or malformed command.",
+      "action": "Verify external control software version matches camera firmware RCP specification."
+    }
+  ]
+}

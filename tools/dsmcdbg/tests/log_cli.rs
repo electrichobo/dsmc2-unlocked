@@ -122,6 +122,47 @@ fn digest_and_health_run() {
     assert!(hs.contains("OVERALL:"));
 }
 
+#[test]
+fn stats_reports_frequency_and_enrichment() {
+    let dir = tempdir();
+    let f = dir.join("log_with_errors.txt");
+    let test_log = "\
+[0:00:00:001] ( 1%/1%) : initializing cpu usage\n\
+[0:00:01:000] ( 1%/1%) : i2c_read timeout\n\
+[0:00:02:000] ( 1%/1%) : i2c_read timeout\n\
+[0:00:03:000] ( 1%/1%) E: iob (isp_1) PCS error 103: 0x8004002c\n\
+=========\n\
+[0:00:00:001] ( 1%/1%) : initializing cpu usage\n\
+[0:00:01:000] ( 1%/1%) : i2c_read timeout\n\
+[0:00:04:000] ( 1%/1%) E: SYSTEM_ERROR (34)\n\
+[0:00:05:000] ( 1%/1%) E: Error: 0x1d seen\n";
+    std::fs::write(&f, test_log).unwrap();
+
+    // 1. Text mode
+    let out = Command::new(bin())
+        .args(["log", "stats", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("Sessions:   2"), "got:\n{s}");
+    assert!(s.contains("PCS error 103") || s.contains("PCS_ERROR_103") || s.contains("Code 103"), "got:\n{s}");
+    assert!(s.contains("SYSTEM_ERROR") || s.contains("State 34"), "got:\n{s}");
+    assert!(s.contains("TOP REPEATED / BLOAT LINES"), "got:\n{s}");
+    assert!(s.contains("i2c_read timeout"), "got:\n{s}");
+
+    // 2. JSON mode
+    let out_json = Command::new(bin())
+        .args(["log", "stats", f.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(out_json.status.success());
+    let j_str = String::from_utf8_lossy(&out_json.stdout);
+    let v: serde_json::Value = serde_json::from_str(&j_str).unwrap();
+    assert_eq!(v["total_sessions"], 2);
+    assert_eq!(v["total_errors"], 3);
+}
+
 // tiny unique temp dir without a dev-dep.
 fn tempdir() -> std::path::PathBuf {
     let base = std::env::temp_dir();

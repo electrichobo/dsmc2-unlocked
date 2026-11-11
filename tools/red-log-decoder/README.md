@@ -17,8 +17,9 @@ cargo run -- log decode <logfile> [output.txt]
 
 # clean + split + triage the decoded text
 cargo run -- log sessions <decoded.txt>          # list boot sessions
+cargo run -- log stats    <decoded.txt>          # cross-session error frequency + bloat analysis
 cargo run -- log analyze  <decoded.txt> -o out/  # per-boot files + SUMMARY.txt
-cargo run -- log digest   <decoded.txt>          # denoised event digest
+cargo run -- log digest   <decoded.txt>          # denoised event digest + error dict enrichment
 cargo run -- log health   <decoded.txt>          # PASS/FAIL ISP link per boot
 cargo run -- log clean    <decoded.txt>          # rejoined, full
 cargo run -- log diff  <good.txt> <bad.txt>      # compare working vs broken boot
