@@ -10,9 +10,11 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use dsmc_core::error_dict::ErrorDictionary;
 use dsmc_core::log::{
-    self, furthest_state, is_noise, py_dict_repr_codes, py_dict_repr_failures, rejoin_and_split,
-    session_health, session_meta, HealthPatterns, Patterns, SessionMeta, STATE_ORDER,
+    self, compute_stats, furthest_state, is_noise, py_dict_repr_codes, py_dict_repr_failures,
+    rejoin_and_split, session_health, session_meta, HealthPatterns, Patterns, SessionMeta,
+    STATE_ORDER,
 };
 
 pub fn run(args: &[String]) -> Result<ExitCode, String> {
@@ -24,12 +26,13 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
         Some("health") => cmd_health(&args[1..]),
         Some("analyze") => cmd_analyze(&args[1..]),
         Some("diff") => cmd_diff(&args[1..]),
+        Some("stats") => cmd_stats(&args[1..]),
         Some(other) => Err(format!(
-            "log: unknown '{other}' (decode | sessions | clean | digest | health | analyze | diff)"
+            "log: unknown '{other}' (decode | sessions | clean | digest | health | analyze | diff | stats)"
         )),
         None => {
             eprintln!(
-                "log: decode <f.enc> [out] | sessions <f> | clean <f> [-o F] | digest <f> [--session N] | health <f> | analyze <f> [-o D] | diff <good> <bad>"
+                "log: decode <f.enc> [out] | sessions <f> | clean <f> [-o F] | digest <f> [--session N] | health <f> | analyze <f> [-o D] | diff <good> <bad> | stats <f> [--session N] [--top N] [--json]"
             );
             Ok(ExitCode::from(2))
         }
@@ -163,6 +166,7 @@ fn cmd_digest(args: &[String]) -> Result<ExitCode, String> {
     }
     let input = input.ok_or("log digest: missing <decoded.txt>")?;
     let p = Patterns::new();
+    let dict = ErrorDictionary::new();
     let sessions = load_sessions(&input, &p)?;
 
     let targets: Vec<usize> = match session {
@@ -209,6 +213,9 @@ fn cmd_digest(args: &[String]) -> Result<ExitCode, String> {
                 || p.any_milestone(ln);
             if interesting {
                 println!("    {}", ln.trim());
+                if let Some(em) = dict.match_line(ln) {
+                    println!("       ↳ [{}] {} ({}): {}", em.severity, em.title, em.subsystem, em.meaning);
+                }
             }
         }
     }
@@ -365,5 +372,108 @@ fn cmd_diff(args: &[String]) -> Result<ExitCode, String> {
     );
     println!("GOOD error codes: {}", py_dict_repr_codes(&gm.error_codes));
     println!("BAD  error codes: {}", py_dict_repr_codes(&bm.error_codes));
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------- stats
+
+fn cmd_stats(args: &[String]) -> Result<ExitCode, String> {
+    let mut input: Option<String> = None;
+    let mut session_filter: Option<usize> = None;
+    let mut top_n: usize = 15;
+    let mut as_json = false;
+
+    let mut it = args.iter().cloned();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--session" => {
+                session_filter = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("log stats: --session needs an integer")
+                    .map(Some)?;
+            }
+            "--top" => {
+                top_n = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("log stats: --top needs an integer")?;
+            }
+            "--json" => as_json = true,
+            other => input = Some(other.to_string()),
+        }
+    }
+
+    let input = input.ok_or("log stats: missing <decoded.txt>")?;
+    let p = Patterns::new();
+    let dict = ErrorDictionary::new();
+    let mut sessions = load_sessions(&input, &p)?;
+
+    if let Some(idx) = session_filter {
+        if idx >= sessions.len() {
+            return Err(format!(
+                "log stats: session {idx} out of range (found {} sessions)",
+                sessions.len()
+            ));
+        }
+        sessions = vec![sessions.swap_remove(idx)];
+    }
+
+    let stats = compute_stats(&sessions, &p, &dict);
+
+    if as_json {
+        let j = serde_json::to_string_pretty(&stats)
+            .map_err(|e| format!("log stats json error: {e}"))?;
+        println!("{j}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("RED DSMC2 Log Statistics: {}", basename(&input));
+    println!("{}", "=".repeat(78));
+    println!(
+        "Sessions: {:>3}   |   Lines: {:>7}   |   Errors: {:>5}   |   Warnings: {:>5}\n",
+        stats.total_sessions, stats.total_lines, stats.total_errors, stats.total_warns
+    );
+
+    println!("ERROR FREQUENCY ACROSS SESSIONS (Enriched via Dictionary):");
+    println!("{}", "-".repeat(78));
+    if stats.error_frequencies.is_empty() {
+        println!("  (No fatal errors or known fault signatures detected)\n");
+    } else {
+        for err in &stats.error_frequencies {
+            let sess_str = format!("{}/{}", err.sessions_affected.len(), stats.total_sessions);
+            println!(
+                "  [{}] {:<32}  Count: {:>5}  |  Sessions: {:<6}",
+                err.severity, err.title, err.total_count, sess_str
+            );
+            println!("      Subsystem : {}", err.subsystem);
+            println!("      Meaning   : {}", err.meaning);
+            println!("      Sample    : {}", err.sample_line);
+            println!();
+        }
+    }
+
+    println!("TOP REPEATED / BLOAT LINES (Timestamps Normalized):");
+    println!("{}", "-".repeat(78));
+    if stats.top_repeated_lines.is_empty() {
+        println!("  (No repeating bloat lines detected)");
+    } else {
+        println!(
+            "  {:>6}  {:<10}  {}",
+            "COUNT", "SESSIONS", "NORMALIZED LOG LINE"
+        );
+        println!("  {}", "-".repeat(74));
+        for r in stats.top_repeated_lines.iter().take(top_n) {
+            let sess_str = format!("{}/{}", r.sessions_affected, stats.total_sessions);
+            let truncated = if r.normalized_text.len() > 60 {
+                format!("{}...", &r.normalized_text[..57])
+            } else {
+                r.normalized_text.clone()
+            };
+            println!("  {:>6}  {:<10}  {}", r.total_count, sess_str, truncated);
+        }
+    }
+    println!();
+
     Ok(ExitCode::SUCCESS)
 }

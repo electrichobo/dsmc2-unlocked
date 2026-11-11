@@ -99,6 +99,21 @@ dsmcdbg diag                                     boot error + state timeline
 
 All take `--port` (default `/dev/cu.usbmodem101`).
 
+## Log Triage, Statistics & Error Decoding (`log`)
+
+```
+dsmcdbg log decode <file.enc> [out.txt]          # XOR-decode camera log
+dsmcdbg log sessions <decoded.txt>               # list boot sessions & furthest states
+dsmcdbg log stats <decoded.txt> [--top N] [--json] # cross-session error frequency & bloat analysis
+dsmcdbg log digest <decoded.txt> [--session N]   # denoised timeline with dictionary enrichment
+dsmcdbg log health <decoded.txt>                 # ISP link PASS/FAIL verdict per boot
+dsmcdbg log analyze <decoded.txt> [-o out_dir]   # per-session splits + SUMMARY.txt
+dsmcdbg log diff <good.txt> <bad.txt>            # side-by-side milestone comparison
+```
+
+- **Error-Code Dictionary**: Decodes numeric codes (`SYSTEM_ERROR(34)`, `PCS error 103`, `Error: 0x...`) into human meaning and physical subsystem causes. See [docs/firmware/error-codes.md](../../docs/firmware/error-codes.md).
+- **Bloat Detection**: `log stats` normalizes timestamps and clusters repeated lines, identifying noisy loops across boot sessions.
+
 ## Build
 
 ```
