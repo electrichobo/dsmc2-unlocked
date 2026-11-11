@@ -48,6 +48,35 @@ tools, so that owners can maintain hardware RED no longer sells.
 > discontinued-products page, marked "repair parts no longer available" — which is
 > why this repository documents the cheap-SSD media path in full.
 
+## Quickstart — the tools
+
+The debug and firmware tools are Rust. You need the Rust toolchain
+([rustup.rs](https://rustup.rs)). Build and run each tool from its own directory.
+
+**`dsmcdbg`** — debug a live camera. It reads the camera over the serial shell,
+captures every board signal, and compares the result to a known-good baseline.
+
+```sh
+cd tools/dsmcdbg
+cargo run -- selftest --port /dev/cu.usbmodemXXXX   # full health check vs the golden baseline
+cargo run -- log decode <logfile>                   # decode an exported .enc log
+```
+
+**`dsmc-fw-core`** — read firmware. It decrypts packages, reads and builds
+`.preset` files, lists NAND recovery dumps, and unpacks RED ONE firmware. It does
+not sign or flash.
+
+```sh
+cd tools/dsmc-fw-core
+cargo run -- unpack --list <combo.bin>              # list the models in a package
+cargo run -- unpack --extract 0x16 --out DIR <combo.bin>
+cargo run -- preset read <file.preset>
+```
+
+The private build / patch / sign / flash tool (`dsmc-fw`) and the
+reverse-engineering tool (`dsmc-re`) are in the `dsmc2-sdk` repository. Clone it
+next to this one (the two repositories must be siblings).
+
 ## Contents
 
 | Area | What it covers |
@@ -78,12 +107,22 @@ tools, so that owners can maintain hardware RED no longer sells.
 
 ### Tools and hardware
 
+The debug + firmware tooling is **Rust**, built over a shared library (`dsmc-core`).
+The flagship is **`dsmcdbg`** — it talks to a live camera, captures a full board
+signal set, and diffs it against a golden healthy baseline. **`dsmc-fw-core`** is
+the firmware read/decrypt/preset/recovery CLI (it replaced the old `unpack_combo.py`
+/ `red_preset.py` / `nand_list.py`). The private build/patch/flash and
+reverse-engineering CLIs live in `dsmc2-sdk`.
+
 | Area | What it is |
 |---|---|
-| [tools/red-log-decoder/](tools/red-log-decoder) | Decode + triage the camera log (Python, no deps) |
-| [tools/fw-crypto/](tools/fw-crypto) | Decrypt/unpack firmware packages, with the embedded RSA keys |
-| [tools/redone-su/](tools/redone-su) | Unpack RED ONE `redone.su` firmware (PowerPC/VxWorks DSMC1) |
-| [tools/preset/](tools/preset) | Build/read encrypted `.preset` files (sets hidden flags) |
+| [tools/dsmcdbg/](tools/dsmcdbg) | **Flagship debug CLI** (Rust): live-camera verify/selftest, capture, and diff vs the golden baseline |
+| [tools/dsmc-fw-core/](tools/dsmc-fw-core) | Firmware CLI + lib (Rust): decrypt/unpack packages, read/build `.preset`, list NAND recovery dumps |
+| [tools/dsmc-core/](tools/dsmc-core) | Shared Rust lib: serial shell driver, reply parsers, I2C/UCD maps, baseline model |
+| [tools/fw-crypto/](tools/fw-crypto) | The embedded RSA **decrypt** keys (used by `dsmc-fw-core unpack`) |
+| [tools/red-log-decoder/](tools/red-log-decoder) | The log XOR pad + cipher proof (decoder is `dsmcdbg log`) |
+| [tools/redone-su/](tools/redone-su) | RED ONE `redone.su` format (unpacker is `dsmc-fw-core redone`) |
+| [tools/rom-recovery/](tools/rom-recovery) | DSMC2 block-0 recovery over the UART3 boot ROM (bare-metal image + rig) |
 | [hardware/serial-bridge/](hardware/serial-bridge) | USB↔CTRL RS232 bridge: RP2040 firmware + wiring |
 | [hardware/display-repair/](hardware/display-repair) | Touch LCD panels, digitizers, connectors, thread inserts |
 | [hardware/expander-repair/](hardware/expander-repair) | Expander pogo-pin spring fix |

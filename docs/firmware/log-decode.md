@@ -1,9 +1,38 @@
 # Decoding a DSMC2 Log
 
-The DSMC2 keeps a rolling binary log on the camera. You can pull it off the
-camera (over WiFi with RFTP, or to an SSD with the shell's `maint save_log`),
-but the file is **obfuscated**. This page explains the obfuscation and gives a
-decoder. The output is plain text you can read or send to someone.
+The DSMC2 keeps a rolling binary log on the camera. You pull it off the camera, then
+decode it — the file is **obfuscated**. This page shows how to get the log off a camera
+(including one stuck in `SYSTEM_ERROR`), then explains the obfuscation and gives a decoder.
+The output is plain text you can read or send to someone.
+
+## Getting the log off the camera
+
+Everything here is read-only on the camera. No NAND write, no flashing, no board work.
+
+On a **healthy** camera, `maint save_log` writes the log to the mag's `log_files/`, and you
+copy it off the SSD. On a **stuck** camera (failed boot, `SYSTEM_ERROR`), `save_log` often
+writes nothing — the app's log subsystem never finishes. Pull it over WiFi instead:
+
+1. **Stage it where RFTP can reach it.** `/log` is not exported by RFTP, but `/pdata/data/luts`
+   is (as `/luts`). Compress the log into there from the shell — `nand zlib` is ungated:
+   ```
+   nand zlib -c /log/log.data /pdata/data/luts/_log.z
+   ```
+   A 5 MB log becomes ~570 KB. (`nand zlib` writes a `REDZLIB0` container: 8-byte magic,
+   u32 little-endian uncompressed length, then the zlib stream.)
+2. **Find the camera.** It may not report its own IP. With the ad-hoc WiFi up, read it from
+   your machine's ARP table (`arp -a -n`); RFTP rides the RED control port, tcp **1111**.
+3. **Pull it** with an RFTP client:
+   ```
+   rftp <camera-ip> get /luts/_log.z log.z
+   ```
+   On a stuck camera the transfer **often drops partway and exits without writing a file** —
+   the RFTP manager runs inside the app, and the app is faulted. Just retry in a loop; it
+   usually lands within a few tries. Small files transfer reliably, so test with one first.
+4. **Unpack the container** (`dsmc-fw-core redzlib`, or any zlib tool that honors the 12-byte
+   header) to get `log.data`. The result is a **circular buffer** — the newest data wraps, so
+   the file starts and ends in the same time region. Decode it (below), then index by markers
+   (`Boot Count: <n>`), do not read top to bottom.
 
 ## It is XOR, not encryption
 
@@ -38,64 +67,32 @@ So there are two ways to decode, and you do not need the camera for either:
 
 ## Decoder
 
-Python 3, standard library only. No install, no dependency. It runs as-is on
-macOS, Linux, and Windows (`py ...` on Windows).
-
-Exact, using the published pad (works on short logs too):
+Decode a log with `dsmcdbg log decode`. The output is plain text:
 
 ```
-python3 tools/red-log-decoder/decode_direct.py <logfile> [output.txt]
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log decode <logfile> [output.txt]
 ```
 
-```python
-tbl = open("log_xor_table.bin", "rb").read()          # 1024 bytes
-data = open(path, "rb").read()
-out = bytes(c ^ tbl[i & 0x3FF] for i, c in enumerate(data))
-```
+The tool picks the method automatically. The algorithm (implemented in
+`dsmc-core/src/log.rs`) is small enough to describe:
 
-Or recover the pad from the file itself, no pad file needed:
+**Exact, using the published pad.** Read `log_xor_table.bin` (1024 bytes). XOR each
+log byte against the pad, wrapping every 1024 bytes: `out[i] = pad[i & 0x3FF] ^ in[i]`.
+This works on any length, including a short log.
 
-```
-python3 tools/red-log-decoder/decode_red_log.py <logfile> [output.txt]
-```
+**Recovered from the file, no pad needed.** The file is a series of 512-byte records.
+The 1024-byte pad appears as two alternating 512-byte halves — even records use half A,
+odd records use half B. Most of each record is padding, and the padding byte is `0x20`
+(ASCII space). So for each byte position, the **most common byte** across the even records
+is that position's half-A pad byte XOR `0x20`; the odd records give half B. XOR each
+record against its half to recover the text, and drop the `0x00` fill. This needs a few
+hundred records (a real log has thousands).
 
-The whole method is this (`tools/red-log-decoder/decode_red_log.py`):
-
-```python
-from collections import Counter
-REC = 512
-
-def decode(path, out):
-    d = open(path, "rb").read()
-    n = len(d) // REC                      # whole records only
-
-    def key_for(parity):
-        k = bytearray(REC)
-        for p in range(REC):
-            col = [d[r*REC + p] for r in range(parity, n, 2)]
-            k[p] = Counter(col).most_common(1)[0][0] ^ 0x20
-        return k
-
-    ka, kb = key_for(0), key_for(1)
-    lines = []
-    for r in range(n):
-        k = ka if r % 2 == 0 else kb
-        rec = bytes(d[r*REC + i] ^ k[i] for i in range(REC))
-        lines.append(rec.replace(b"\x00", b"").decode("latin-1"))
-    open(out, "w", encoding="latin-1").write("".join(lines))
-```
-
-For it to work:
+For the file-recovery path to work:
 
 - the file must start at a record boundary (offset 0);
-- it needs enough records for the padding to dominate each byte position — a few
-  hundred is plenty, and a real log has thousands;
+- it needs enough records for the padding to dominate each byte position;
 - only whole 512-byte records decode; a short tail is dropped.
-
-> **Why not a C version?** The decoder is a few lines of standard-library Python
-> with no dependency, so it already runs on any OS with Python installed (every
-> macOS and Linux ships it; Windows is a one-click install). A C version would
-> add a compiler step and gain nothing in portability.
 
 ## What the output looks like
 
@@ -124,11 +121,11 @@ messages span more than one line. A second tool rejoins those, splits the boots,
 and triages each one:
 
 ```
-python3 tools/red-log-decoder/red_log_tool.py sessions <decoded.txt>        # list boots
-python3 tools/red-log-decoder/red_log_tool.py analyze  <decoded.txt> -o out/ # per-boot files + SUMMARY.txt
-python3 tools/red-log-decoder/red_log_tool.py digest   <decoded.txt>        # denoised event digest
-python3 tools/red-log-decoder/red_log_tool.py health   <decoded.txt>        # PASS/FAIL on the ISP link per boot
-python3 tools/red-log-decoder/red_log_tool.py diff  <good.txt> <bad.txt>    # compare a working vs a broken boot
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log sessions <decoded.txt>        # list boots
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log analyze  <decoded.txt> -o out/ # per-boot files + SUMMARY.txt
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log digest   <decoded.txt>        # denoised event digest
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log health   <decoded.txt>        # PASS/FAIL on the ISP link per boot
+cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log diff  <good.txt> <bad.txt>    # compare a working vs a broken boot
 ```
 
 `analyze` writes one file per boot plus a summary table (line count, duration,
