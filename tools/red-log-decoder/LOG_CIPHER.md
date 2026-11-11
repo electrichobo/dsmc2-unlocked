@@ -11,7 +11,7 @@ shell (`cat`/`base64 /log/log.data`) or via RFTP, no decode needed (verified on 
 booted body: the boot sequence, errors and state transitions are readable text).
 The XOR cipher above applies to **EXPORTED / stored `.enc` log files** (the logs the
 camera writes out encoded). So: diagnosing a live camera = read /log plaintext; only
-a `.enc` export needs `decode_direct.py`.
+a `.enc` export needs decoding — `dsmcdbg log decode`.
 
 ## The cipher
 Each log byte is XORed with a fixed **1024-byte table**, index advancing per byte, wrapping mod 1024:
@@ -21,7 +21,7 @@ out[i] = TABLE[i & 0x3FF] ^ plaintext[i]
 ```
 
 - `TABLE` = `red-log-decoder/log_xor_table.bin` (1024 bytes), extracted from firmware.
-- The old `decode_red_log.py` recovered this statistically (most-common-byte-per-position ^ 0x20, split into "even/odd 512"). That even+512+odd+512 == the real 1024-byte table, byte-for-byte. The "two keystreams" were just the two halves of one 1024 pad.
+- The original Python decoder recovered this statistically (most-common-byte-per-position ^ 0x20, split into "even/odd 512"). That even+512+odd+512 == the real 1024-byte table, byte-for-byte. The "two keystreams" were just the two halves of one 1024 pad.
 
 ## Proof it is a compile-time constant (not derived)
 - Image: `debug/fw_dump/dsmc_program.mem` (raw program image, ARM reset vectors at offset 0).
@@ -42,4 +42,4 @@ The DSMC2 app binary is identical across models (only factory.db rows + CAMERA_T
 tbl = open('log_xor_table.bin','rb').read()          # 1024 bytes
 dec = bytes(c ^ tbl[i & 0x3FF] for i,c in enumerate(open(enc,'rb').read()))
 ```
-Statistical `decode_red_log.py` still works and needs no table, but this is exact and works on short logs.
+The statistical (most-common-byte) method still works and needs no table, but the pad above is exact and works on short logs. Both are in `dsmcdbg log decode`.

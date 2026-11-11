@@ -38,64 +38,32 @@ So there are two ways to decode, and you do not need the camera for either:
 
 ## Decoder
 
-Python 3, standard library only. No install, no dependency. It runs as-is on
-macOS, Linux, and Windows (`py ...` on Windows).
-
-Exact, using the published pad (works on short logs too):
+Decode a log with `dsmcdbg log decode`. The output is plain text:
 
 ```
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log decode <logfile> [output.txt]
 ```
 
-```python
-tbl = open("log_xor_table.bin", "rb").read()          # 1024 bytes
-data = open(path, "rb").read()
-out = bytes(c ^ tbl[i & 0x3FF] for i, c in enumerate(data))
-```
+The tool picks the method automatically. The algorithm (implemented in
+`dsmc-core/src/log.rs`) is small enough to describe:
 
-Or recover the pad from the file itself, no pad file needed:
+**Exact, using the published pad.** Read `log_xor_table.bin` (1024 bytes). XOR each
+log byte against the pad, wrapping every 1024 bytes: `out[i] = pad[i & 0x3FF] ^ in[i]`.
+This works on any length, including a short log.
 
-```
-cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log decode <logfile> [output.txt]
-```
+**Recovered from the file, no pad needed.** The file is a series of 512-byte records.
+The 1024-byte pad appears as two alternating 512-byte halves — even records use half A,
+odd records use half B. Most of each record is padding, and the padding byte is `0x20`
+(ASCII space). So for each byte position, the **most common byte** across the even records
+is that position's half-A pad byte XOR `0x20`; the odd records give half B. XOR each
+record against its half to recover the text, and drop the `0x00` fill. This needs a few
+hundred records (a real log has thousands).
 
-The whole method (implemented in `dsmc-core/src/log.rs`, exposed as `dsmcdbg log decode`):
-
-```python
-from collections import Counter
-REC = 512
-
-def decode(path, out):
-    d = open(path, "rb").read()
-    n = len(d) // REC                      # whole records only
-
-    def key_for(parity):
-        k = bytearray(REC)
-        for p in range(REC):
-            col = [d[r*REC + p] for r in range(parity, n, 2)]
-            k[p] = Counter(col).most_common(1)[0][0] ^ 0x20
-        return k
-
-    ka, kb = key_for(0), key_for(1)
-    lines = []
-    for r in range(n):
-        k = ka if r % 2 == 0 else kb
-        rec = bytes(d[r*REC + i] ^ k[i] for i in range(REC))
-        lines.append(rec.replace(b"\x00", b"").decode("latin-1"))
-    open(out, "w", encoding="latin-1").write("".join(lines))
-```
-
-For it to work:
+For the file-recovery path to work:
 
 - the file must start at a record boundary (offset 0);
-- it needs enough records for the padding to dominate each byte position — a few
-  hundred is plenty, and a real log has thousands;
+- it needs enough records for the padding to dominate each byte position;
 - only whole 512-byte records decode; a short tail is dropped.
-
-> **Why not a C version?** The decoder is a few lines of standard-library Python
-> with no dependency, so it already runs on any OS with Python installed (every
-> macOS and Linux ships it; Windows is a one-click install). A C version would
-> add a compiler step and gain nothing in portability.
 
 ## What the output looks like
 

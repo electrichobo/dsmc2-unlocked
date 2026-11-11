@@ -305,7 +305,7 @@ the "properly signed" flag when that fails. So a type-2 record parked at offset
 
 ```
 model    = SAMSUNG MZMTE1T0HMJH-00000      (26 chars, matched exactly)
-serial   = S1W8NYAG500153
+serial   = S1W8NYAG5XXXXX                  (real serial masked; see note below)
 sectors  = 2,000,409,264                   (= media-ID 19 "RED 1TB V1" row, LBA @ table +0x36, err-100 passes)
 WWN words 108..111 = 0000 0000 0000 0001
 wwn8     = 01 00 00 00 00 00 00 00
@@ -320,6 +320,12 @@ type 3  03 b7 ea 8a 7d 2d 23 6e b0 e3 dd 69 df 08 37 53 95
 These bytes are the firmware's own output for that IDENTIFY, so they are correct by
 construction. A wrong digest on a correct type byte produces
 `Media in <side> has an invalid Signature_1` in the camera log.
+
+> **Note on the masked serial.** The drive serial above is masked for privacy. The type-1
+> and type-2 signatures do **not** hash the serial, so those two bytes stay valid for any
+> drive with this model + sector count. The **type-3** signature *is* serial-bound, so the
+> type-3 byte shown corresponds to the real (unmasked) serial — recompute it with your own
+> drive's serial, do not copy it.
 
 ## Page 0x91 is read, but it is not a gate
 
