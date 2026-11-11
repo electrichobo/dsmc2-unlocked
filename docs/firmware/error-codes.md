@@ -11,6 +11,8 @@ The codes documented here were reverse-engineered directly from **Firmware 7.4.1
 | Log Code / Line | Subsystem | Meaning & Physical Cause | Recommended Action |
 |---|---|---|---|
 | `SYSTEM_ERROR (34)` | System State Machine | Camera entered fatal fault state (State 34). Halts recording/preview. | Walk previous log lines for the trigger event (`C2C_ERROR`, `X12`, `FAILED_IOB`, etc.). |
+| `Error: 0x01` | Hardware Boot / IOB & ISP | Primary board initialization failure during boot. Main ARM got no response from IOB or ISP coprocessor. Most common failure on SCARLET-X / EPIC-X. | Strip to bare brain, use official AC adapter, re-seat board-to-board flex cables, check IOB/ISP rails. |
+| `Error: 0x1D` / `0x11D` | Peripheral / Accessory Bus | Accessory or external module communication timeout or pin short on startup. | Detach handles, top plates, and lens mounts; inspect gold leaf pins. |
 | `PCS error 103: 0x...` | XAUI SerDes Link | Physical Coding Sublayer code 103 (`0x67`): 8b/10b lane sync loss or disparity error between IOB and ISP coprocessors during DMA. | Run `dsmcdbg log health`. Check ISP/IOB power rails and board flex seating. |
 | `ISP1_XAUI_PCS_STATUS = 0xf` | ISP XAUI Receiver | All 4 XAUI lanes unaligned / lost bit lock. Zero video data can transfer to ISP. | Check ISP clocks (0x88900034) and power supply rails. |
 | `SYSTEM_ERROR_X12` | Sensor Interface | 12-lane high-speed SERDES link between sensor and ISP failed to lock or align. | Re-seat sensor flexible interconnect cable; inspect connector pins. |
@@ -105,7 +107,48 @@ When `dsmcdbg` logs show `iob (isp_1) PCS error 103: 0x...`, code **103** (`0x67
 
 ---
 
-## 5. Tooling: Analyzing and Enriching Logs
+## 5. Startup Modal Dialog Codes (`Error: 0x01`, `Error: 0x1D`)
+
+There is an important distinction between **rolling debug log telemetry** (`log.data`, `dsmcdbg log`) and **on-screen bootloader modal dialogs**:
+- Rolling debug logs record fine-grained runtime events and driver messages (e.g., `SYSTEM_ERROR (34)`, `PCS error 103`).
+- When hardware fails early during power-on self-test (POST) before the Linux OS or user interface runtime finishes starting, the camera halts immediately and renders a fatal modal dialog on the attached display:
+  ```
+  Startup Error
+  Error: 0x01
+  Camera will shut down.
+  ```
+
+### `Error: 0x01` — Primary Board / Coprocessor Init Failure
+- **Applicable Bodies**: SCARLET-X, EPIC-X (DSMC1), and early DSMC2 brains.
+- **Root Cause**: During early boot, the main ARM supervisor processor performs a power-good and communication ping over the inter-board bus (SPI/I2C/mailbox) to the secondary coprocessor boards:
+  - **IOB (I/O Board)**: Manages SSD/SATA storage, HDMI/SDI video outputs, and external peripheral control.
+  - **ISP (Image Signal Processing Board)**: Houses the FPGA/ASIC pipeline for debayering and sensor timing.
+  If either coprocessor fails to assert its `POWER_GOOD` rail or fails to respond to the initial handshake ping within the timeout window, the boot sequence halts with `Error: 0x01`.
+
+#### Physical & Hardware Causes
+1. **Unseated or Corroded Board-to-Board Interconnect Cables**: The internal multi-pin flex cables bridging the main board to the IOB/ISP boards can become loose from vibration or thermal cycles.
+2. **Defective or Collapsed Voltage Rail**: A burned LDO or DC-DC step-down regulator on the IOB (e.g., 1.0V core rail, 1.8V I/O, or 3.3V rail) preventing coprocessor boot.
+3. **Power Supply Voltage Sag / Battery Plate Fault**: High contact resistance on third-party V-Mount / Gold-Mount battery plates or an undervoltage battery dropping below threshold under boot surge.
+4. **Corrupted Coprocessor SPI Flash**: The firmware image for the Xtensa or FPGA coprocessor stored in dedicated SPI NOR flash is corrupted.
+
+#### Triage Procedure for `Error: 0x01`
+1. **Strip to Bare Brain**: Remove all accessories—lens mount, side handle, top handles, battery plates, modules, and RED MINI-MAG / 1.8" SSD.
+2. **Use Official RED AC Adapter**: Disconnect all batteries. Plug the official RED AC power supply directly into the DC IN jack to eliminate battery voltage sag.
+3. **Connect Only a Known-Good RED Touch/LCD**: Boot with only the display connected to observe the splash sequence.
+4. **Hardware Flex Inspection (If Persistent)**: If bare-brain AC boot still produces `Error: 0x01`, open the brain chassis and inspect, clean (with 99% isopropyl alcohol), and reseat the high-density board-to-board flex cables. Verify power rail test points against schematic voltages.
+
+---
+
+### `Error: 0x1D` / `Error: 0x11D` — Peripheral & Accessory Bus Fault
+- **Root Cause**: Communication timeout or electrical short on the external accessory pin bus (e.g., RED Side Handle, top plate, or electronic smart lens mount).
+- **Triage**:
+  1. Remove the lens mount and any handles or modules.
+  2. Inspect the spring-loaded gold pogo pins and contact pads for dirt, bent pins, or bridging metal debris.
+  3. Clean contacts with contact cleaner or isopropyl alcohol.
+
+---
+
+## 6. Tooling: Analyzing and Enriching Logs
 
 ### Frequency Analysis & Bloat Elimination (`dsmcdbg log stats`)
 
@@ -168,7 +211,7 @@ When running `dsmcdbg log digest <decoded.txt>`, any error matched in the dictio
 
 ---
 
-## 6. Binary Offset Provenance (Firmware 7.4.1)
+## 7. Binary Offset Provenance (Firmware 7.4.1)
 
 For verification against raw firmware binaries using Ghidra or radare2:
 
