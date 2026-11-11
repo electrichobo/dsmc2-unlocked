@@ -125,3 +125,22 @@ queue check in the accept path."* False. `AuthenticateREDMedia` checks SATA
 capabilities (IDENTIFY word 76), queue depth (word 75), command-set and version
 words, and more. The accept path very much depends on controller-reported values
 — which is exactly why a buyable drive needs the camera patch.
+
+## Drives RED validated themselves
+
+A later DSMC2-family dev build (DXL2) carried five extra media-table entries labelled
+**"Dev. Only"**. They are ordinary consumer mSATA SSDs that RED enabled for its own
+testing — proof that the media gate is **policy, not a hardware limit**:
+
+| dev label | actual drive |
+|---|---|
+| 840 EVO – Dev. Only | Samsung 840 EVO 1 TB mSATA |
+| TS512 – Dev. Only | Transcend TS512GMSA370 |
+| RED 240GB V2 – Dev. Only | Transcend TS240M7MRE80IM2 |
+| RED 512GB V2 – Dev. Only | Transcend TS480M7MRE80IM2 |
+| Micron M550 512GB – Dev. Only | Micron M550 (MTFDDAT512MAY) |
+
+These entries are **not** in the shipping 7.4.1 firmware, so a stock camera will not
+authenticate any of them natively — you still need the `media-any` patch (or a drive
+that already matches a shipping table row). But it shows that a plain Samsung, Transcend,
+or Micron mSATA is a drive RED itself trusted; the lock is a business decision.

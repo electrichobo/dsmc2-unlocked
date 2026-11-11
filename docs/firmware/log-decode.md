@@ -1,9 +1,38 @@
 # Decoding a DSMC2 Log
 
-The DSMC2 keeps a rolling binary log on the camera. You can pull it off the
-camera (over WiFi with RFTP, or to an SSD with the shell's `maint save_log`),
-but the file is **obfuscated**. This page explains the obfuscation and gives a
-decoder. The output is plain text you can read or send to someone.
+The DSMC2 keeps a rolling binary log on the camera. You pull it off the camera, then
+decode it — the file is **obfuscated**. This page shows how to get the log off a camera
+(including one stuck in `SYSTEM_ERROR`), then explains the obfuscation and gives a decoder.
+The output is plain text you can read or send to someone.
+
+## Getting the log off the camera
+
+Everything here is read-only on the camera. No NAND write, no flashing, no board work.
+
+On a **healthy** camera, `maint save_log` writes the log to the mag's `log_files/`, and you
+copy it off the SSD. On a **stuck** camera (failed boot, `SYSTEM_ERROR`), `save_log` often
+writes nothing — the app's log subsystem never finishes. Pull it over WiFi instead:
+
+1. **Stage it where RFTP can reach it.** `/log` is not exported by RFTP, but `/pdata/data/luts`
+   is (as `/luts`). Compress the log into there from the shell — `nand zlib` is ungated:
+   ```
+   nand zlib -c /log/log.data /pdata/data/luts/_log.z
+   ```
+   A 5 MB log becomes ~570 KB. (`nand zlib` writes a `REDZLIB0` container: 8-byte magic,
+   u32 little-endian uncompressed length, then the zlib stream.)
+2. **Find the camera.** It may not report its own IP. With the ad-hoc WiFi up, read it from
+   your machine's ARP table (`arp -a -n`); RFTP rides the RED control port, tcp **1111**.
+3. **Pull it** with an RFTP client:
+   ```
+   rftp <camera-ip> get /luts/_log.z log.z
+   ```
+   On a stuck camera the transfer **often drops partway and exits without writing a file** —
+   the RFTP manager runs inside the app, and the app is faulted. Just retry in a loop; it
+   usually lands within a few tries. Small files transfer reliably, so test with one first.
+4. **Unpack the container** (`dsmc-fw-core redzlib`, or any zlib tool that honors the 12-byte
+   header) to get `log.data`. The result is a **circular buffer** — the newest data wraps, so
+   the file starts and ends in the same time region. Decode it (below), then index by markers
+   (`Boot Count: <n>`), do not read top to bottom.
 
 ## It is XOR, not encryption
 
