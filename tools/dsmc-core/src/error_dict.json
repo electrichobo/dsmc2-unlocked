@@ -239,6 +239,87 @@
       "action": "Detach all external modules, handles, and lens mount. Clean connector gold leaf pins and test booting with only direct RED LCD attached."
     },
     {
+      "id": "STARTUP_ERROR_0x20",
+      "regex": "(?i)\\bError:?\\s*0x0*20\\b",
+      "title": "Startup/Media Error: Storage Bus Fault (0x20)",
+      "subsystem": "Media / Storage",
+      "severity": "Error",
+      "meaning": "Storage subsystem communication failure or partition table corruption (Code 0x20 / 0x00000020). The camera cannot mount or initialize the SSD media interface.",
+      "action": "Perform a Secure Format of the SSD via REDCINE-X PRO or camera menu. Clean the MINI-MAG connector pins. Re-seat SSD side module."
+    },
+    {
+      "id": "SDI_LMH0340_ERROR",
+      "regex": "(?i)LMH0340",
+      "title": "SDI Output Driver / Blown Port Fault",
+      "subsystem": "Video Output / SDI",
+      "severity": "Fatal",
+      "meaning": "I2C communication failure to the TI LMH0340 HD/3G SDI serializer chip. This is the classic signature of an SDI port fried by hot-plugging accessories or ESD ground loops over BNC.",
+      "action": "SDI driver IC or protection diode is likely damaged. Test HDMI and RED Touch LCD outputs to verify core brain health. Replace IOB board or damaged LMH0340 IC."
+    },
+    {
+      "id": "FAN_CONTROLLER_ERROR",
+      "regex": "(?i)(?:Fan\\s+RPM\\s+reading\\s+failed|Error\\s+In\\s+Intializing.*Fan|HAL_Temp_GetTemperature\\(\\)\\s+failed)",
+      "title": "Thermal / Fan Subsystem Fault",
+      "subsystem": "Thermal / Environmental",
+      "severity": "Error",
+      "meaning": "Cooling fan tachometer sensor failed to read RPM, fan driver initialization failed, or digital temperature sensor stopped responding. Camera will enter safety shutdown to prevent ASIC/sensor damage.",
+      "action": "Inspect cooling fans for debris, dust clogging, or disconnected 4-pin fan header cables. Test fan RPM in maintenance diagnostic menu."
+    },
+    {
+      "id": "SENSOR_CALIBRATION_ERROR",
+      "regex": "(?i)(?:sensor\\s+calibration\\s+is\\s+out\\s+of\\s+date|Calibration\\s+failed|Calibration\\s+stop\\s+due\\s+to|shutter\\s+time\\s+exceeds\\s+3\\s+stops)",
+      "title": "Sensor Calibration / Black Shading Fault",
+      "subsystem": "Sensor Board / Calibration",
+      "severity": "Warning",
+      "meaning": "Sensor black shading calibration is missing, corrupted, or invalid for the current sensor operating temperature or exposure time (exceeds 3 stops from calibration). Produces fixed-pattern noise or yellow/red T/E indicators.",
+      "action": "Allow camera to reach stable operating temperature (approx 15-20 min), attach body cap securely to block all light, and perform a fresh Black Shading calibration."
+    },
+    {
+      "id": "SATA_IDENTIFY_ERROR",
+      "regex": "(?i)(?:Call\\s+to\\s+SATA_IdentifyDevice\\(\\)\\s+failed|SATA.*call\\s+starting\\s+at\\s+LBA.*failed)",
+      "title": "SATA Controller Physical Layer Fault",
+      "subsystem": "Media / SATA",
+      "severity": "Fatal",
+      "meaning": "SATA host bus controller failed ATA identify command or read/write LBA transfer to the internal SSD controller.",
+      "action": "Check MINI-MAG media drive health on a PC/Mac. Inspect 1.8\" / MINI-MAG connector pins inside media bay for bent pins or metal contamination."
+    },
+    {
+      "id": "MEDIA_INTEGRITY_ERROR",
+      "regex": "(?i)Media\\s+integrity\\s+error",
+      "title": "Media Integrity / Filesystem Corruption",
+      "subsystem": "Media / Filesystem",
+      "severity": "Error",
+      "meaning": "The camera detected filesystem corruption or bad sectors on the active storage partition. Further recording is blocked.",
+      "action": "Back up existing footage using REDCINE-X PRO with verification, then perform a Secure Format on the camera."
+    },
+    {
+      "id": "POWER_RAIL_FAULT",
+      "regex": "(?i)(?:ISP\\s+board\\s+power\\s+failure|IOB\\s+HAL\\s+power\\s+status\\s+fail|CURRENT_AUX_POWER_FAULT)",
+      "title": "Power Rail / Voltage Regulator Fault",
+      "subsystem": "Power Management / PMBus",
+      "severity": "Critical",
+      "meaning": "Hardware power supervisory circuit detected an undervoltage, overvoltage, or short-circuit on internal power rails (ISP 1.0V/1.5V, IOB 1.0V/1.8V, or Aux Power).",
+      "action": "Test camera strictly on official RED AC power adapter. Check battery plate contact pins and monitor rail voltages in debug shell."
+    },
+    {
+      "id": "RTC_SETTINGS_RESET",
+      "regex": "(?i)(?:All\\s+user\\s+settings\\s+have\\s+been\\s+reset\\s+to\\s+factory\\s+defaults|camera\\s+was\\s+improperly\\s+shutdown)",
+      "title": "RTC Coin Battery / NVRAM Settings Reset",
+      "subsystem": "Real-Time Clock / CDB2",
+      "severity": "Warning",
+      "meaning": "Non-volatile parameter database (CDB2) was reset or camera clock lost sync, typically caused by a depleted internal backup coin-cell battery (CR1220/CR2032) or sudden power disconnection during write.",
+      "action": "Replace the internal CR1220 real-time clock coin-cell battery. Reset camera date/time and re-apply user presets."
+    },
+    {
+      "id": "LENS_MOUNT_ERROR",
+      "regex": "(?i)(?:Lens\\s+Mount\\s+Motor\\s+Error|Lens\\s+failed\\s+to\\s+calibrate|Lens\\s+Calibration\\s+Failure)",
+      "title": "Lens Mount / Motor Communication Fault",
+      "subsystem": "Lens Mount Subsystem",
+      "severity": "Error",
+      "meaning": "Camera communication error with electronic lens mount contacts (Canon EF, Nikon, PL /i) or internal autofocus/iris motor timeout.",
+      "action": "Remove lens mount, clean gold contact pins with isopropyl alcohol, check pogo ribbon cable connection between mount and brain."
+    },
+    {
       "id": "HEX_ERROR_CODE",
       "regex": "(?i)\\bError:?\\s*(0x[0-9a-fA-F]+)",
       "title": "Hex Error Code",
