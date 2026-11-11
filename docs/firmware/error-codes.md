@@ -1,29 +1,163 @@
-# RED DSMC2 Error-Code Dictionary & Log Triage Guide
+# RED DSMC & DSMC2 Error-Code Dictionary & Log Triage Guide
 
-This document is the authoritative dictionary and technical reference for numeric error codes, system states, and coprocessor fault signatures found in RED DSMC2 logs (`dsmcdbg log`). 
+This document is the authoritative dictionary and human-friendly troubleshooting guide for numeric error codes, system states, and hardware fault signatures across **RED DSMC** (Scarlet-X, Epic-X, Dragon) and **DSMC2** (Scarlet-W, Epic-W, Weapon, Monstro, Gemini, Helium, Raven) cameras.
 
-The codes documented here were reverse-engineered directly from **Firmware 7.4.1** binaries (`dsmc_program.mem`, `iob0/dram.bin`, `isp/dram.bin`).
+The codes and error strings documented here were reverse-engineered directly from **Firmware 7.4.1** binaries (`dsmc_program.mem`, `iob0/dram.bin`, `isp/dram.bin`) and validated against real-world camera repair cases.
 
 ---
 
-## 1. Fast Reference: The Common Codes
+## 1. Quick Reference: Top 10 Most Common Faults
 
-| Log Code / Line | Subsystem | Meaning & Physical Cause | Recommended Action |
+| Symptom / Code | Subsystem | Physical Meaning | Immediate Field Action |
 |---|---|---|---|
-| `SYSTEM_ERROR (34)` | System State Machine | Camera entered fatal fault state (State 34). Halts recording/preview. | Walk previous log lines for the trigger event (`C2C_ERROR`, `X12`, `FAILED_IOB`, etc.). |
-| `Error: 0x01` | Hardware Boot / IOB & ISP | Primary board initialization failure during boot. Main ARM got no response from IOB or ISP coprocessor. Most common failure on SCARLET-X / EPIC-X. | Strip to bare brain, use official AC adapter, re-seat board-to-board flex cables, check IOB/ISP rails. |
-| `Error: 0x1D` / `0x11D` | Peripheral / Accessory Bus | Accessory or external module communication timeout or pin short on startup. | Detach handles, top plates, and lens mounts; inspect gold leaf pins. |
-| `PCS error 103: 0x...` | XAUI SerDes Link | Physical Coding Sublayer code 103 (`0x67`): 8b/10b lane sync loss or disparity error between IOB and ISP coprocessors during DMA. | Run `dsmcdbg log health`. Check ISP/IOB power rails and board flex seating. |
-| `ISP1_XAUI_PCS_STATUS = 0xf` | ISP XAUI Receiver | All 4 XAUI lanes unaligned / lost bit lock. Zero video data can transfer to ISP. | Check ISP clocks (0x88900034) and power supply rails. |
-| `SYSTEM_ERROR_X12` | Sensor Interface | 12-lane high-speed SERDES link between sensor and ISP failed to lock or align. | Re-seat sensor flexible interconnect cable; inspect connector pins. |
-| `SYSTEM_ERROR_FAILED_IOB` | I/O Board Coprocessor | The IOB Xtensa coprocessor (SATA, HDMI, SPI) hung or missed heartbeats. | Check IOB 1.0V rail (`IOB/Vcc 1.0`) and peripheral bus activity. |
-| `SYSTEM_ERROR_C2C_ERROR` | Inter-Processor Mailbox | Chip-to-Chip mailbox communication timed out between OMAP ARM and coprocessors. | Inspect coprocessor heartbeat registers (`debug heartbeat all`). |
-| `SYSTEM_ERROR_RECORDING_ERROR` | Storage / Media | Unrecoverable write failure to the RED MINI-MAG media drive. | Inspect MINI-MAG connector pins; test media format status. |
-| `Media authentication error` | Security / Media | Media drive failed hardware cryptographic signature validation. | Ensure media is genuine RED MINI-MAG or that custom media patch is loaded. |
+| **`Error: 0x01`** (On-Screen Modal) | Hardware Boot / IOB & ISP | Primary board initialization failure. Main CPU got no response from internal I/O Board or ISP board. | Strip to bare brain, use official AC adapter (no batteries), check internal board flex ribbons. |
+| **`Error: 0x1D` / `0x11D`** | Peripheral / Accessory Bus | Accessory communication timeout or pogo pin short on startup. | Detach handles, top plates, and lens mounts; clean gold leaf pins. |
+| **`Error: 0x20` / `0x00000020`** | Media / SSD Controller | Storage interface timeout or partition table corruption. | Secure Format SSD in camera or via REDCINE-X PRO; clean MINI-MAG pins. |
+| **`I2C error... LMH0340`** | SDI Video Output | Fried SDI serializer chip from hot-plugging BNC or ground loop ESD. | SDI port blown. Test HDMI / LCD output to verify brain; replace SDI driver IC or IOB. |
+| **`SYSTEM_ERROR (34)`** | System State Machine | Camera entered fatal fault state (State 34). Recording & preview halted. | Look at preceding lines in log for trigger (`C2C_ERROR`, `X12`, `FAILED_IOB`, etc.). |
+| **`PCS error 103: 0x...`** | XAUI SerDes Link | 8b/10b lane sync loss or disparity errors between IOB and ISP coprocessors. | Run `dsmcdbg log health`. Check 1.0V/1.5V power rails and board seating. |
+| **`SYSTEM_ERROR_X12`** | Sensor Interconnect | 12-lane high-speed serial link between sensor and ISP lost lock. | Reseat sensor flexible interconnect cable; inspect connector pins. |
+| **`Fan RPM reading failed`** | Cooling / Thermal | Fan tachometer signal lost or fan jammed. Leads to thermal shutdown. | Inspect fan cavity for dust or obstruction; verify 4-pin fan header cable. |
+| **`All settings reset to factory`** | NVRAM / Real-Time Clock | Internal coin-cell battery exhausted; camera date/time reset to epoch. | Replace internal CR1220/CR2032 coin cell on brain board. |
+| **`Calibration out of date / T:E Red`** | Sensor Black Shading | Sensor calibration invalid for current operating temperature or shutter. | Perform Black Shading at operating temp with body cap securely on. |
 
 ---
 
-## 2. The System State Machine (States 0..35)
+## 2. 5-Minute Field Triage Flowchart
+
+When diagnosing a non-functioning RED camera, follow this sequence before tearing down hardware:
+
+```
+[ Camera Fails or Shows Error ]
+       │
+       ├──► 1. Camera halts during boot with on-screen "Startup Error: Error: 0x..."
+       │         └─► Strip to BARE BRAIN (remove lens mount, handle, SSD, modules).
+       │         └─► Disconnect all batteries; plug in genuine RED AC wall power.
+       │         └─► If 0x01 persists on AC: Internal board flex cable or power rail fault.
+       │         └─► If 0x1D: Dirty or shorted pogo pins on handle/mount.
+       │
+       ├──► 2. Camera boots, but SDI output is completely black / dead
+       │         └─► Check HDMI or RED Touch LCD output.
+       │         └─► If LCD works but SDI is dead: LMH0340 driver chip was fried via hot-plug ESD.
+       │
+       ├──► 3. Camera halts recording mid-shot ("Record Error - Shutdown")
+       │         └─► Run `dsmcdbg log stats <log.txt>`.
+       │         └─► If SYSTEM_ERROR_DROPPED_FRAMES: Media write speed dropped; check SSD health.
+       │         └─► If SATA_IdentifyDevice / Error 0x20: Dirty SSD pins or media partition corruption.
+       │
+       ├──► 4. Camera powers off suddenly after 5–15 minutes
+       │         └─► Listen for fan operation. Look for "Shutting Down" thermal icon.
+       │         └─► Check log for "Fan RPM reading failed" or temperature runaway.
+       │
+       └──► 5. Image has fixed-pattern vertical lines or noise in shadows
+                 └─► Check T/E (Temperature / Exposure) indicator on status bar.
+                 └─► If yellow or red: Sensor needs Black Shading calibration.
+```
+
+---
+
+## 3. Startup Modal Dialog Codes (`Error: 0x01`, `0x1D`, `0x20`)
+
+There is a fundamental difference between **rolling debug log telemetry** (`log.data`, `dsmcdbg log`) and **on-screen bootloader modal dialogs**:
+- Rolling debug logs record fine-grained runtime events and driver messages.
+- When hardware fails early during power-on self-test (POST) before Linux or the GUI finishes starting, the camera halts immediately and renders a fatal modal dialog on the attached display:
+  ```
+  Startup Error
+  Error: 0x01
+  Camera will shut down.
+  ```
+
+### `Error: 0x01` — Primary Board / Coprocessor Init Failure
+- **Affected Bodies**: SCARLET-X, EPIC-X (DSMC1), and early DSMC2 brains.
+- **Root Cause**: During early boot, the main ARM supervisor processor performs a power-good and communication ping over the inter-board bus (SPI/I2C/mailbox) to the secondary coprocessor boards:
+  - **IOB (I/O Board)**: Manages SSD/SATA storage, HDMI/SDI video outputs, and external peripheral control.
+  - **ISP (Image Signal Processing Board)**: Houses the FPGA/ASIC pipeline for debayering and sensor timing.
+  If either coprocessor fails to assert its `POWER_GOOD` rail or fails to respond to the initial handshake ping within the timeout window, the boot sequence halts with `Error: 0x01`.
+
+#### Physical & Hardware Causes
+1. **Unseated or Corroded Board-to-Board Interconnect Cables**: The internal multi-pin flex cables bridging the main board to the IOB/ISP boards can become loose from vibration or thermal cycles.
+2. **Defective or Collapsed Voltage Rail**: A burned LDO or DC-DC step-down regulator on the IOB (e.g., 1.0V core rail, 1.8V I/O, or 3.3V rail) preventing coprocessor boot.
+3. **Power Supply Voltage Sag / Battery Plate Fault**: High contact resistance on third-party V-Mount / Gold-Mount battery plates or an undervoltage battery dropping below threshold under boot surge.
+4. **Corrupted Coprocessor SPI Flash**: The firmware image for the Xtensa or FPGA coprocessor stored in dedicated SPI NOR flash is corrupted.
+
+#### Triage Procedure for `Error: 0x01`
+1. **Strip to Bare Brain**: Remove all accessories—lens mount, side handle, top handles, battery plates, modules, and RED MINI-MAG / 1.8" SSD.
+2. **Use Official RED AC Adapter**: Disconnect all batteries. Plug the official RED AC power supply directly into the DC IN jack to eliminate battery voltage sag.
+3. **Connect Only a Known-Good RED Touch/LCD**: Boot with only the display connected to observe the splash sequence.
+4. **Hardware Flex Inspection (If Persistent)**: If bare-brain AC boot still produces `Error: 0x01`, open the brain chassis and inspect, clean (with 99% isopropyl alcohol), and reseat the high-density board-to-board flex cables. Verify power rail test points against schematic voltages.
+
+---
+
+### `Error: 0x1D` / `Error: 0x11D` — Peripheral & Accessory Bus Fault
+- **Root Cause**: Communication timeout or electrical short on the external accessory pin bus (e.g., RED Side Handle, top plate, or electronic smart lens mount).
+- **Triage**:
+  1. Remove the lens mount and any handles or modules.
+  2. Inspect the spring-loaded gold pogo pins and contact pads for dirt, bent pins, or bridging metal debris.
+  3. Clean contacts with contact cleaner or isopropyl alcohol.
+
+---
+
+### `Error: 0x20` / `Error 0x00000020` — Storage Interface / Media Mount Fault
+- **Root Cause**: The storage host controller failed to initialize the SSD drive, encountered unreadable partition tables, or timed out during SATA handshakes.
+- **Triage**:
+  1. Eject and inspect the RED MINI-MAG connector pins.
+  2. Perform a **Secure Format** via the camera menu or in REDCINE-X PRO.
+  3. If the error happens across multiple cards, check the internal SSD module connector ribbon.
+
+---
+
+## 4. Blown SDI Ports: The #1 Set Failure (`LMH0340` I2C Error)
+
+One of the most frequent hardware casualties on RED cameras is a blown SDI output port.
+
+### The Signature Log Line
+```
+****** I2C error reading from LMH0340
+****** I2C error writing to LMH0340
+```
+`LMH0340` is Texas Instruments' 3 Gbps HD/SD-SDI Serializer IC. When this error appears:
+- The camera brain boots and records normally.
+- The RED Touch LCD and HDMI outputs work fine.
+- **The HD-SDI BNC outputs are completely dead.**
+
+### Why It Happens (Ground Loop ESD)
+Unlike consumer HDMI, SDI carries high bandwidth without galvanic isolation. When an external monitor or wireless transmitter powered via D-Tap/P-Tap is plugged in while the BNC is connected, an electrical ground loop spike travels down the BNC shield, instantly frying the sensitive `LMH0340` driver chip.
+
+### Mandatory Cable Connection Order (To Prevent Blown SDI)
+- **PLUG-IN ORDER**:
+  1. Connect power to the monitor/accessory and **power it on**.
+  2. Ensure the camera is powered.
+  3. **Connect the BNC cable LAST.**
+- **UNPLUG ORDER**:
+  1. **Disconnect the BNC cable FIRST.**
+  2. Power off and disconnect the monitor/accessory.
+
+---
+
+## 5. Media & Storage Faults
+
+RED cameras record high-bitrate raw sensor data directly to SATA SSDs (RED MINI-MAG or 1.8" RED DRIVES).
+
+### Common Storage Log Messages
+- **`Call to SATA_IdentifyDevice() failed`**: The SATA controller got no response from the SSD. Indicates dirty pins, unseated media, or dead drive controller.
+- **`Media integrity error. Please secure format the SSD.`**: Camera filesystem found orphaned inodes or corrupted blocks.
+- **`The media in the %1 is fragmented... REDUCED SSD PERFORMANCE`**: The filesystem is fragmented from partial deletes or non-secure formats, causing write buffer underruns.
+- **`Media authentication error`**: Media drive failed RED's hardware cryptographic challenge. Third-party DIY SSDs will be locked into read-only mode unless custom firmware bypasses are active.
+
+---
+
+## 6. Thermal & Fan Subsystem Failures
+
+RED DSMC/DSMC2 cameras draw 45–65W and rely entirely on dual front/top fan airflow.
+
+### Signatures & Symptoms
+- **`Fan RPM reading failed` / `Program error - GetFanTachRPM`**: The camera CPU is not receiving tachometer pulses from the fan. The firmware considers the fan dead and initiates an emergency shutdown to prevent heat damage to the sensor.
+- **`** Error In Intializing %s Fan controller **`**: I2C bus communication failure to the fan PWM driver chip.
+- **Thermal Shutdown Behavior**: When the core sensor temperature exceeds safe operating limits (approx 75°C), the camera displays `Shutting Down` and terminates recording before parking the filesystem.
+
+---
+
+## 7. The System State Machine (States 0..35)
 
 The camera application manages operation through a finite state machine (`system_state_2_if.cpp`, table located at `0x80f8a4b8` in `dsmc_program.mem`). When querying `get system_state` in the debug shell or inspecting state transitions in boot logs, states are indexed 0 to 35:
 
@@ -68,9 +202,9 @@ The camera application manages operation through a finite state machine (`system
 
 ---
 
-## 3. Fatal Fault Triggers: Transition Events to State 34
+## 8. Fatal Fault Triggers: Transition Events to State 34
 
-State 34 is not entered spontaneously; it is triggered by an event message dispatched to `system_state_2_if::handle_event`. The firmware defines the following event codes that transition the camera into `SYSTEM_ERROR`:
+State 34 is triggered by an event message dispatched to `system_state_2_if::handle_event`. The firmware defines the following event codes:
 
 - **Event 25 — `SYSTEM_ERROR_C2C_ERROR`**: Chip-to-Chip inter-core mailbox packet timeout or CRC error between OMAP and ISP/IOB.
 - **Event 26 — `SYSTEM_ERROR_RDS_ERROR`**: Corrupted packet sequencing in RED Data Stream from sensor to wavelet encoder.
@@ -83,76 +217,26 @@ State 34 is not entered spontaneously; it is triggered by an event message dispa
 - **Event 33 — `SYSTEM_ERROR_SENS_INIT`**: Image sensor power-on sequencing, clock distribution, or register initialization timed out.
 - **Event 39 — `SYSTEM_ERROR_X12`**: 12-lane high-speed SERDES sensor link failure.
 - **Event 45 — `SYSTEM_ERROR_UPGRADE_ERROR`**: Firmware package verification or flashing failed.
-- **Event 56 — `CLEAR_SYSTEM_ERROR`**: Administrative command to clear system fault state (usually rejected if hardware condition persists).
+- **Event 56 — `CLEAR_SYSTEM_ERROR`**: Administrative command to clear system fault state.
 
 ---
 
-## 4. XAUI PCS Errors (`PCS error 103`)
+## 9. XAUI PCS Errors (`PCS error 103`)
 
-The DSMC2 architecture uses a 4-lane XAUI interface (running at 3.125 Gbps per lane, 8b/10b encoded) to move raw image and control data between the **IOB (I/O Board)** and **ISP (Image Signal Processor)** coprocessors.
+The DSMC2 architecture uses a 4-lane XAUI interface (running at 3.125 Gbps per lane, 8b/10b encoded) to move raw image data between the **IOB (I/O Board)** and **ISP (Image Signal Processor)** coprocessors.
 
-In `slot/iob0/dram.bin`, the IOB firmware contains four specific diagnostic strings:
-```
-E: isp_%d PCS error : 0x%x
-E: isp_%d PCS error %d: 0x%x
-E: iob (isp_%d) PCS error %d: 0x%x avoided
-E: iob (isp_%d) PCS error %d: 0x%x
-```
-
-### What is Code 103?
-When `dsmcdbg` logs show `iob (isp_1) PCS error 103: 0x...`, code **103** (`0x67` in hex) represents the transceiver status register condition where:
-1. One or more 8b/10b lanes lost comma (`/K28.5/`) character alignment.
+When logs show `iob (isp_1) PCS error 103: 0x...`, code **103** (`0x67` in hex) represents the transceiver status register condition where:
+1. One or more 8b/10b lanes lost comma character alignment.
 2. An unexpected running disparity error occurred during high-speed DMA transfers across the inter-board bridge.
-3. The register value following the colon (e.g. `0x8004002c`) gives the specific PCS lane status register address.
+3. If `ISP1_XAUI_PCS_STATUS = 0xf` appears, all 4 lanes lost lock and no image data can pass.
 
 ---
 
-## 5. Startup Modal Dialog Codes (`Error: 0x01`, `Error: 0x1D`)
-
-There is an important distinction between **rolling debug log telemetry** (`log.data`, `dsmcdbg log`) and **on-screen bootloader modal dialogs**:
-- Rolling debug logs record fine-grained runtime events and driver messages (e.g., `SYSTEM_ERROR (34)`, `PCS error 103`).
-- When hardware fails early during power-on self-test (POST) before the Linux OS or user interface runtime finishes starting, the camera halts immediately and renders a fatal modal dialog on the attached display:
-  ```
-  Startup Error
-  Error: 0x01
-  Camera will shut down.
-  ```
-
-### `Error: 0x01` — Primary Board / Coprocessor Init Failure
-- **Applicable Bodies**: SCARLET-X, EPIC-X (DSMC1), and early DSMC2 brains.
-- **Root Cause**: During early boot, the main ARM supervisor processor performs a power-good and communication ping over the inter-board bus (SPI/I2C/mailbox) to the secondary coprocessor boards:
-  - **IOB (I/O Board)**: Manages SSD/SATA storage, HDMI/SDI video outputs, and external peripheral control.
-  - **ISP (Image Signal Processing Board)**: Houses the FPGA/ASIC pipeline for debayering and sensor timing.
-  If either coprocessor fails to assert its `POWER_GOOD` rail or fails to respond to the initial handshake ping within the timeout window, the boot sequence halts with `Error: 0x01`.
-
-#### Physical & Hardware Causes
-1. **Unseated or Corroded Board-to-Board Interconnect Cables**: The internal multi-pin flex cables bridging the main board to the IOB/ISP boards can become loose from vibration or thermal cycles.
-2. **Defective or Collapsed Voltage Rail**: A burned LDO or DC-DC step-down regulator on the IOB (e.g., 1.0V core rail, 1.8V I/O, or 3.3V rail) preventing coprocessor boot.
-3. **Power Supply Voltage Sag / Battery Plate Fault**: High contact resistance on third-party V-Mount / Gold-Mount battery plates or an undervoltage battery dropping below threshold under boot surge.
-4. **Corrupted Coprocessor SPI Flash**: The firmware image for the Xtensa or FPGA coprocessor stored in dedicated SPI NOR flash is corrupted.
-
-#### Triage Procedure for `Error: 0x01`
-1. **Strip to Bare Brain**: Remove all accessories—lens mount, side handle, top handles, battery plates, modules, and RED MINI-MAG / 1.8" SSD.
-2. **Use Official RED AC Adapter**: Disconnect all batteries. Plug the official RED AC power supply directly into the DC IN jack to eliminate battery voltage sag.
-3. **Connect Only a Known-Good RED Touch/LCD**: Boot with only the display connected to observe the splash sequence.
-4. **Hardware Flex Inspection (If Persistent)**: If bare-brain AC boot still produces `Error: 0x01`, open the brain chassis and inspect, clean (with 99% isopropyl alcohol), and reseat the high-density board-to-board flex cables. Verify power rail test points against schematic voltages.
-
----
-
-### `Error: 0x1D` / `Error: 0x11D` — Peripheral & Accessory Bus Fault
-- **Root Cause**: Communication timeout or electrical short on the external accessory pin bus (e.g., RED Side Handle, top plate, or electronic smart lens mount).
-- **Triage**:
-  1. Remove the lens mount and any handles or modules.
-  2. Inspect the spring-loaded gold pogo pins and contact pads for dirt, bent pins, or bridging metal debris.
-  3. Clean contacts with contact cleaner or isopropyl alcohol.
-
----
-
-## 6. Tooling: Analyzing and Enriching Logs
+## 10. Tooling: Analyzing and Enriching Logs
 
 ### Frequency Analysis & Bloat Elimination (`dsmcdbg log stats`)
 
-Camera logs often contain tens of thousands of lines where the same informational or polling messages repeat constantly across multiple boot sessions. The `stats` command solves this by parsing all sessions, counting error frequencies, and clustering repeated bloat:
+Camera logs often contain tens of thousands of lines where the same informational or polling messages repeat constantly across multiple boot sessions. The `stats` command parses all sessions, counts error frequencies, and eliminates bloat:
 
 ```sh
 # View error frequencies and bloat across all sessions
@@ -166,33 +250,6 @@ cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log stats <decoded.txt> --
 
 # Emit structured JSON report
 cargo run --manifest-path tools/dsmcdbg/Cargo.toml -- log stats <decoded.txt> --json
-```
-
-### Sample Output:
-```
-RED DSMC2 Log Statistics: cam_fault_log.txt
-==============================================================================
-Sessions:   3   |   Lines:   24,850   |   Errors:    18   |   Warnings:     5
-
-ERROR FREQUENCY ACROSS SESSIONS (Enriched via Dictionary):
-------------------------------------------------------------------------------
-  [Fatal] System Fault State (State 34)     Count:     2  |  Sessions: 2/3   
-      Subsystem : System Control / RTOS
-      Meaning   : The camera state machine transitioned to state 34 (SYSTEM_ERROR)...
-      Sample    : [0:00:05:000] ( 1%/1%) E: SYSTEM_ERROR (34)
-
-  [Error] XAUI PCS Lane Sync Loss (Code 103) Count:    14  |  Sessions: 1/3   
-      Subsystem : XAUI SerDes / IOB-ISP Link
-      Meaning   : Physical Coding Sublayer error 103 on the XAUI interconnect...
-      Sample    : [0:00:02:150] ( 1%/1%) E: iob (isp_1) PCS error 103: 0x8004002c
-
-TOP REPEATED / BLOAT LINES (Timestamps Normalized):
-------------------------------------------------------------------------------
-   COUNT  SESSIONS    NORMALIZED LOG LINE
-  --------------------------------------------------------------------------
-   1,420  3/3         i2c_read i2c.c timeout
-     850  3/3         cal state machine state: 4
-     312  2/3         KEY_MAPPING_12 pressed
 ```
 
 ### Inline Diagnostic Enrichment (`dsmcdbg log digest`)
@@ -211,12 +268,13 @@ When running `dsmcdbg log digest <decoded.txt>`, any error matched in the dictio
 
 ---
 
-## 7. Binary Offset Provenance (Firmware 7.4.1)
+## 11. Binary Offset Provenance (Firmware 7.4.1)
 
 For verification against raw firmware binaries using Ghidra or radare2:
 
 - **State machine string table**: `dsmc_program.mem` offset `0x00f8a4b8` (VA `0x80f8a4b8`).
 - **State machine event table**: `dsmc_program.mem` offset `0x00f8a6f8` (VA `0x80f8a6f8`).
 - **`system_state_2_if` implementation**: `dsmc_program.mem` offset `0x00f88700` (VA `0x80f88700`).
+- **UI Diagnostic Modal message strings**: `dsmc_program.mem` offset `0x00f65000`..`0x00f69000`.
 - **IOB PCS error strings**: `iob0/dram.bin` offsets `0x0d7c`, `0x0db4`, `0x0e3c`, `0x0e9c` (DRAM base `0x3ffe0000`).
 - **IOB pointer message catalogue**: `iob0/dram.bin` offset `0x0568`..`0x05ac`.

@@ -191,6 +191,25 @@ mod tests {
 
         let m2 = dict.match_line("[0:00:04:000] Error: 0x1d seen").unwrap();
         assert_eq!(m2.id, "STARTUP_ERROR_0x1D");
+
+        let m3 = dict.match_line("[0:00:02:000] Error 0x00000020").unwrap();
+        assert_eq!(m3.id, "STARTUP_ERROR_0x20");
+    }
+
+    #[test]
+    fn decodes_sdi_and_fan_and_power_errors() {
+        let dict = ErrorDictionary::new();
+        let m1 = dict.match_line("****** I2C error reading from LMH0340").unwrap();
+        assert_eq!(m1.id, "SDI_LMH0340_ERROR");
+
+        let m2 = dict.match_line("Fan RPM reading failed").unwrap();
+        assert_eq!(m2.id, "FAN_CONTROLLER_ERROR");
+
+        let m3 = dict.match_line("ISP board power failure.").unwrap();
+        assert_eq!(m3.id, "POWER_RAIL_FAULT");
+
+        let m4 = dict.match_line("Call to SATA_IdentifyDevice() failed").unwrap();
+        assert_eq!(m4.id, "SATA_IDENTIFY_ERROR");
     }
 
     #[test]
