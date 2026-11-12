@@ -129,8 +129,13 @@ class OmapUart(Device):
 
 
 UART_MAP = {
-    1: (0x4806A000, 72),
-    2: (0x4806C000, 73),
-    3: (0x49020000, 74), # Camera CTRL / RCP port
-    4: (0x49042000, 80), # System serial log / dsh> shell
+    1: (0x4806A000, 72),  # L4-Core UART1 (TRM Table 2-3)
+    2: (0x4806C000, 73),  # L4-Core UART2 (TRM Table 2-3)
+    3: (0x49020000, 74),  # L4-Per UART3 / Camera CTRL & ROM boot port (TRM Table 2-4)
+    4: (0x49042000, 80),  # L4-Per UART4 / System serial log & dsh> shell (TRM Table 2-4)
+}
+
+# L4-Core UART3 compatibility alias (0x48020000 -> UART 3)
+UART_ALIASES = {
+    0x48020000: 3,
 }

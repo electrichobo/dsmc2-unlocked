@@ -1,20 +1,59 @@
 """
-OMAP3630 Multichannel Serial Port Interface (McSPI) Controller Model.
+OMAP3630 / DM3725 Multichannel Serial Port Interface (McSPI) Controller Model.
+TRM Reference: SPRUGN4 Chapter 20 (McSPI), Table 2-3 (L4-Core Memory Space Mapping).
 Implements the 4 McSPI controllers at:
-  - McSPI 1: 0x48098000 (IRQ 65)
-  - McSPI 2: 0x4809A000 (IRQ 66)
-  - McSPI 3: 0x480B8000 (IRQ 91)
-  - McSPI 4: 0x480BA000 (IRQ 48)
+  - McSPI 1: 0x48098000 (IRQ 65) — Coprocessor SPI bus (ts_isp1, ts_isp2)
+  - McSPI 2: 0x4809A000 (IRQ 66) — Sensor & FPGA SPI bus (ts_fpga, ts_sensor)
+  - McSPI 3: 0x480B8000 (IRQ 91) — IOB & Accelerometer SPI bus (ts_iob0, ts_iob1)
+  - McSPI 4: 0x480BA000 (IRQ 48) — Coprocessor Mailbox / Auxiliary SPI bus
 """
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, Callable, Any
 from emulator.core.bus import Device
 
 
-class OmapMcspi(Device):
-    """OMAP3630 McSPI Master Controller."""
+class SpiTargetDevice:
+    """Base class for SPI target devices attached to an OmapMcspi channel."""
 
-    # Register Offsets
+    def __init__(self, name: str, port_id: int, channel: int):
+        self.name = name
+        self.port_id = port_id
+        self.channel = channel
+        self.registers: Dict[int, int] = {}
+        self.transfer_count = 0
+
+    def transceive_word(self, tx_word: int) -> Optional[int]:
+        """
+        Handle a 32-bit SPI word transfer on this chip-select channel.
+        Return None to fall back to standard McSPI TX->RX loopback.
+        """
+        self.transfer_count += 1
+        return None
+
+    def read_reg(self, addr: int, length: int = 4) -> bytes:
+        """Read register bytes for `read spi <target> <addr> <len>`."""
+        out = bytearray()
+        for off in range(0, length, 4):
+            val = self.registers.get((addr + off) & 0xFFFFFFFF, 0x00000001)
+            out.extend(val.to_bytes(4, "little"))
+        return bytes(out[:length])
+
+    def write_reg(self, addr: int, data: bytes) -> bool:
+        """Write register bytes for SPI register write operations."""
+        for off in range(0, len(data), 4):
+            chunk = data[off:off + 4].ljust(4, b"\x00")
+            val = int.from_bytes(chunk, "little")
+            self.registers[(addr + off) & 0xFFFFFFFF] = val
+        self.transfer_count += 1
+        return True
+
+
+class OmapMcspi(Device):
+    """OMAP3630 / DM3725 McSPI Master Controller."""
+
+    SIZE = 0x1000
+
+    # Register Offsets (TRM Table 20-16)
     REG_REVISION = 0x00
     REG_SYSCONFIG = 0x10
     REG_SYSSTATUS = 0x14
@@ -51,7 +90,15 @@ class OmapMcspi(Device):
         self.tx = [0] * self.NUM_CHANNELS
         self.rx = [0] * self.NUM_CHANNELS
 
+        # Attached SPI targets per channel (0..3)
+        self.targets: Dict[int, Any] = {}
+        self.on_word_tx: Optional[Callable[[int, int, int], Optional[int]]] = None
         self.generic_regs: Dict[int, int] = {}
+
+    def attach_target(self, channel: int, target: Any):
+        """Attach an SPI target device to a chip-select channel (0..3)."""
+        if 0 <= channel < self.NUM_CHANNELS:
+            self.targets[channel] = target
 
     def read(self, offset: int, size: int) -> int:
         if offset == self.REG_REVISION:
@@ -124,10 +171,21 @@ class OmapMcspi(Device):
                 self.chctrl[ch_num] = val
             elif reg_off == 0x0C:  # MCSPI_TX
                 self.tx[ch_num] = val
-                # Loopback or simulated slave response: load into RX, assert RXS (bit 0)
-                self.rx[ch_num] = val & 0xFFFFFFFF
+                rx_resp = None
+                target = self.targets.get(ch_num)
+                if target is not None and hasattr(target, "transceive_word"):
+                    rx_resp = target.transceive_word(val)
+                if rx_resp is None and self.on_word_tx is not None:
+                    rx_resp = self.on_word_tx(self.port_id, ch_num, val)
+                # Default to loopback when target returns None
+                self.rx[ch_num] = (rx_resp if rx_resp is not None else val) & 0xFFFFFFFF
                 self.chstat[ch_num] |= 0x01  # RXS = 1 (RX full)
                 self.chstat[ch_num] |= 0x06  # TXS = 1, EOT = 1
+                # Assert channel TX/RX IRQ status bits (TX0_EMPTY = bit 0, RX0_FULL = bit 2, stride 4 bits per ch)
+                ch_irq_bits = (0x05 << (ch_num * 4))
+                self.irqstatus |= ch_irq_bits
+                if (self.irqstatus & self.irqenable) and self.intc:
+                    self.intc.assert_irq(self.irq_num)
             elif reg_off == 0x10:  # MCSPI_RX
                 self.rx[ch_num] = val
         else:

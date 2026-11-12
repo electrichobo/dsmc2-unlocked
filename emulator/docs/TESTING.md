@@ -34,6 +34,7 @@ emulator/tests/
 ├── test_rtos_timer_tick.py      # GPTimer 2 (IRQ 38) 1000 Hz ThreadX RTOS tick and log_thread wakeup
 ├── test_sdma.py                 # OMAP3 32-channel sDMA transfers and IRQ 15 signaling
 ├── test_storage.py              # VFS path resolution and /env serialization
+├── test_trm_memory_map.py       # DM3725 TRM memory map validation, SPI C2C mailbox, and bus failsafe modes
 └── test_web_studio.py           # Web Studio HTTP API, MJPEG stream, and path-traversal security
 ```
 

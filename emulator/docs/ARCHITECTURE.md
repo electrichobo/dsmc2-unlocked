@@ -60,23 +60,29 @@ The `SystemBus` models the physical address space of the Texas Instruments DM372
 
 | Physical Address Range | Size | Subsystem | Backing Mechanism |
 |---|---|---|---|
+| `0x08000000 - 0x08FFFFFF` | 16 MB | GPMC CS0 NAND Flash Window | Mapped memory |
 | `0x18000000 - 0x1FBFFFFF` | 124 MB | GPMC CS1/CS2 (FPGA / Board Window) | Mapped memory |
 | `0x3FFE0000 - 0x3FFFFFFF` | 128 KB | IOB0 DRAM & C2C Doorbell (`0x3FFE8000`) | Mapped memory + `IobDoorbellDevice` |
 | `0x40000000 - 0x403FFFFF` | 4 MB | OMAP Internal SRAM (`0x40200000`) & ROM | Mapped memory |
-| `0x48004000 - 0x48005FFF` | 8 KB | OMAP PRCM (Power, Reset, Clock) | `OmapPrcm` |
+| `0x48000000 - 0x48000FFF` | 4 KB | OMAP L4-Core Address Protection (`L4_CORE_AP`) | `OmapL4Ap` |
+| `0x48002000 - 0x48003FFF` | 8 KB | OMAP System Control Module (`SCM` / PADCONF) | `OmapScm` |
+| `0x48004000 - 0x48005FFF` | 8 KB | OMAP PRCM (Clock Management `CM`) | `OmapPrcm` |
+| `0x48020000 - 0x48020FFF` | 4 KB | OMAP UART3 L4-Core Compatibility Window | `OmapUart` |
 | `0x48050000 - 0x48050FFF` | 4 KB | OMAP Display Subsystem (DSS / DISPC) | `OmapDss` |
 | `0x48056000 - 0x48056FFF` | 4 KB | OMAP System DMA (`sDMA`, 32 channels) | `OmapSdma` |
 | `0x48060000 - 0x48060FFF` | 4 KB | OMAP I2C3 Controller | `OmapI2c` |
 | `0x4806A000 - 0x4806CFFF` | 12 KB | OMAP UART1 (`0x4806A000`) & UART2 (`0x4806C000`) | `OmapUart` |
 | `0x48070000 - 0x48073FFF` | 16 KB | OMAP I2C1 (`0x48070000`) & I2C2 (`0x48072000`) | `OmapI2c` |
-| `0x48088000 - 0x49040FFF` | Varies | OMAP GPTimer 1..11 (`TIMER_MAP`) | `OmapGPTimer` |
-| `0x48098000 - 0x480BAFFF` | Varies | OMAP McSPI 1..4 (`MCSPI_MAP`) | `OmapMcspi` |
+| `0x48086000 - 0x49040FFF` | Varies | OMAP GPTimer 1..11 (`TIMER_MAP`) | `OmapGPTimer` |
+| `0x48098000 - 0x480BAFFF` | Varies | OMAP McSPI 1..4 (`MCSPI_MAP`, SPI Coprocessor Targets) | `OmapMcspi` + `C2cTransport` |
 | `0x48200000 - 0x48200FFF` | 4 KB | OMAP MPU Interrupt Controller (INTC) | `OmapIntc` |
+| `0x48306000 - 0x48307FFF` | 8 KB | OMAP L4-Wakeup Power & Reset Management (`PRM`) | `OmapPrm` |
 | `0x48310000 - 0x49059FFF` | Varies | OMAP GPIO 1..6 (`GPIO_MAP`) | `OmapGpio` |
-| `0x49000000 - 0x4900FFFF` | 64 KB | C2C Interconnect Transport | `C2cTransport` |
-| `0x49020000 - 0x49020FFF` | 4 KB | OMAP UART3 (CTRL / RCP Port) | `OmapUart` |
+| `0x49000000 - 0x49000FFF` | 4 KB | OMAP L4-Per Address Protection (`L4_PER_AP`) | `OmapL4Ap` |
+| `0x49020000 - 0x49020FFF` | 4 KB | OMAP UART3 (CTRL / RCP & ROM Boot Port) | `OmapUart` |
 | `0x49042000 - 0x49042FFF` | 4 KB | OMAP UART4 (System Debug Log) | `OmapUart` |
 | `0x4FFE8000 - 0x4FFE8FFF` | 4 KB | IOB1 C2C Doorbell | `IobDoorbellDevice` |
+| `0x6D000000 - 0x6D000FFF` | 4 KB | OMAP SDRAM Controller (`SDRC`) | `OmapSdrc` |
 | `0x6E000000 - 0x6E000FFF` | 4 KB | OMAP GPMC Controller & NAND FIFO | `OmapGpmc` |
 | `0x80000000 - 0x9FFFFFFF` | 512 MB | System DDR SDRAM (128 MB on physical hardware) | Mapped memory |
 

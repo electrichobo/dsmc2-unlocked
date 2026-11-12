@@ -2349,7 +2349,7 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
             <span style="font-size: 13px; font-weight: bold; color: #ff5555;">Tensilica Xtensa ASICs (IOB0, IOB1, ISP1/2)</span>
-            <span style="font-family: monospace; font-size: 11px; color: #888;">C2C @ 0x49000000</span>
+            <span style="font-family: monospace; font-size: 11px; color: #888;">McSPI / C2C Mailbox</span>
           </div>
           <div style="display: flex; flex-direction: column; gap: 8px; font-family: monospace; font-size: 11px;">
             <!-- IOB0 -->

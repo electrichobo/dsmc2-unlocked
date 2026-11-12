@@ -15,7 +15,7 @@ from emulator.core.bus import SystemBus
 from emulator.devices.intc import OmapIntc
 from emulator.devices.prcm import OmapPrcm
 from emulator.devices.gptimer import OmapGPTimer, TIMER_MAP
-from emulator.devices.uart import OmapUart, UART_MAP
+from emulator.devices.uart import OmapUart, UART_MAP, UART_ALIASES
 from emulator.devices.i2c import OmapI2c, I2C_MAP, I2cSlave
 from emulator.devices.i2c_maxtouch import MaXTouchDevice
 from emulator.devices.i2c_eeprom import EdidEeprom
@@ -25,6 +25,7 @@ from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
 from emulator.devices.sdma import OmapSdma
 from emulator.devices.mcspi import OmapMcspi, MCSPI_MAP
+from emulator.devices.l4_interconnect import OmapL4Ap, OmapScm, OmapPrm, OmapSdrc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
@@ -112,9 +113,21 @@ class Dsmc2Camera:
 
         self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, 0x80E9C368, 0x80E9C368)
 
-        # 3. PRCM (Clock & Reset)
+        # 3. L4 Interconnect AP, System Control Module (SCM), Clock Management (PRCM), and Wakeup PRM
+        self.l4_core_ap = OmapL4Ap(name="L4_CORE_AP", base_addr=OmapL4Ap.BASE_ADDR_L4_CORE)
+        self.bus.register_device(OmapL4Ap.BASE_ADDR_L4_CORE, OmapL4Ap.SIZE, self.l4_core_ap)
+
+        self.scm = OmapScm()
+        self.bus.register_device(OmapScm.BASE_ADDR, OmapScm.SIZE, self.scm)
+
         self.prcm = OmapPrcm(self.cpu)
         self.bus.register_device(OmapPrcm.BASE_ADDR, OmapPrcm.SIZE, self.prcm)
+
+        self.prm = OmapPrm()
+        self.bus.register_device(OmapPrm.BASE_ADDR, OmapPrm.SIZE, self.prm)
+
+        self.l4_per_ap = OmapL4Ap(name="L4_PER_AP", base_addr=OmapL4Ap.BASE_ADDR_L4_PER)
+        self.bus.register_device(OmapL4Ap.BASE_ADDR_L4_PER, OmapL4Ap.SIZE, self.l4_per_ap)
 
         # 4. INTC
         self.bus.register_device(OmapIntc.BASE_ADDR, OmapIntc.SIZE, self.intc)
@@ -126,12 +139,15 @@ class Dsmc2Camera:
             self.timers[timer_id] = tmr
             self.bus.register_device(base, 0x1000, tmr)
 
-        # 6. UARTs (1..4)
+        # 6. UARTs (1..4) and L4-Core UART3 compatibility alias
         self.uarts: Dict[int, OmapUart] = {}
         for uart_id, (base, irq) in UART_MAP.items():
             u = OmapUart(uart_id, irq, self.intc)
             self.uarts[uart_id] = u
             self.bus.register_device(base, 0x1000, u)
+        for alias_base, target_uart_id in UART_ALIASES.items():
+            if target_uart_id in self.uarts:
+                self.bus.register_device(alias_base, 0x1000, self.uarts[target_uart_id])
 
         if old_logs:
             self.uarts[4].completed_lines.extend(old_logs)
@@ -183,7 +199,10 @@ class Dsmc2Camera:
         self.dss = OmapDss(self.bus)
         self.bus.register_device(OmapDss.BASE_ADDR, OmapDss.SIZE, self.dss)
 
-        # 10. General Purpose Memory Controller (GPMC)
+        # 10. SDRAM Controller (SDRC @ 0x6D000000) & General Purpose Memory Controller (GPMC @ 0x6E000000)
+        self.sdrc = OmapSdrc()
+        self.bus.register_device(OmapSdrc.BASE_ADDR, OmapSdrc.SIZE, self.sdrc)
+
         self.gpmc = OmapGpmc(intc=self.intc)
         self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
 
@@ -204,9 +223,10 @@ class Dsmc2Camera:
             self.mcspi[port_id] = spi
             self.bus.register_device(base, 0x1000, spi)
 
-        # 11. Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
-        self.c2c = C2cTransport(intc=self.intc)
-        self.bus.register_device(C2cTransport.BASE_ADDR, C2cTransport.SIZE, self.c2c)
+        # 11. SPI-Backed Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
+        # Note: 0x49000000 is L4-PER AP (registered above as self.l4_per_ap);
+        # C2cTransport binds directly to McSPI 1..4 targets (ts_isp1, ts_isp2, ts_fpga, ts_sensor).
+        self.c2c = C2cTransport(intc=self.intc, mcspi=self.mcspi)
 
         self.iob0 = Iob0Coprocessor()
         self.iob1 = Iob1Coprocessor()
@@ -547,7 +567,8 @@ class Dsmc2Camera:
             dsp_coff = os.path.join(slot, "dsp", "rdc_dsp_app.out")
             self.dsp.load_coff(dsp_coff)
 
-            self.log_system("[C2C] Chip-to-Chip transport online @ 0x49000000 (IOB0, IOB1, ISP1, ISP2 linked)")
+            self.log_system("[L4-PER] OMAP3630 L4-Per Interconnect AP online @ 0x49000000")
+            self.log_system("[C2C/SPI] McSPI Coprocessor mailbox online (ts_isp1, ts_isp2, ts_fpga, ts_sensor linked)")
             self.log_system("[IOB0] Tensilica Xtensa online: SATA 3.0 6Gbps HBA, HDMI 1080p, SPI Accelerometer")
             self.log_system(f"[IOB1] Tensilica Xtensa online: Dark-Level Calibration & Defect Map ({len(self.iob1.factory_defects)} factory defects)")
             self.log_system("[ISP] Dual ISP1 & ISP2 online: REDCODE Wavelet Engine, DDR Training PASS (Modified SCL V2)")
