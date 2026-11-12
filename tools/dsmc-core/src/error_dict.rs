@@ -141,6 +141,77 @@ impl ErrorDictionary {
             m.severity, m.title, m.subsystem, m.meaning, m.action
         ))
     }
+
+    /// Search dictionary entries and state machine states by query (code, keyword, or hex).
+    pub fn explain(&self, query: &str) -> Vec<EnrichmentMatch> {
+        let q = query.trim().to_lowercase();
+        let mut results = Vec::new();
+
+        // 1. Check if query is numeric state code (0..35)
+        if let Ok(code) = q.parse::<u32>() {
+            if let Some(st) = self.lookup_state(code) {
+                results.push(EnrichmentMatch {
+                    id: format!("STATE_{code}"),
+                    title: format!("State Machine: {} (State {})", st.name, code),
+                    subsystem: "System State Machine".into(),
+                    severity: if code == 34 { "Fatal".into() } else { "Info".into() },
+                    meaning: st.desc.clone(),
+                    action: if code == 34 {
+                        "Camera entered fatal fault state. Inspect previous log lines for trigger event.".into()
+                    } else {
+                        "Normal operational state machine transition.".into()
+                    },
+                    matched_code: Some(format!("{code}")),
+                });
+            }
+        }
+
+        // 2. Check state machine names and descriptions
+        for (&code, st) in &self.states {
+            if st.name.to_lowercase().contains(&q) || st.desc.to_lowercase().contains(&q) {
+                let id = format!("STATE_{code}");
+                if !results.iter().any(|r| r.id == id) {
+                    results.push(EnrichmentMatch {
+                        id,
+                        title: format!("State Machine: {} (State {})", st.name, code),
+                        subsystem: "System State Machine".into(),
+                        severity: if code == 34 { "Fatal".into() } else { "Info".into() },
+                        meaning: st.desc.clone(),
+                        action: if code == 34 {
+                            "Camera entered fatal fault state. Inspect previous log lines for trigger event.".into()
+                        } else {
+                            "Normal operational state machine transition.".into()
+                        },
+                        matched_code: Some(format!("{code}")),
+                    });
+                }
+            }
+        }
+
+        // 3. Check compiled dictionary entries
+        for entry in &self.entries {
+            let matches_text = entry.id.to_lowercase().contains(&q)
+                || entry.title.to_lowercase().contains(&q)
+                || entry.subsystem.to_lowercase().contains(&q)
+                || entry.meaning.to_lowercase().contains(&q)
+                || entry.action.to_lowercase().contains(&q)
+                || entry.regex.is_match(query);
+
+            if matches_text && !results.iter().any(|r| r.id == entry.id) {
+                results.push(EnrichmentMatch {
+                    id: entry.id.clone(),
+                    title: entry.title.clone(),
+                    subsystem: entry.subsystem.clone(),
+                    severity: entry.severity.clone(),
+                    meaning: entry.meaning.clone(),
+                    action: entry.action.clone(),
+                    matched_code: None,
+                });
+            }
+        }
+
+        results
+    }
 }
 
 #[cfg(test)]
@@ -218,5 +289,24 @@ mod tests {
         let m = dict.match_line("[0:00:04:000] Error: 0x4f seen").unwrap();
         assert_eq!(m.id, "HEX_ERROR_CODE");
         assert_eq!(m.matched_code.as_deref(), Some("0x4f"));
+    }
+
+    #[test]
+    fn explain_looks_up_codes_and_states() {
+        let dict = ErrorDictionary::new();
+        // Look up numeric state
+        let s34 = dict.explain("34");
+        assert!(s34.iter().any(|r| r.title.contains("SYSTEM_ERROR")));
+
+        // Look up hex code 0x01
+        let e01 = dict.explain("0x01");
+        assert!(e01.iter().any(|r| r.id == "STARTUP_ERROR_0x01"));
+
+        // Look up keyword
+        let sdi = dict.explain("LMH0340");
+        assert!(sdi.iter().any(|r| r.id == "SDI_LMH0340_ERROR"));
+
+        let fan = dict.explain("fan");
+        assert!(fan.iter().any(|r| r.id == "FAN_CONTROLLER_ERROR"));
     }
 }
