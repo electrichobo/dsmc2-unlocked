@@ -626,6 +626,11 @@ def create_handler(studio: WebStudio):
                 with studio.lock:
                     stat = studio.camera.multicam_network.get_status()
                 self._send_json(stat)
+
+            elif path == "/api/rig/status":
+                with studio.lock:
+                    rig_stat = studio.camera.rig.get_status() if hasattr(studio.camera, "rig") and studio.camera.rig else {}
+                self._send_json(rig_stat)
             else:
                 self.send_error(404, "Not Found")
 
@@ -813,17 +818,39 @@ def create_handler(studio: WebStudio):
             elif path == "/api/hardware/accessory/attach":
                 pin = str(data.get("pin", "720-0033"))
                 serial = int(data.get("serial", 100001))
+                slot = data.get("slot")
                 with studio.lock:
-                    res = studio.camera.attach_accessory(pin, serial)
+                    res = studio.camera.attach_accessory(pin, serial, slot=slot)
                     if res:
                         res = {k: v for k, v in res.items() if not k.endswith("_obj")}
                 self._send_json({"status": "ok" if res else "error", "module": res})
 
             elif path == "/api/hardware/accessory/detach":
                 pin = str(data.get("pin", ""))
+                slot = data.get("slot")
                 with studio.lock:
-                    res = studio.camera.detach_accessory(pin)
+                    res = studio.camera.detach_accessory(pin, slot=slot)
                 self._send_json({"status": "ok", "detached": res})
+
+            elif path == "/api/rig/toggle":
+                from_slot = str(data.get("from_slot", ""))
+                to_slot = str(data.get("to_slot", ""))
+                with studio.lock:
+                    res = studio.camera.toggle_module_position(from_slot, to_slot)
+                self._send_json({"status": "ok" if res else "error", "toggled": res})
+
+            elif path == "/api/rig/orientation":
+                slot = str(data.get("slot", ""))
+                orientation = str(data.get("orientation", "normal"))
+                with studio.lock:
+                    res = studio.camera.set_slot_orientation(slot, orientation)
+                self._send_json({"status": "ok" if res else "error", "updated": res})
+
+            elif path == "/api/rig/preset":
+                preset_name = str(data.get("preset", "cinema_production"))
+                with studio.lock:
+                    res = studio.camera.rig.apply_preset(preset_name) if hasattr(studio.camera, "rig") and studio.camera.rig else False
+                self._send_json({"status": "ok" if res else "error", "applied": res})
 
             elif path == "/api/hardware/face_detect":
                 with studio.lock:
@@ -1073,6 +1100,7 @@ def create_handler(studio: WebStudio):
                         "audio_server": cam.audio_server.get_status() if hasattr(cam, "audio_server") and cam.audio_server else None,
                     },
                     "accessories": cam.accessory_bus.get_status() if hasattr(cam, "accessory_bus") and cam.accessory_bus else None,
+                    "rig": cam.rig.get_status() if hasattr(cam, "rig") and cam.rig else None,
                     "multicam": cam.multicam_network.get_status() if hasattr(cam, "multicam_network") and cam.multicam_network else None,
                     "threads": cam.get_threads(),
                     "unknown_mmio_count": len(cam.bus.unknown_mmio)
@@ -2110,7 +2138,8 @@ STUDIO_HTML = r"""<!DOCTYPE html>
   <div class="workbench">
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('serial', this)">Console / Serial</button>
-      <button class="tab-btn" onclick="switchTab('rcp', this)">RCP & Automation</button>
+      <button class="tab-btn" onclick="switchTab('rig', this)">Rig &amp; Positions</button>
+      <button class="tab-btn" onclick="switchTab('rcp', this)">RCP &amp; Automation</button>
       <button class="tab-btn" onclick="switchTab('hardware', this)">Hardware I/O & Audio</button>
       <button class="tab-btn" onclick="switchTab('lens', this)">Lens & Optics</button>
       <button class="tab-btn" onclick="switchTab('media', this)">Media & Clips</button>
@@ -2134,6 +2163,77 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div id="console" class="console-box"></div>
+    </div>
+
+    <!-- Tab: Modular Rig & Physical Positions -->
+    <div id="tab-rig" class="tab-content">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <div>
+          <span style="font-size: 14px; font-weight: bold; color: #ff3333;">Modular Camera Rig &amp; Connector Positions</span>
+          <div style="font-size: 11px; color: #888;">Configure physical mounting slots, hot-swap modules, toggle display locations, and test hardware presence detection.</div>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span style="font-size: 11px; color: #aaa;">Presets:</span>
+          <select id="rig-preset-select" style="background: #242424; color: #fff; border: 1px solid #444; padding: 4px 8px; border-radius: 3px; font-size: 11px;">
+            <option value="cinema_production">Cinema Production Rig</option>
+            <option value="handheld_operator">Operator Handheld Rig</option>
+            <option value="broadcast_studio">Broadcast &amp; Live Studio</option>
+            <option value="bare_brain">Bare Brain (Minimal)</option>
+          </select>
+          <button class="cam-btn" style="padding: 4px 10px; font-size: 11px;" onclick="applyRigPreset()">Apply Rig</button>
+        </div>
+      </div>
+
+      <!-- Quick Slot Grid Cards -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 14px;" id="rig-slots-grid">
+        <!-- Rendered dynamically by renderRigSlots() -->
+      </div>
+
+      <!-- Rig Control & Hot-Swap Panel -->
+      <div style="background: #181818; border: 1px solid #333; border-radius: 4px; padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div>
+          <div style="font-size: 12px; font-weight: bold; color: #00e676; margin-bottom: 6px;">Hot-Swap / Attach to Slot</div>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <select id="rig-slot-target-select" style="flex: 1; background: #222; color: #fff; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; font-size: 11px;">
+              <option value="top_pogo">Top Pogo (LCD/EVF)</option>
+              <option value="side_pogo">Side Pogo (EVF/Sidekick)</option>
+              <option value="rear_module">Rear Expander Bus (26-pin)</option>
+              <option value="lens_mount">Front Lens Mount</option>
+              <option value="media_bay">Media Bay (Mini-Mag)</option>
+            </select>
+            <select id="rig-module-catalog-select" style="flex: 1; background: #222; color: #fff; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; font-size: 11px;">
+              <option value="730-0024">RED Touch 7.0 LCD</option>
+              <option value="730-0025">RED Touch 4.7 LCD</option>
+              <option value="730-0026">DSMC2 OLED EVF</option>
+              <option value="720-0043">DSMC2 Sidekick</option>
+              <option value="720-0033">DSMC2 Base Expander</option>
+              <option value="720-0034">DSMC2 REDVOLT Expander</option>
+              <option value="720-0035">DSMC2 Jetpack-SDI</option>
+              <option value="720-0045">DSMC2 V-Lock I/O Expander</option>
+              <option value="725-0026">Canon EF Mount</option>
+              <option value="725-0022">PL Intelligent Mount</option>
+              <option value="750-0075">RED MINI-MAG 512GB</option>
+              <option value="750-0082">RED MINI-MAG 960GB</option>
+            </select>
+            <button class="cam-btn" style="padding: 4px 10px; font-size: 11px;" onclick="attachRigModule()">Mount</button>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size: 12px; font-weight: bold; color: #ffaa00; margin-bottom: 6px;">Position Toggle &amp; Spatial Swap</div>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <select id="rig-toggle-from" style="flex: 1; background: #222; color: #fff; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; font-size: 11px;">
+              <option value="top_pogo">From: Top Pogo</option>
+              <option value="side_pogo">From: Side Pogo</option>
+            </select>
+            <select id="rig-toggle-to" style="flex: 1; background: #222; color: #fff; border: 1px solid #444; padding: 4px 6px; border-radius: 3px; font-size: 11px;">
+              <option value="side_pogo">To: Side Pogo</option>
+              <option value="top_pogo">To: Top Pogo</option>
+            </select>
+            <button class="cam-btn" style="padding: 4px 10px; font-size: 11px; background: #333;" onclick="toggleRigPosition()">Move / Swap</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Tab 2: RCP & Automation -->
@@ -2864,6 +2964,11 @@ STUDIO_HTML = r"""<!DOCTYPE html>
         renderAccessories(data.accessories);
       }
 
+      // Render Rig & Positions Telemetry
+      if (data.rig) {
+        renderRigSlots(data.rig);
+      }
+
       // Render Multi-Camera Studio Telemetry
       if (data.multicam) {
         renderMulticam(data.multicam);
@@ -3169,6 +3274,106 @@ STUDIO_HTML = r"""<!DOCTYPE html>
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pin})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function renderRigSlots(rig) {
+    const grid = document.getElementById('rig-slots-grid');
+    if (!grid || !rig || !rig.slots) return;
+
+    let html = '';
+    const slotOrder = ['top_pogo', 'side_pogo', 'rear_module', 'lens_mount', 'media_bay'];
+    for (const sid of slotOrder) {
+      const slot = rig.slots[sid];
+      if (!slot) continue;
+
+      const isOcc = slot.is_occupied;
+      const mod = slot.module;
+      const borderCol = isOcc ? '#00e676' : '#444';
+      const statusBadge = isOcc
+        ? `<span style="background: #113311; color: #00e676; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: bold;">OCCUPIED (GPIO${slot.gpio_bank}:${slot.gpio_pin} HIGH)</span>`
+        : `<span style="background: #222; color: #777; padding: 2px 6px; border-radius: 3px; font-size: 10px;">EMPTY (GPIO${slot.gpio_bank}:${slot.gpio_pin} LOW)</span>`;
+
+      let modDetails = '<div style="color: #666; font-style: italic; margin-top: 6px;">No module connected</div>';
+      let actions = '';
+
+      if (isOcc && mod) {
+        modDetails = `
+          <div style="font-size: 13px; font-weight: bold; color: #fff; margin-top: 4px;">${mod.name}</div>
+          <div style="font-size: 11px; color: #aaa; font-family: monospace;">PIN: ${mod.pin} &bull; ${mod.serial}</div>
+          <div style="font-size: 11px; color: #ffaa00; margin-top: 2px;">Power Draw: ${mod.power_w}W &bull; Orientation: ${slot.orientation}</div>
+        `;
+
+        const canRotate = (sid === 'top_pogo' || sid === 'side_pogo');
+        actions = `
+          <div style="display: flex; gap: 6px; margin-top: 8px;">
+            ${canRotate ? `<button class="cam-btn" style="padding: 2px 6px; font-size: 10px;" onclick="rotateSlotOrientation('${sid}', '${slot.orientation === 'normal' ? 'flipped' : 'normal'}')">Flip 180°</button>` : ''}
+            <button class="cam-btn" style="padding: 2px 6px; font-size: 10px; background: #662222;" onclick="detachRigSlot('${sid}')">Detach</button>
+          </div>
+        `;
+      }
+
+      html += `
+        <div style="background: #1e1e1e; border: 1px solid ${borderCol}; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; justify-content: space-between;">
+          <div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <span style="font-weight: bold; font-size: 12px; color: #ddd;">${slot.name}</span>
+              ${statusBadge}
+            </div>
+            ${modDetails}
+          </div>
+          ${actions}
+        </div>
+      `;
+    }
+    grid.innerHTML = html;
+  }
+
+  function applyRigPreset() {
+    const sel = document.getElementById('rig-preset-select');
+    if (!sel) return;
+    fetch('/api/rig/preset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preset: sel.value})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function attachRigModule() {
+    const slotSel = document.getElementById('rig-slot-target-select');
+    const modSel = document.getElementById('rig-module-catalog-select');
+    if (!slotSel || !modSel) return;
+    fetch('/api/hardware/accessory/attach', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot: slotSel.value, pin: modSel.value})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function detachRigSlot(slotId) {
+    fetch('/api/hardware/accessory/detach', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot: slotId})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function toggleRigPosition() {
+    const fromSel = document.getElementById('rig-toggle-from');
+    const toSel = document.getElementById('rig-toggle-to');
+    if (!fromSel || !toSel) return;
+    fetch('/api/rig/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({from_slot: fromSel.value, to_slot: toSel.value})
+    }).then(r => r.json()).then(() => pollStatus());
+  }
+
+  function rotateSlotOrientation(slotId, orientation) {
+    fetch('/api/rig/orientation', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot: slotId, orientation})
     }).then(r => r.json()).then(() => pollStatus());
   }
 

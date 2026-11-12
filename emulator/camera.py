@@ -27,6 +27,7 @@ from emulator.devices.sdma import OmapSdma
 from emulator.devices.mcspi import OmapMcspi, MCSPI_MAP
 from emulator.devices.l4_interconnect import OmapL4Ap, OmapScm, OmapPrm, OmapSdrc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
+from emulator.devices.rig_manager import RigManager, ConnectorPosition
 from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
 from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
@@ -76,6 +77,9 @@ class Dsmc2Camera:
 
         # 5. REDCODE R3D Media Recorder
         self.recorder = R3dClipRecorder(self, storage_root=self.workspace_root)
+
+        # 6. Physical Rig & Modular Connector Slot Manager
+        self.rig = RigManager(camera=self)
 
         # Execution & Power Control
         self.is_running = False
@@ -850,16 +854,32 @@ class Dsmc2Camera:
             return self.imaging_server.compute_focus_contrast(roi, dist)
         return 0.0
 
-    def attach_accessory(self, pin_or_name: str, serial: int = 100001) -> Optional[Dict[str, Any]]:
-        """Attach DSMC2 expander or display module on accessory bus."""
+    def attach_accessory(self, pin_or_name: str, serial: int = 100001, slot: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Attach DSMC2 expander, display, or rig module on accessory bus / slot."""
+        if slot and hasattr(self, "rig") and self.rig:
+            return self.rig.attach_module_to_slot(slot, pin_or_name, serial=serial)
         if hasattr(self, "accessory_bus") and self.accessory_bus:
             return self.accessory_bus.attach_module(pin_or_name, serial)
         return None
 
-    def detach_accessory(self, pin_or_name: str) -> bool:
-        """Detach DSMC2 expander or display module from accessory bus."""
+    def detach_accessory(self, pin_or_name: str, slot: Optional[str] = None) -> bool:
+        """Detach DSMC2 expander, display, or rig module."""
+        if slot and hasattr(self, "rig") and self.rig:
+            return self.rig.detach_slot(slot)
         if hasattr(self, "accessory_bus") and self.accessory_bus:
             return self.accessory_bus.detach_module(pin_or_name)
+        return False
+
+    def toggle_module_position(self, from_slot: str, to_slot: str) -> bool:
+        """Move or swap an accessory from one physical connector slot to another."""
+        if hasattr(self, "rig") and self.rig:
+            return self.rig.toggle_slot_position(from_slot, to_slot)
+        return False
+
+    def set_slot_orientation(self, slot: str, orientation: str) -> bool:
+        """Set display or accessory orientation in a connector slot."""
+        if hasattr(self, "rig") and self.rig:
+            return self.rig.set_slot_orientation(slot, orientation)
         return False
 
     def execute_rcp_script(self, script_data: Any, script_name: str = "Custom Automation Script") -> Dict[str, Any]:
