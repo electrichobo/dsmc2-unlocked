@@ -12,6 +12,9 @@ if repo_root not in sys.path:
 
 from emulator.camera import Dsmc2Camera
 from emulator.rcp.protocol import RcpProtocol
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 
 
 def test_rcp_protocol():

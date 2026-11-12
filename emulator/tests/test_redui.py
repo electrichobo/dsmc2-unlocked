@@ -267,23 +267,23 @@ def test_dynamic_brain_specific_menus_and_firmware_switch(redui, camera):
     fps_items = redui._get_current_items()
     assert "120.00" in fps_items
 
-    # 2. Switch to WEAPON 8K VV (0x11)
-    success8k = camera.select_camera_model("0x11")
-    assert success8k is True
+    # 2. Switch to WEAPON 6K S35 (0x11)
+    success6k = camera.select_camera_model("0x11")
+    assert success6k is True
     redui.apply_camera_profile(camera.env.CAMERA_PROFILES["0x11"])
-    assert redui.camera_model == "WEAPON 8K VV"
+    assert redui.camera_model == "WEAPON 6K S35"
 
-    # Verify System Status > Project Status dynamically shows WEAPON 8K VV
+    # Verify System Status > Project Status dynamically shows WEAPON 6K S35
     redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE", "System Status", "Project Status"]
-    items8k = redui._get_current_items()
-    assert any("WEAPON 8K VV" in item for item in items8k)
-    assert any("Active Resolution: 8K 16:9" in item for item in items8k)
+    items6k = redui._get_current_items()
+    assert any("WEAPON 6K S35" in item for item in items6k)
+    assert any("Active Resolution: 6K 16:9" in item for item in items6k)
 
-    # Verify Project > Format offers 8K
+    # Verify Project > Format offers 6K
     redui.menu_path = ["Menu", "SETTINGS", "PROJECT", "Format"]
-    fmt8k_items = redui._get_current_items()
-    assert "8K 16:9" in fmt8k_items
-    assert "8K 2.4:1" in fmt8k_items
+    fmt6k_items = redui._get_current_items()
+    assert "6K 16:9" in fmt6k_items
+    assert "6K 2.4:1" in fmt6k_items
 
     # 3. Revert back to SCARLET-W 5K (0x16)
     camera.select_camera_model("0x16")

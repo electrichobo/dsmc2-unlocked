@@ -9,6 +9,9 @@ import pytest
 
 from emulator.camera import Dsmc2Camera
 from emulator.core.snapshot import SnapshotManager
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 
 
 def test_camera_fault_injection_and_snapshots():

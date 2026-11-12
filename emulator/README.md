@@ -43,9 +43,14 @@ The emulator supports five DSMC2 camera profiles. Each profile sets the `/env` m
 |---|---|---|---|---|
 | **SCARLET-W 5K** (Reference) | `0x16` | RED DRAGON 5K S35 | 5120 × 2700 | 60 FPS |
 | **RED RAVEN 4.5K** | `0x15` | RED DRAGON 4.5K S35 | 4608 × 2160 | 120 FPS |
-| **WEAPON 8K VV** | `0x11` | RED MONSTRO 8K VV | 8192 × 4320 | 60 FPS |
-| **DSMC2 DRAGON-X 5K** | `0x14` | RED DRAGON 5K S35 | 5120 × 2700 | 96 FPS |
+| **WEAPON 6K S35** | `0x11` | RED DRAGON 6K S35 | 6144 × 3160 | 75 FPS |
+| **WEAPON MONOCHROME** | `0x14` | RED DRAGON 6K S35 MONO | 6144 × 3160 | 75 FPS |
 | **EPIC-W 8K S35** | `0x17` | RED HELIUM 8K S35 | 8192 × 4320 | 60 FPS |
+
+> CAMERA_TYPE → model names are the firmware's own `switch(CAMERA_TYPE)` manifest
+> table (`FUN_80875098`): `0x11 weapon`, `0x14 weapon_mg`, `0x15 weapon_4_5k`,
+> `0x16 scarlet_weapon` (reference body), `0x17 epic_weapon`, `0x19 nomad`.
+> MONSTRO 8K VV is **not** `0x11` — it is a later product not in the 7.4.1 combo.
 
 ---
 

@@ -8,10 +8,12 @@ import pytest
 
 from emulator.core.firmware import FirmwareManager, FirmwareInspectionResult
 from emulator.camera import Dsmc2Camera
+from conftest import requires_firmware
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@requires_firmware
 def test_firmware_manager_inspect_stock_binary():
     """Verify inspection of genuine stock RED DSMC2 dsmc_program.mem."""
     stock_path = os.path.join(REPO_ROOT, "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot", "dsmc_program.mem")

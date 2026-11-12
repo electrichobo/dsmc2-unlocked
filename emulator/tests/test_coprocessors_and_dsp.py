@@ -15,6 +15,7 @@ from emulator.coprocessors.xtensa import XtensaCore, Iob0Coprocessor, Iob1Coproc
 from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
+from conftest import requires_firmware
 
 
 @pytest.fixture
@@ -270,6 +271,7 @@ def test_camera_coprocessors_and_dsp_integration(camera):
     assert status["count"] >= 3
 
 
+@requires_firmware
 def test_web_studio_coprocessors_endpoints(workspace_root):
     """Verify Web Studio REST API handles coprocessors, calibration, and accessories."""
     test_port = find_free_port(9100)

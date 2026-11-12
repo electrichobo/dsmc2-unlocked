@@ -17,6 +17,9 @@ import pytest
 
 from emulator.rcp.protocol import RcpProtocol
 from emulator.rcp.automation import RcpScriptEngine, RcpScriptStep, MultiCameraNetwork
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 from emulator.camera import Dsmc2Camera
 from emulator.ui.web import WebStudio, create_handler, ThreadedHTTPServer
 

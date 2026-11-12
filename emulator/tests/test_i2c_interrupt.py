@@ -8,6 +8,9 @@ import pytest
 from emulator.devices.i2c import OmapI2c, I2cSlave
 from emulator.devices.intc import OmapIntc
 from emulator.camera import Dsmc2Camera
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 
 
 class MockI2cDevice(I2cSlave):

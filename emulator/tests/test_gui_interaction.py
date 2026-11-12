@@ -14,6 +14,7 @@ import tkinter as tk
 import pytest
 from emulator.ui.app import Dsmc2DesktopApp
 from emulator.rcp.protocol import RcpProtocol
+from conftest import requires_firmware
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,6 +25,7 @@ class MockEvent:
         self.y = int(y_native * scale)
 
 
+@requires_firmware
 def test_desktop_app_full_interaction():
     """Test full interactive GUI flow programmatically within Tk mainloop."""
     app = Dsmc2DesktopApp(workspace_root=REPO_ROOT)

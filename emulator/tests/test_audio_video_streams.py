@@ -22,6 +22,7 @@ from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, RAudioServer
 from emulator.coprocessors.xtensa import Iob0Coprocessor
 from emulator.camera import Dsmc2Camera
 from emulator.ui.web import WebStudio, create_handler, ThreadedHTTPServer
+from conftest import requires_firmware
 
 
 @pytest.fixture
@@ -80,6 +81,7 @@ def test_raudio_server_pcm_and_wav_generation():
     assert len(tone_wav) > 44
 
 
+@requires_firmware
 def test_iob0_hdmi_output_modes_and_rendering(workspace_root):
     """Verify IOB0 Coprocessor HDMI video modes (Clean, Broadcast Tally, Frame Guides)."""
     camera = Dsmc2Camera(workspace_root)
@@ -115,6 +117,7 @@ def test_iob0_hdmi_output_modes_and_rendering(workspace_root):
         camera.power_off()
 
 
+@requires_firmware
 def test_web_studio_audio_and_hdmi_endpoints(workspace_root):
     """Verify Web Studio HTTP API endpoints for audio and HDMI streams."""
     port = find_free_port(9210)

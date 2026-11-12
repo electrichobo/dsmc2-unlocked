@@ -9,6 +9,9 @@ import urllib.request
 import pytest
 
 from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

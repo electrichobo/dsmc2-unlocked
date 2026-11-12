@@ -9,6 +9,9 @@ import struct
 import pytest
 from emulator.devices.gpmc import OmapGpmc
 from emulator.camera import Dsmc2Camera
+from conftest import requires_firmware
+
+pytestmark = requires_firmware
 
 
 def test_gpmc_nand_onfi_and_micron_commands():

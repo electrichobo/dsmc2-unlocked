@@ -17,6 +17,7 @@ from emulator.devices.i2c_olpf import OlpfEeprom
 from emulator.devices.gpmc import OmapGpmc
 from emulator.ui.redui import RedUiEngine
 from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
+from conftest import requires_firmware
 
 
 @pytest.fixture
@@ -242,6 +243,7 @@ def test_redui_olpf_and_project_status_integration(camera):
     assert any("[OLPF] I2C2 @ 0x54 EEPROM updated" in l for l in recent_logs)
 
 
+@requires_firmware
 def test_web_studio_hardware_endpoints(workspace_root):
     """Verify Web Studio hardware REST endpoints and live telemetry via HTTP."""
     test_port = find_free_port(9000)
