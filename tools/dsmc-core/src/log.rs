@@ -573,6 +573,7 @@ pub struct ErrorStatEntry {
     pub total_count: usize,
     pub sessions_affected: Vec<usize>,
     pub meaning: String,
+    pub action: String,
     pub sample_line: String,
 }
 
@@ -622,6 +623,7 @@ pub fn compute_stats(
         subsystem: String,
         severity: String,
         meaning: String,
+        action: String,
         sample_line: String,
         count: usize,
         sessions: Vec<usize>,
@@ -647,6 +649,7 @@ pub fn compute_stats(
                     subsystem: em.subsystem,
                     severity: em.severity,
                     meaning: em.meaning,
+                    action: em.action,
                     sample_line: line.trim().to_string(),
                     count: 0,
                     sessions: Vec::new(),
@@ -671,6 +674,7 @@ pub fn compute_stats(
                         subsystem: "System Diagnostic".to_string(),
                         severity: "Error".to_string(),
                         meaning: format!("Matched known failure signature pattern '{label}'"),
+                        action: "Check camera diagnostic logs and hardware connections.".to_string(),
                         sample_line: line.trim().to_string(),
                         count: 0,
                         sessions: Vec::new(),
@@ -704,6 +708,7 @@ pub fn compute_stats(
             total_count: stat.count,
             sessions_affected: stat.sessions,
             meaning: stat.meaning,
+            action: stat.action,
             sample_line: stat.sample_line,
         })
         .collect();
