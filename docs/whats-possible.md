@@ -19,10 +19,13 @@ keys, and tools behind them are in [docs/keys.md](firmware/keys.md),
     debug shell or persistently from the unsigned config DB. The genuinely
     software-only features — ProRes, IPP2 colour science, 3D LUT, anamorphic
     de-squeeze — flip on this way on any DSMC2 body.
-  - **ProRes is present on every DSMC2.** The encoder is compiled into all builds
-    and runs on the IOB coprocessor; the only gate is the capability bit. It is
-    **4K-capped** by IOB codec throughput — a hardware ceiling, not a flag — so the
-    win is 4K ProRes on any body, not higher.
+  - **ProRes (proxy) is present on every DSMC2.** The encode is a stage inside the
+    **LSB FPGA** (Xilinx Kintex-7) — the firmware's LSB driver shows ProRes as an
+    FPGA AXI-arbiter client next to the 3D-LUT blocks, with the FPGA's own L3→ProRes
+    line counters — not on the IOB. The only software gate is the capability bit. The
+    resolution ceiling is an FPGA-fabric + LSB-RAM limit (one DDR3L chip on the LSB),
+    a hardware ceiling, not a flag. This is also why DSMC1, which has no such FPGA on
+    the side board, has no ProRes at all.
 - **Media authentication is reverse-engineered.** The scheme is three checks:
   model-string whitelist, an MD5 SMART-log signature, and a ~29-field ATA IDENTIFY
   match. All three are reproduced offline against a genuine magazine. A drive

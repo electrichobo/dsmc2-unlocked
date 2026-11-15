@@ -7,7 +7,7 @@ in the other docs and the private research notes; this is the outcome-level map.
 | Subsystem | Software lever (changeable) | Hardware limit (fixed) |
 |---|---|---|
 | **Feature flags** (`HW_CAP_*`) | ProRes, IPP2, 3D LUT, anamorphic, extra gain modes — flip one bitmap; the licence check is a PIN compare, no signature. See [feature-unlock.md](feature-unlock.md). | A flag only enables what the hardware already supports. |
-| **Record / codec** | REDCODE compression-ratio clamp is a software limit. ProRes offered via the flag above. | Wavelet encode + ProRes run on the coprocessor silicon; ProRes is 4K-capped by its throughput. |
+| **Record / codec** | REDCODE compression-ratio clamp is a software limit. ProRes offered via the flag above. | REDCODE wavelet runs on the ISP; ProRes proxy encode runs in the LSB FPGA fabric, 4K-capped by its fabric + single-DDR3L budget. |
 | **Media / SSD** | Model-string + signature + IDENTIFY gates are all reproduced offline; `media-any` patch accepts any SATA SSD. See [media](../../media/). | A drive still needs the raw speed (~300 MB/s for R3D). |
 | **Sensor** | Extra gain modes behind the sensitivity flag. | Resolution and exposure floor are the physical sensor. |
 | **Frame rate** | — | Pixel-clock ÷ readout timing; no software FPS unlock. See [whats-possible.md](../whats-possible.md). |
