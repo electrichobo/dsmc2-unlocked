@@ -126,3 +126,59 @@ Do not boot with `DEBUG_MFG_FEATURES_ENABLED=1` for normal shell work. It gives
 no benefit (it does not unlock the compiled-out commands) and it was observed to
 break `maint module` / `maint print_boot_log` / `maint send_redinfo` for that
 boot. Use a plain shell preset.
+
+## WiFi: ad-hoc vs infrastructure
+
+Two different machines hide behind `WIFI_MODE`. **Ad-hoc (1) brings itself up; infrastructure (2) does
+not** — it needs a connect that the shell cannot issue. Verified on stock 7.4.1 (2026-11-15).
+
+### Ad-hoc — works from the shell
+
+```
+cdb set WIFI_MODE 1                  # 0=off 1=ad-hoc 2=infrastructure
+cdb set WIFI_ADHOC_ENCRYPTION 0      # open network
+wlan status                          # Link: Up, SSID WEAPON_<serial>, IP 192.168.100.76
+```
+
+Join `WEAPON_<serial>` on the host, then use RFTP (`rftp-rs 192.168.100.76 list /`). This is the
+bootstrap network: it exists even when the app is stalled in a startup error.
+
+### Infrastructure — set the parameters here, then Connect in the UI (or reboot)
+
+```
+cdb set WIFI_MODE 2
+cdb set WIFI_AP_SSID "<SSID>"
+cdb set WIFI_AP_ENCRYPTION 3         # 3 = WPA2 (the radio has no WPA3)
+cdb set WIFI_AP_PASSPHRASE "<passphrase>"
+cdb set WIFI_DHCP_ENABLE 1
+cdb get WIFI_MODE ; cdb get WIFI_AP_SSID ; wlan status
+```
+
+`wlan status` will read `Mode: Infrastructure, Link: Not connected` — that is expected, not a failure.
+The radio only joins when the app raises its connect flag, and only two things do that:
+
+- the UI's **Connect** button (`RCP_PARAM_WIFI_CONNECT` → `msg_set_wifi_ap_connect`), or
+- **boot**: `initInterface` reads these same CDB values and raises the flag when mode is 2 and the
+  SSID is non-empty.
+
+Pressing **Connect** after the writes above associates immediately (bench-verified, no reboot). For a
+body whose panel is unusable there is no Connect button, so write the five values and power-cycle: it
+associates during boot with no UI and no messages.
+
+Three traps worth knowing:
+
+- **`WIFI_SSID_CACHE_1..4` are decorative.** Their `apply_order` is `-1`, so presets skip them and the
+  app never reads them. The `SSID|passphrase` string a pulled `user.db` shows is UI bookkeeping only.
+  The live parameters are `WIFI_AP_*` ("AP" = the remote access point).
+- **Mode must be written before the credentials.** `msg_set_wifi_ap_connect` drops the connect when
+  `WIFI_MODE != 2` at the moment it runs.
+- **`cdb set` writes the database, it does not apply.** `cdb apply-preset`, `cdb export-preset` and
+  `debug sendMsg WIFI_MSG_SET_MODE …` were all tried on the bench and none produced an association.
+
+The serial `#` RCP handler is GET-only, so RCP SET of `WLANMODE` / `WLANAPID` / `WLANAPEN` /
+`WLANAPPW` / `WIFI_CONNECT` is a TCP-9999 feature, not a serial one. Once any network is up, RCP SET
+over 9999 is the only path that changes mode without a UI or a reboot.
+
+Proof of life after association: `rftp-rs <ip> list /` returns the media and root listings (RFTP on
+TCP 1111). TCP 9999 probing closed is normal — the RCP listener is only open while a client session
+holds it.
