@@ -75,7 +75,9 @@ The firmware uses standard, known parts:
 - **YAFFS2** — the flash filesystem.
 - **LibTomCrypt** — software crypto.
 - **TinyXML** — the manifests.
-- **ProRes and DNxHD** — the proxy and output codecs. The R3D wavelet is hardware.
+- **ProRes and DNxHD** — the proxy and output codecs. The R3D wavelet is hardware;
+  the ProRes proxy encode is a stage in the LSB FPGA (see whats-possible.md), not a
+  CPU codec.
 
 ## Storage layout
 
