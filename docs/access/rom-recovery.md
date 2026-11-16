@@ -48,6 +48,11 @@ The rig connects your computer to the camera UART3 pins through the RP2040. UART
 the IOB mezzanine connector **J15**: pin 27 is TX (from the camera), pin 29 is RX (to the
 camera). The signals are 1.8 V.
 
+![J15 mezzanine — pin 27 = TX/H21, pin 29 = RX/H20](../assets/j15_uart3_pin27_pin29.jpg)
+
+*The J15 mezzanine connector on the IOB board. The two marked pads on the odd-numbered
+row are pin 27 (camera TX) and pin 29 (camera RX).*
+
 ### 2.1 The principles — what any rig must do
 
 Everything on this net is **1.8 V logic**. The rig has to meet four requirements. Any
@@ -71,6 +76,11 @@ hardware that meets them works; the exact parts do not matter.
    1.8 V push-pull driver does this for free. A simple resistor divider from a 3.3 V output to
    ground does **not** — it idles at the wrong level and fails (tested: the ROM loaded a
    corrupt image and did not run it).
+
+![AE21 SYS_BOOT5 strap location](../assets/dm3725_ae21_sys_boot5.jpg)
+
+*The AE21 strap from step 1: it lands at this corner of the processor package, and the
+boxed part is the nearest accessible point on the strap net.*
 
 Common ground throughout, and keep the **RSB board connected** — it carries the power signal.
 

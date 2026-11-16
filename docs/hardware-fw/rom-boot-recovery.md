@@ -20,12 +20,22 @@ The DM3725 boot ROM (DM37xx/OMAP3630 family) supports a **peripheral boot** over
 This path runs before the loader and before the application. It cannot be bricked, which is
 why it is the recovery route of last resort.
 
+![AE21 SYS_BOOT5 strap location](../assets/dm3725_ae21_sys_boot5.jpg)
+
+*Ball AE21 (`SYS_BOOT5`) at the corner of the DM3725 package; the boxed part is the nearest
+accessible point on the strap net.*
+
 ### Why UART3, not UART4
 
 The 2nd-stage loader's own console is UART4 (balls K8/J8), but RED did not route those pins
 out on this body. UART3 (ball H20 = `uart3_rx`, ball H21 = `uart3_tx`) is exposed on the IOB
 mezzanine connector J15 (pin 29 / pin 27). UART3 stays at its reset mux (mode 0, `uart3_rx`),
 so the ROM peripheral boot works there without any reconfiguration.
+
+![J15 mezzanine — pin 27 = TX/H21, pin 29 = RX/H20](../assets/j15_uart3_pin27_pin29.jpg)
+
+*J15 on the IOB board, odd-numbered row: pin 27 (camera TX, ball H21) and pin 29 (camera
+RX, ball H20).*
 
 ### The physical-layer catch
 
