@@ -100,7 +100,8 @@ def test_hardware_limitation_alert_popup(redui):
     redui.menu_path = ["Menu", "SETTINGS", "MAINTENANCE", "Self Test", "Touchscreen"]
     redui._handle_menu_item_selected("Run Touchscreen Digitizer Test")
     assert redui.active_alert is not None
-    assert "HARDWARE NOT AVAILABLE" in redui.active_alert["title"]
+    assert "EMULATOR LIMITATION" in redui.active_alert["title"]
+    assert "software emulation" in redui.active_alert["message"]
     assert "maXTouch digitizer" in redui.active_alert["message"]
 
     # Verify rendering alert modal
@@ -117,5 +118,6 @@ def test_hardware_limitation_alert_popup(redui):
     redui._handle_menu_item_selected("Genlock Offset 0 Lines")
     assert redui.active_alert is not None
     assert "Genlock" in redui.active_alert["message"]
+    assert "software emulation" in redui.active_alert["message"]
     redui.handle_touch(512, 360, True, "down")
     assert redui.active_alert is None

@@ -44,36 +44,37 @@ class RedUiEngine:
     MENU_TABS = ["SETTINGS", "MEDIA", "AUDIO", "OVERLAYS", "LOOK", "ABOUT"]
 
     # Hardware limitations and requirements table for virtual brain emulation
+    # Explicitly details why an option cannot function due to running in software emulation rather than physical hardware.
     HARDWARE_LIMITATIONS: Dict[str, str] = {
-        "Digitizer Test": "Requires physical I2C maXTouch digitizer hardware calibration test bench.",
-        "Touch Calibration": "Requires physical touchscreen resistive/capacitive calibration rig.",
-        "Touchscreen Locked": "Touchscreen lockout disabled in virtual brain to allow web browser control.",
-        "Recalibrate Touch Digitizer": "Requires physical analog front-end digitizer calibration hardware.",
-        "Genlock Offset": "Requires external physical SMPTE LTC/Genlock master clock signal connected to BNC sync pins.",
-        "Sync Phase": "Requires external hardware Genlock master clock generator on SYNC connector.",
-        "Phantom +48V ON": "Requires physical analog XLR audio preamp hardware on Base/REDVOLT Expander.",
-        "Aux 12V DC Out": "Requires physical 12V AUX DC LEMO power rail monitoring hardware.",
-        "RS 24V Run/Stop Out": "Requires physical 24V RS LEMO connector hardware.",
-        "USB 5V Power ON": "Requires physical USB host VBUS power distribution hardware.",
-        "RED Wireless Motor Driver": "Requires RED W.M.D. RF wireless transceiver hardware (2.4 GHz).",
-        "Channel 1 (2.4 GHz)": "Requires physical 2.4 GHz RF wireless motor driver hardware.",
-        "Set Focus In/Out Stops": "Requires physical mechanical lens motor with optical encoder feedback.",
-        "Set Aperture Motor Range": "Requires physical lens iris motor with potentiometer feedback.",
-        "Set Zoom Motor Range": "Requires physical zoom motor servo unit.",
-        "Save Reticle": "Custom user reticle storage to SPI flash requires external user calibration file.",
-        "Load Reticle": "Custom user reticle storage requires external user reticle bitmap (.ret) staged on flash.",
-        "Save Overlays to RED MINI-MAG": "Overlay profile export requires external user profile slot on media.",
-        "Load Overlays from Media": "Overlay profile import requires custom .ovl profile present on media.",
-        "Import CDL": "Requires .cdl / .edl file placed on RED MINI-MAG media.",
-        "Export CDL": "Requires writable RED MINI-MAG media partition with CDL folder.",
-        "Import 3D LUT (.cube)": "Requires external 33x33x33 .cube LUT file staged on RED MINI-MAG.",
-        "Key Lockout Enabled": "Physical hardware key lockout disabled in virtual brain to allow web tactile button input.",
-        "Key Lockout Disabled": "Physical hardware key lockout disabled in virtual brain to allow web tactile button input.",
-        "Save User Preset to Memory": "User preset saving to EEPROM requires formatted user preset partition.",
-        "Load User Preset": "User preset loading requires saved user preset in internal EEPROM.",
-        "Export Preset to MINI-MAG": "Exporting preset requires valid custom user preset in memory.",
-        "Load Key Profile": "Key profile loading requires custom .key map file on media.",
-        "Save Key Profile": "Key profile export requires custom key profile slot on media.",
+        "Digitizer Test": "Feature unavailable on virtual brain: Requires physical I2C maXTouch digitizer hardware calibration test bench rather than software emulation.",
+        "Touch Calibration": "Feature unavailable on virtual brain: Requires physical touchscreen resistive/capacitive sensor calibration rig rather than software emulation.",
+        "Touchscreen Locked": "Feature disabled on virtual brain: Physical touchscreen digitizer lockout is disabled to permit continuous browser and developer interaction.",
+        "Recalibrate Touch Digitizer": "Feature unavailable on virtual brain: Requires physical analog front-end digitizer calibration hardware rather than software emulation.",
+        "Genlock Offset": "Feature unavailable on virtual brain: Requires physical SMPTE LTC/Genlock master clock signal wired to camera BNC sync pins rather than software emulation.",
+        "Sync Phase": "Feature unavailable on virtual brain: Requires external hardware Genlock master clock generator connected to camera SYNC pins rather than software emulation.",
+        "Phantom +48V ON": "Feature unavailable on virtual brain: Requires physical analog XLR audio preamp hardware with 48V power step-up rather than software emulation.",
+        "Aux 12V DC Out": "Feature unavailable on virtual brain: Requires physical 12V AUX DC LEMO power rail monitoring hardware rather than software emulation.",
+        "RS 24V Run/Stop Out": "Feature unavailable on virtual brain: Requires physical 24V RS LEMO connector hardware rather than software emulation.",
+        "USB 5V Power ON": "Feature unavailable on virtual brain: Requires physical USB host VBUS power distribution hardware rather than software emulation.",
+        "RED Wireless Motor Driver": "Feature unavailable on virtual brain: Requires physical RED W.M.D. RF wireless transceiver hardware (2.4 GHz) rather than software emulation.",
+        "Channel 1 (2.4 GHz)": "Feature unavailable on virtual brain: Requires physical 2.4 GHz RF wireless motor driver hardware rather than software emulation.",
+        "Set Focus In/Out Stops": "Feature unavailable on virtual brain: Requires physical mechanical lens motor with optical encoder feedback rather than software emulation.",
+        "Set Aperture Motor Range": "Feature unavailable on virtual brain: Requires physical lens iris motor with potentiometer feedback rather than software emulation.",
+        "Set Zoom Motor Range": "Feature unavailable on virtual brain: Requires physical zoom motor servo unit rather than software emulation.",
+        "Save Reticle": "Feature unavailable on virtual brain: Custom user reticle persistence requires external user calibration file staged on media rather than software emulation.",
+        "Load Reticle": "Feature unavailable on virtual brain: Custom user reticle loading requires external user reticle bitmap (.ret) staged on flash rather than software emulation.",
+        "Save Overlays to RED MINI-MAG": "Feature unavailable on virtual brain: Overlay profile export requires external user profile slot on media rather than software emulation.",
+        "Load Overlays from Media": "Feature unavailable on virtual brain: Overlay profile import requires custom .ovl profile present on media rather than software emulation.",
+        "Import CDL": "Feature unavailable on virtual brain: Requires external .cdl / .edl file placed on RED MINI-MAG media rather than software emulation.",
+        "Export CDL": "Feature unavailable on virtual brain: Requires writable RED MINI-MAG media partition with CDL folder rather than software emulation.",
+        "Import 3D LUT (.cube)": "Feature unavailable on virtual brain: Requires external 33x33x33 .cube LUT file staged on RED MINI-MAG rather than software emulation.",
+        "Key Lockout Enabled": "Feature disabled on virtual brain: Physical tactile key lockout is disabled in emulation to allow web tactile button input.",
+        "Key Lockout Disabled": "Feature disabled on virtual brain: Physical tactile key lockout is disabled in emulation to allow web tactile button input.",
+        "Save User Preset to Memory": "Feature unavailable on virtual brain: User preset saving to EEPROM requires formatted user preset partition rather than software emulation.",
+        "Load User Preset": "Feature unavailable on virtual brain: User preset loading requires saved user preset in internal EEPROM rather than software emulation.",
+        "Export Preset to MINI-MAG": "Feature unavailable on virtual brain: Exporting preset requires valid custom user preset in memory rather than software emulation.",
+        "Load Key Profile": "Feature unavailable on virtual brain: Key profile loading requires custom .key map file on media rather than software emulation.",
+        "Save Key Profile": "Feature unavailable on virtual brain: Key profile export requires custom key profile slot on media rather than software emulation.",
     }
 
     # Official DSMC2 Master Menu Hierarchy
@@ -968,7 +969,7 @@ class RedUiEngine:
         for pattern, reason in self.HARDWARE_LIMITATIONS.items():
             if pattern.lower() in item.lower() or pattern.lower() in full_opt_path.lower():
                 self.show_alert(
-                    title="HARDWARE NOT AVAILABLE",
+                    title="EMULATOR LIMITATION: PHYSICAL HARDWARE REQUIRED",
                     message=f"'{item}' cannot function in the virtual brain emulator.\n{reason}",
                     option_name=item
                 )
@@ -1574,7 +1575,7 @@ class RedUiEngine:
             my += 22
 
         # Status note
-        draw.text((ax1 + 20, ay2 - 58), "Virtual Brain: Feature currently not operational on pure software emulation.", fill=(160, 160, 160), font=FONT_TINY)
+        draw.text((ax1 + 20, ay2 - 58), "Notice: This virtual brain runs in software emulation, not on physical camera hardware.", fill=(255, 180, 60), font=FONT_TINY)
 
         # [ OK / DISMISS ] Button
         bx1, by1 = cx - 50, ay2 - 38
