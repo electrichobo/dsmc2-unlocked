@@ -137,9 +137,19 @@ void rr_main(void)
 		uputs("RR: erase status "); uhex2(st); uputc('\n');
 	}
 
-	/* now ECC OFF for the block-0 raw/Hamming write */
+	/* now ECC OFF for the block-0 raw/Hamming write. VERIFY it took (GET FEATURES 0xee) — the
+	 * loader's _nand_set_internal_ecc (@0x84003200) always reads feature 0x90 back and compares.
+	 * On this part (ID 2c b3) an ECC-mode change can silently not take; writing block 0 with on-die
+	 * ECC still ON corrupts the Hamming-in-spare layout the ROM expects. */
 	NAND_CMD = 0xef; NAND_ADR = 0x90; NAND_DAT = 0; NAND_DAT = 0; NAND_DAT = 0; NAND_DAT = 0;
 	nwait_ready();
+	{
+		unsigned short fv;
+		NAND_CMD = 0xee; NAND_ADR = 0x90; nwait_ready();
+		fv = NAND_DAT; NAND_DAT; NAND_DAT; NAND_DAT;   /* P1 is the ECC-enable bit (0x08) */
+		uputs("RR: ecc-off feature90 "); uhex2(fv & 0xff); uputc('\n');
+		if (fv & 0x08) { uputs("RR: ECC DID NOT TURN OFF — ABORT (block 0 would corrupt)\n"); return; }
+	}
 	NAND_CMD = 0x00;
 
 	for (p = RED_B0_FIRST; p < RED_B0_LAST; p++) {
