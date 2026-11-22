@@ -35,7 +35,7 @@ class HardwareFaultInjector:
 
         elif norm_type in ("DDR_ECC_CORRUPT", "DDR_BITFLIP"):
             # Corrupt single bit in DDR memory (0x80500000)
-            corrupt_addr = kwargs.get("address", 0x80500000)
+            corrupt_addr = kwargs.get("address", self.camera.fw(0x80500000) if hasattr(self.camera, "fw") else 0x80500000)
             try:
                 curr_byte = self.camera.cpu.uc.mem_read(corrupt_addr, 1)[0]
                 flipped_byte = curr_byte ^ 0x01
@@ -104,7 +104,7 @@ class HardwareFaultInjector:
             return {
                 "fault": "WATCHDOG_RESET",
                 "status": "injected",
-                "details": "Watchdog reset triggered: CPU registers reset to boot vector 0x80829F2C."
+                "details": f"Watchdog reset triggered: CPU registers reset to boot vector 0x{getattr(self.camera, 'reset_pc', 0x80829F2C):08X}."
             }
 
         elif norm_type in ("UCD_UV_FAULT",):

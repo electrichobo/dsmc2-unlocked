@@ -5,6 +5,7 @@ Emulator Developer Tools (Console, RCP, RTOS Inspector, MMIO, Faults, Snapshots)
 """
 
 import os
+from typing import Optional
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -18,9 +19,9 @@ from emulator.ui.dashboard import DeveloperDashboard
 class Dsmc2DesktopApp:
     """Main Application Window."""
 
-    def __init__(self, workspace_root: str):
+    def __init__(self, workspace_root: str, camera: Optional[Dsmc2Camera] = None):
         self.workspace_root = os.path.abspath(workspace_root)
-        self.camera = Dsmc2Camera(self.workspace_root)
+        self.camera = camera if camera is not None else Dsmc2Camera(self.workspace_root)
 
         # Initialize root window
         self.root = tk.Tk()
@@ -70,7 +71,7 @@ class Dsmc2DesktopApp:
         self.camera.log_system("[PWR] Powering on RED DSMC2 (Cortex-A8 @ 1GHz)...")
         self.camera.log_system(f"[PWR] Loading firmware from {os.path.basename(self.camera.firmware_slot_dir)} into DDR (0x80000000)...")
         self.camera.load_firmware()
-        self.camera.log_system("[CRT] Reset vector 0x80829F2C -> Initializing C runtime and clearing BSS...")
+        self.camera.log_system(f"[CRT] Reset vector 0x{self.camera.reset_pc:08X} -> Initializing C runtime and clearing BSS...")
         self.screen.refresh()
         self.buttons.refresh_state()
         self.dashboard.update_logs()
@@ -291,9 +292,9 @@ class Dsmc2DesktopApp:
         self.root.mainloop()
 
 
-def launch_gui(workspace_root: str):
+def launch_gui(workspace_root: str, camera: Optional[Dsmc2Camera] = None):
     print("[SYS] Launching RED DSMC2 Virtual Camera GUI...", flush=True)
-    app = Dsmc2DesktopApp(workspace_root)
+    app = Dsmc2DesktopApp(workspace_root, camera=camera)
     app.run()
 
 

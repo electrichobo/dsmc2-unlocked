@@ -24,7 +24,9 @@ class FirmwareInspectionResult:
         format_name: str,
         is_valid: bool,
         is_runnable: bool,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        irq_vector: Optional[int] = None,
+        vector_base: Optional[int] = None,
     ):
         self.filename = filename
         self.size_bytes = size_bytes
@@ -37,6 +39,8 @@ class FirmwareInspectionResult:
         self.is_valid = is_valid
         self.is_runnable = is_runnable
         self.error_message = error_message
+        self.irq_vector = irq_vector
+        self.vector_base = vector_base
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -50,7 +54,9 @@ class FirmwareInspectionResult:
             "format_name": self.format_name,
             "is_valid": self.is_valid,
             "is_runnable": self.is_runnable,
-            "error_message": self.error_message
+            "error_message": self.error_message,
+            "irq_vector": None if self.irq_vector is None else f"0x{self.irq_vector:08X}",
+            "vector_base": None if self.vector_base is None else f"0x{self.vector_base:08X}",
         }
 
 
@@ -59,12 +65,41 @@ class FirmwareManager:
 
     # Standard RED DSMC2 DDR Memory Limits
     DDR_BASE = 0x80000000
-    DDR_SIZE = 512 * 1024 * 1024 # 512 MB
+    DDR_SIZE = 512 * 1024 * 1024 # 512 MB mapped window (physical DDR: 256 MB)
     DDR_LIMIT = DDR_BASE + DDR_SIZE
 
-    # Default DSMC2 Entry Point
+    # Stock 7.4.1 entry (used only when the image header does not carry its own)
     DEFAULT_SP = 0x881D2690
     DEFAULT_RESET_PC = 0x80829F2C
+    DEFAULT_IRQ_VECTOR = 0x80829F00
+
+    LDR_PC_PC_M4 = 0xE51FF004    # ldr pc, [pc, #-4]: relinked-image base stub, next word = vectors
+    LDR_PC_VEC = 0xE59FF024      # ldr pc, [pc, #0x24]: vector slot k loads word k + 11
+
+    @classmethod
+    def parse_vectors(cls, data: bytes, base: int = DDR_BASE) -> Optional[Dict[str, int]]:
+        """Read SP / reset PC / IRQ handler from a DSMC2 vector header.
+
+        Stock header (at the base): ``b +0x20`` then 7x ``ldr pc,[pc,#0x24]``, ``ldr sp,[pc]``,
+        ``ldr pc,[pc]``, word 10 = SP, word 11 = reset PC, words 12..18 = handler table (IRQ =
+        word 17). A relinked image whose vectors moved starts with the stub
+        ``ldr pc,[pc,#-4]; .word <vectors>`` -- followed once.
+        """
+        off = 0
+        if len(data) >= 8:
+            w0, w1 = struct.unpack_from("<II", data, 0)
+            if w0 == cls.LDR_PC_PC_M4 and base <= w1 < base + len(data) - 64 and w1 % 32 == 0:
+                off = w1 - base
+        if len(data) < off + 76:
+            return None
+        w = struct.unpack_from("<19I", data, off)
+        sp, pc = w[10], w[11]
+        if not (cls.DDR_BASE <= sp < cls.DDR_LIMIT and cls.DDR_BASE <= pc < cls.DDR_LIMIT):
+            return None
+        out = {"sp": sp, "reset_pc": pc, "vector_base": base + off}
+        if w[6] == cls.LDR_PC_VEC and cls.DDR_BASE <= w[17] < cls.DDR_LIMIT:
+            out["irq_vector"] = w[17]
+        return out
 
     @classmethod
     def inspect(cls, source: Union[str, bytes], filename: str = "firmware.bin") -> FirmwareInspectionResult:
@@ -101,25 +136,17 @@ class FirmwareManager:
                 is_valid=False, is_runnable=False, error_message="File too small for ARM vector table (< 64 bytes)"
             )
 
-        # Inspect first 16 32-bit words (64 bytes)
-        words = struct.unpack("<16I", data[:64])
-        word0 = words[0]
-        sp = words[10]
-        reset_pc = words[11]
+        word0 = struct.unpack_from("<I", data, 0)[0]
 
-        # Check for standard RED DSMC2 Vector Table
-        # In stock DSMC2 DDR binaries:
-        # Word 10 = Initial Stack Pointer (e.g. 0x881D2690)
-        # Word 11 = Reset Vector PC (e.g. 0x80829F2C)
-        is_sp_valid = cls.DDR_BASE <= sp < cls.DDR_LIMIT
-        is_pc_valid = cls.DDR_BASE <= reset_pc < cls.DDR_LIMIT
-
-        if is_sp_valid and is_pc_valid:
-            format_name = "RED DSMC2 DDR Memory Image (.mem)"
+        vec = cls.parse_vectors(data)
+        if vec is not None:
+            relinked = vec["vector_base"] != cls.DDR_BASE
+            format_name = "RED DSMC2 DDR Memory Image (.mem)" + (" [relinked, moved vectors]" if relinked else "")
             return FirmwareInspectionResult(
                 filename=filename, size_bytes=size, sha256=sha, md5=md5,
-                sp=sp, reset_pc=reset_pc, format_name=format_name,
-                is_valid=True, is_runnable=True
+                sp=vec["sp"], reset_pc=vec["reset_pc"], format_name=format_name,
+                is_valid=True, is_runnable=True,
+                irq_vector=vec.get("irq_vector"), vector_base=vec["vector_base"],
             )
 
         # Check if first word is an ARM branch (0xEAxxxxxx) or vector branch
@@ -185,10 +212,9 @@ class FirmwareManager:
         camera.bus.load_binary(cls.DDR_BASE, fw_bytes)
 
         # Configure reset vector and supervisor mode
-        camera.cpu.pc = meta.reset_pc
-        camera.cpu.sp = meta.sp
-        from emulator.core.cpu import ArmCpu
-        camera.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0
+        camera.apply_entry(fw_bytes)
+        camera.cpu.pc = camera.reset_pc = meta.reset_pc
+        camera.cpu.sp = camera.reset_sp = meta.sp
 
         # Execute initial instruction slice
         try:

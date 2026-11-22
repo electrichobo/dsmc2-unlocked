@@ -84,7 +84,7 @@ The `SystemBus` models the physical address space of the Texas Instruments DM372
 | `0x4FFE8000 - 0x4FFE8FFF` | 4 KB | IOB1 C2C Doorbell | `IobDoorbellDevice` |
 | `0x6D000000 - 0x6D000FFF` | 4 KB | OMAP SDRAM Controller (`SDRC`) | `OmapSdrc` |
 | `0x6E000000 - 0x6E000FFF` | 4 KB | OMAP GPMC Controller & NAND FIFO | `OmapGpmc` |
-| `0x80000000 - 0x9FFFFFFF` | 512 MB | System DDR SDRAM (128 MB on physical hardware) | Mapped memory |
+| `0x80000000 - 0x9FFFFFFF` | 512 MB | System DDR SDRAM (256 MB on physical hardware: `0x80000000 - 0x8FFFFFFF`) | Mapped memory |
 
 ---
 

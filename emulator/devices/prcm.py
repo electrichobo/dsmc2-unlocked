@@ -29,6 +29,8 @@ class OmapPrcm(Device):
             # Dynamic DPLL lock sequence:
             # Polling at 0x80674a00 checks for unlock (bit 0 == 0)
             # Polling at 0x80674a64 checks for lock (bit 0 == 1)
+            if getattr(self.cpu, "addr_map", None) is not None:
+                pc = self.cpu.addr_map.to_stock(pc)
             if pc == 0x80674A00:
                 return 0x00
             return 0x01
