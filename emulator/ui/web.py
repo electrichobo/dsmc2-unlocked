@@ -4129,10 +4129,11 @@ def find_free_port(start_port: int = 8765, max_attempts: int = 20) -> int:
     return start_port
 
 
-def launch_web_studio(workspace_root: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True):
+def launch_web_studio(workspace_root: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
+                      camera: Optional[Dsmc2Camera] = None):
     """Launch the Web-Based RED DSMC2 Virtual Camera Studio."""
     free_port = find_free_port(port)
-    studio = WebStudio(workspace_root, host=host, port=free_port)
+    studio = WebStudio(workspace_root, host=host, port=free_port, camera=camera)
 
     # Start camera worker
     studio.start_camera()

@@ -11,6 +11,8 @@ import time
 from typing import Optional, List, Dict, Callable, Any, Tuple, Union, Set, Iterable
 
 from emulator.core.cpu import ArmCpu
+from emulator.core.addrmap import AddrMap
+from emulator.core.firmware import FirmwareManager
 from emulator.core.bus import SystemBus
 from emulator.devices.intc import OmapIntc
 from emulator.devices.prcm import OmapPrcm
@@ -58,9 +60,14 @@ from emulator.core.snapshot import SnapshotManager
 
 
 class Dsmc2Camera:
-    """The complete authentic RED DSMC2 Virtual Camera."""
+    """The complete authentic RED DSMC2 Virtual Camera.
+
+    Every firmware address below is a stock 7.4.1 address. A relinked image with moved
+    sections is run with its ``addr_map`` (``AddrMap``); all of them go through ``self.fw``.
+    """
 
     # ThreadX Scheduler Idle Loop Addresses
+    IDLE_LOOP_ENTRY = 0x80E9C368
     IDLE_LOOP_PCS = {0x80E9C368, 0x80E9C36C, 0x80E9C370}
 
     # Driver-Init Dispatch Harness Entry Points (FW 7.4.1)
@@ -73,8 +80,27 @@ class Dsmc2Camera:
     TX_THREAD_CURRENT_PTR = 0x8149CE60
     TX_THREAD_EXECUTE_PTR = 0x8149DDE8
 
-    def __init__(self, workspace_root: str):
+    # ThreadX TCBs this build creates by 1G instructions (static .data/.bss objects)
+    TCB_ADDRS = (0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0, 0x81E51F5C, 0x814C6B28)
+
+    # Seeded RAM cells: NAND driver state + CAMERA_TYPE fallback
+    NAND_DRV_INIT_FLAG = 0x81EF7818
+    NAND_DRV_ID = 0x81EF7820
+    NAND_DRV_GEOMETRY_PTR = 0x81EF7824
+    NAND_GEOMETRY_STRUCT = 0x80FCEBF6
+    CAMERA_TYPE_FALLBACK = 0x80FF591C
+
+    # IOB mailbox windows the doorbell models read
+    IOB0_MAILBOX = 0x800B0FFC
+    IOB1_MAILBOX = 0x800B17FC
+
+    def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
+        self.addr_map = addr_map if addr_map is not None else AddrMap()
+        self.firmware_path: Optional[str] = None   # None: the slot's dsmc_program.mem
+        self.reset_pc = self.fw(FirmwareManager.DEFAULT_RESET_PC)
+        self.reset_sp = FirmwareManager.DEFAULT_SP
+        self.irq_vector = self.fw(FirmwareManager.DEFAULT_IRQ_VECTOR)
         self.firmware_slot_dir = os.path.join(self.workspace_root, "firmware_store", "unpacked", "scarlet_w_7_4_1", "slot")
         self.persistent_dir = os.path.join(self.workspace_root, "persistent_store")
 
@@ -114,6 +140,45 @@ class Dsmc2Camera:
         self.boot_progress = 0.0
         self.on_state_change: Optional[Callable[[str], None]] = None
 
+    def fw(self, stock_addr: int) -> int:
+        """Stock 7.4.1 firmware address -> address in the loaded image (identity without a map)."""
+        return self.addr_map.to_fw(stock_addr)
+
+    def to_stock(self, fw_addr: int) -> int:
+        """Address in the loaded image -> stock 7.4.1 address."""
+        return self.addr_map.to_stock(fw_addr)
+
+    def is_idle_pc(self, pc: int) -> bool:
+        return self.to_stock(pc) in self.IDLE_LOOP_PCS
+
+    def set_addr_map(self, addr_map: Optional[AddrMap]):
+        """Switch the address map; re-installs the address-bound hooks."""
+        self.addr_map = addr_map if addr_map is not None else AddrMap()
+        self.cpu.addr_map = self.addr_map
+        self.cpu.irq_vector = self.irq_vector = self.fw(FirmwareManager.DEFAULT_IRQ_VECTOR)
+        self.reset_pc = self.fw(FirmwareManager.DEFAULT_RESET_PC)
+        self._install_idle_wake_hook()
+
+    def _install_idle_wake_hook(self):
+        """Fast IRQ wake: idle loop with no ready thread and a pending IRQ stops Unicorn."""
+        if getattr(self, "_idle_wake_hook_handle", None) is not None:
+            try:
+                self.cpu.mu.hook_del(self._idle_wake_hook_handle)
+            except Exception:
+                pass
+        exec_ptr_addr = self.fw(self.TX_THREAD_EXECUTE_PTR)
+        idle = self.fw(self.IDLE_LOOP_ENTRY)
+
+        def _idle_wake_hook(uc, address, size, user_data):
+            try:
+                exec_ptr = struct.unpack("<I", uc.mem_read(exec_ptr_addr, 4))[0]
+            except Exception:
+                exec_ptr = 0
+            if exec_ptr == 0 and self.intc.has_pending_irq() and self.cpu.are_interrupts_enabled():
+                uc.emu_stop()
+
+        self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, idle, idle)
+
     def _init_hardware(self):
         """Cleanly initialize or re-initialize SoC hardware, registers, and memory mappings."""
         # Save previous log lines if re-initializing
@@ -121,21 +186,15 @@ class Dsmc2Camera:
 
         # 1. Initialize Core Architecture
         self.cpu = ArmCpu()
+        self.cpu.addr_map = self.addr_map
+        self.cpu.irq_vector = self.irq_vector
         self.bus = SystemBus(self.cpu)
 
         # 2. Interrupt Controller
         self.intc = OmapIntc()
 
-        # Fast IRQ wake hook: if waiting in scheduler idle loop with no ready thread and pending IRQ, wake Unicorn
-        def _idle_wake_hook(uc, address, size, user_data):
-            try:
-                exec_ptr = struct.unpack("<I", uc.mem_read(self.TX_THREAD_EXECUTE_PTR, 4))[0]
-            except Exception:
-                exec_ptr = 0
-            if exec_ptr == 0 and self.intc.has_pending_irq() and self.cpu.are_interrupts_enabled():
-                uc.emu_stop()
-
-        self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, 0x80E9C368, 0x80E9C368)
+        self._idle_wake_hook_handle = None
+        self._install_idle_wake_hook()
 
         # 3. L4 Interconnect AP, System Control Module (SCM), Clock Management (PRCM), and Wakeup PRM
         self.l4_core_ap = OmapL4Ap(name="L4_CORE_AP", base_addr=OmapL4Ap.BASE_ADDR_L4_CORE)
@@ -318,7 +377,7 @@ class Dsmc2Camera:
             core_id=C2cTransport.CORE_IOB0,
             bus=self.bus,
             coprocessor=self.iob0,
-            mailbox_base_addr=0x800B0FFC
+            mailbox_base_addr=self.fw(self.IOB0_MAILBOX)
         )
         self.bus.register_device(IobDoorbellDevice.BASE_ADDR_IOB0, IobDoorbellDevice.SIZE, self.iob0_doorbell)
 
@@ -326,7 +385,7 @@ class Dsmc2Camera:
             core_id=C2cTransport.CORE_IOB1,
             bus=self.bus,
             coprocessor=self.iob1,
-            mailbox_base_addr=0x800B17FC
+            mailbox_base_addr=self.fw(self.IOB1_MAILBOX)
         )
         self.bus.register_device(IobDoorbellDevice.BASE_ADDR_IOB1, IobDoorbellDevice.SIZE, self.iob1_doorbell)
 
@@ -353,30 +412,41 @@ class Dsmc2Camera:
         self.uarts[4].completed_lines.append(message)
         print(message, flush=True)
 
+    def apply_entry(self, fw_bytes: bytes):
+        """Reset PC / SP / IRQ handler from the image's vector header (stock map as fallback)."""
+        vec = FirmwareManager.parse_vectors(fw_bytes)
+        if vec is not None:
+            self.reset_pc, self.reset_sp = vec["reset_pc"], vec["sp"]
+            self.irq_vector = vec.get("irq_vector", self.fw(FirmwareManager.DEFAULT_IRQ_VECTOR))
+        else:
+            self.reset_pc = self.fw(FirmwareManager.DEFAULT_RESET_PC)
+            self.reset_sp = FirmwareManager.DEFAULT_SP
+            self.irq_vector = self.fw(FirmwareManager.DEFAULT_IRQ_VECTOR)
+        self.entry_from_header = vec is not None
+        self.cpu.irq_vector = self.irq_vector
+        self.cpu.pc = self.reset_pc
+        self.cpu.sp = self.reset_sp
+        self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0 # Supervisor mode, IRQ/FIQ disabled
+
     def load_firmware(self, firmware_path: Optional[str] = None):
         """Load genuine RED DSMC2 program into DDR RAM at 0x80000000."""
         if firmware_path is None:
-            firmware_path = os.path.join(self.firmware_slot_dir, "dsmc_program.mem")
+            firmware_path = self.firmware_path or os.path.join(self.firmware_slot_dir, "dsmc_program.mem")
 
         with open(firmware_path, "rb") as f:
             fw_bytes = f.read()
 
         self.bus.load_binary(0x80000000, fw_bytes)
+        self.apply_entry(fw_bytes)
 
-        # Reset vector state
-        self.cpu.pc = 0x80829F2C
-        self.cpu.sp = 0x881D2690
-        self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0 # Supervisor mode, IRQ/FIQ disabled
-
-        # Seed authentic NAND flash geometry descriptor in DDR (Micron MT29F8G08 256MB SLC)
-        # 0x81ef7818 = 1 (driver initialized flag)
-        # 0x81ef7820 = 0x2C (Micron), 0x81ef7821 = 0xBA (256MB SLC)
-        # 0x81ef7824 = 0x80FCEBF6 (pointer to geometry struct: page=2048, blk_pages=64, blks=2048, oob=64)
-        self.bus.write(0x81EF7818, 4, 0x00000001)
-        self.bus.write(0x81EF7820, 4, 0x0000BA2C)
-        self.bus.write(0x81EF7824, 4, 0x80FCEBF6)
-        # Seed default CAMERA_TYPE fallback pointer (0x80FF591C -> 0x0016 Scarlet-W)
-        self.bus.write(0x80FF591C, 2, 0x0016)
+        # Seed authentic NAND flash geometry descriptor in DDR (Micron MT29F8G08 256MB SLC):
+        # driver initialized flag = 1, ID = 0x2C (Micron) / 0xBA (256MB SLC), pointer to the
+        # geometry struct (page=2048, blk_pages=64, blks=2048, oob=64)
+        self.bus.write(self.fw(self.NAND_DRV_INIT_FLAG), 4, 0x00000001)
+        self.bus.write(self.fw(self.NAND_DRV_ID), 4, 0x0000BA2C)
+        self.bus.write(self.fw(self.NAND_DRV_GEOMETRY_PTR), 4, self.fw(self.NAND_GEOMETRY_STRUCT))
+        # Seed default CAMERA_TYPE fallback (-> 0x0016 Scarlet-W)
+        self.bus.write(self.fw(self.CAMERA_TYPE_FALLBACK), 2, 0x0016)
 
         # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
         splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
@@ -403,9 +473,9 @@ class Dsmc2Camera:
         pc = self.cpu.pc
 
         # Check for interrupt delivery if in scheduler idle loop
-        if pc in self.IDLE_LOOP_PCS and self.intc.has_pending_irq():
+        if self.is_idle_pc(pc) and self.intc.has_pending_irq():
             if self.cpu.are_interrupts_enabled():
-                self.cpu.inject_irq(vector=0x80829F00)
+                self.cpu.inject_irq()
 
         # Run CPU slice. The wall-clock timeout guarantees the call returns even if
         # the core halts (WFI with no interrupt source) and never retires `count`.
@@ -439,9 +509,9 @@ class Dsmc2Camera:
         while done < initial_instructions:
             n = min(step_size, initial_instructions - done)
             pc = self.cpu.pc
-            if pc in self.IDLE_LOOP_PCS and self.intc.has_pending_irq():
+            if self.is_idle_pc(pc) and self.intc.has_pending_irq():
                 if self.cpu.are_interrupts_enabled():
-                    self.cpu.inject_irq(vector=0x80829F00)
+                    self.cpu.inject_irq()
             self.cpu.run(self.cpu.pc, 0, count=n)
             done += n
             self.boot_progress = done / initial_instructions
@@ -514,9 +584,9 @@ class Dsmc2Camera:
 
                 n = min(step_size, max_instructions - done)
                 pc = self.cpu.pc
-                if pc in self.IDLE_LOOP_PCS and self.intc.has_pending_irq():
+                if self.is_idle_pc(pc) and self.intc.has_pending_irq():
                     if self.cpu.are_interrupts_enabled():
-                        self.cpu.inject_irq(vector=0x80829F00)
+                        self.cpu.inject_irq()
 
                 self.cpu.run(self.cpu.pc, 0, count=n)
                 done += n
@@ -559,6 +629,8 @@ class Dsmc2Camera:
         support helpers with ``mov r0, #ret; bx lr``, sets ``PC = entry_pc``, ``SP = 0x881D2000``,
         and ``LR = 0x80E9C368``, executes until return, records all ``init_parallel`` tasks
         and ``wait_for_init_flags`` barriers, and restores all patched code bytes afterward.
+        ``entry_pc``, the stub addresses and the reported ``fn_ptr`` are stock 7.4.1 addresses
+        (translated through the address map).
         """
         if camera_type is None:
             try:
@@ -639,7 +711,7 @@ class Dsmc2Camera:
                     name = f"0x{name_ptr:08X}"
             dispatched.append({
                 "name": name,
-                "fn_ptr": fn_ptr,
+                "fn_ptr": c.to_stock(fn_ptr),
                 "flag": flag,
                 "dep": dep,
             })
@@ -649,7 +721,8 @@ class Dsmc2Camera:
             waits.append(mask)
 
         try:
-            for addr, ret_val in stubs.items():
+            for stock_addr, ret_val in stubs.items():
+                addr = self.fw(stock_addr)
                 saved_code[addr] = bytes(self.bus.read_mem(addr, 8))
                 v = int(ret_val) & 0xFFFF
                 if 0 <= v <= 0xFF:
@@ -658,11 +731,11 @@ class Dsmc2Camera:
                     instr0 = 0xE3000000 | ((v & 0xF000) << 4) | (v & 0x0FFF)  # movw r0, #v
                 self.bus.write_mem(addr, struct.pack("<II", instr0, 0xE12FFF1E))
 
-            hook_handles.append(self.add_pc_hook(self.INIT_PARALLEL_ADDR, _on_init_parallel))
-            hook_handles.append(self.add_pc_hook(self.WAIT_FOR_INIT_FLAGS_ADDR, _on_wait_flags))
+            hook_handles.append(self.add_pc_hook(self.fw(self.INIT_PARALLEL_ADDR), _on_init_parallel))
+            hook_handles.append(self.add_pc_hook(self.fw(self.WAIT_FOR_INIT_FLAGS_ADDR), _on_wait_flags))
 
-            sentinel_lr = 0x80E9C368
-            self.cpu.pc = int(entry_pc)
+            sentinel_lr = self.fw(self.IDLE_LOOP_ENTRY)
+            self.cpu.pc = self.fw(int(entry_pc))
             self.cpu.sp = 0x881D2000
             self.cpu.lr = sentinel_lr
             completed = self.boot_until(sentinel_lr, max_instructions=max_instructions, step_size=min(10_000, max_instructions))
@@ -747,7 +820,7 @@ class Dsmc2Camera:
             self.log_system("[PWR] Powering on RED DSMC2 (Cortex-A8 @ 1GHz)...")
             self.log_system(f"[PWR] Loading firmware from {os.path.basename(self.firmware_slot_dir)} into DDR (0x80000000)...")
             self.load_firmware()
-            self.log_system("[CRT] Reset vector 0x80829F2C -> Initializing C runtime and clearing BSS...")
+            self.log_system(f"[CRT] Reset vector 0x{self.reset_pc:08X} -> Initializing C runtime and clearing BSS...")
             self.boot(initial_instructions=45_000_000, chunk=3_000_000, progress_cb=progress_cb)
             self.log_system("[RTOS] ThreadX RTOS kernel initialized.")
             threads = self.get_threads()
@@ -873,7 +946,8 @@ class Dsmc2Camera:
         if not self.is_booted:
             return threads
 
-        tcbs = [0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0, 0x81E51F5C, 0x814C6B28]
+        tcbs = [self.fw(a) for a in self.TCB_ADDRS]
+        mapped = not self.addr_map.is_identity
         state_names = {
             0: "READY", 1: "COMPLETED", 2: "TERMINATED", 3: "SUSPENDED",
             4: "SLEEP", 5: "QUEUE", 6: "SEMAPHORE", 7: "EVENT_FLAG",
@@ -902,7 +976,7 @@ class Dsmc2Camera:
                 except Exception:
                     name = "UNKNOWN"
 
-                threads.append({
+                t = {
                     "address": f"0x{tcb:08X}",
                     "name": name,
                     "state": state_names.get(state, f"STATE_{state}"),
@@ -911,7 +985,16 @@ class Dsmc2Camera:
                     "sp": f"0x{sp:08X}",
                     "stack_range": f"0x{stk_start:08X}-0x{stk_end:08X}",
                     "run_count": run_cnt,
-                })
+                }
+                if mapped:
+                    st = self.to_stock
+                    t["stock"] = {
+                        "address": f"0x{st(tcb):08X}",
+                        "entry": f"0x{st(entry):08X}",
+                        "sp": f"0x{st(sp):08X}",
+                        "stack_range": f"0x{st(stk_start):08X}-0x{st(stk_end):08X}",
+                    }
+                threads.append(t)
             except Exception:
                 continue
 
@@ -951,8 +1034,8 @@ class Dsmc2Camera:
                     except Exception:
                         pass
         elif fault_type == "watchdog_reset":
-            self.cpu.pc = 0x80829F2C
-            self.cpu.sp = 0x881D2690
+            self.cpu.pc = self.reset_pc
+            self.cpu.sp = self.reset_sp
             self.cpu.cpsr = ArmCpu.MODE_SVC | 0xC0
             self.instruction_count = 0
             self.is_booted = False

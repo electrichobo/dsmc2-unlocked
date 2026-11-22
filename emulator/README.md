@@ -83,7 +83,7 @@ The automated test suite (`emulator/tests/`, 114 tests) verifies these capabilit
 
 Review these limits before using the emulator for firmware safety analysis (see [docs/FIDELITY_MATRIX.md](docs/FIDELITY_MATRIX.md) for full details):
 
-- **Mapped DDR size (`512 MB` vs `128 MB` physical)**: `SystemBus` maps 512 MB at `0x80000000` (`0x80000000`–`0x9FFFFFFF`). Physical DSMC2 hardware has 128 MB of DDR. Out-of-range pointer accesses above 128 MB fault on physical hardware, but they read and write without error in the default virtual map.
+- **Mapped DDR size (`512 MB` vs `256 MB` physical)**: `SystemBus` maps 512 MB at `0x80000000` (`0x80000000`–`0x9FFFFFFF`). Physical DSMC2 hardware has 256 MB of DDR (`0x80000000`–`0x8FFFFFFF`; the initial stack top `0x881D2690` and the heap ceiling sit above the 128 MB line). Accesses at `0x90000000` and above fault on physical hardware, but they read and write without error in the default virtual map.
 - **Early boot park (`0x80E9C368`)**: At the end of the default 45,000,000-instruction `boot()` budget, the CPU parks at `0x80E9C368` in the ThreadX idle loop before late driver initialization finishes. Globals populated by later stages—such as `hw_cap` at `0x815811F4`—still read `0x00000000` at this point. Writing a value to `0x815811F4` while parked at `0x80E9C368` only tests the RAM map, not firmware behavior. Use `boot_until()` and PC/memory hooks to test code paths after initialization.
 - **REDCODE wavelet compression**: The R3D container structure and `.rmd` XML sidecars match the format specification, but the FPGA wavelet bitstream is not gate-level emulated.
 - **Sensor image feed**: The display uses a reference frame (`emulator/res/sensor_feed_cinema.jpg`) rather than a physical CMOS sensor simulation.
@@ -157,6 +157,20 @@ python -m emulator.cli run --web-port 8765 --no-browser
    ```
 2. Inspect the JSON output for `pc`, `sp`, `cpsr`, `threads`, and `unknown_mmio_count`.
 
+### Boot a Relinked Image (Moved Sections)
+vbrain names firmware addresses (reset/IRQ handlers, ThreadX globals and TCBs, the idle loop, seeded RAM cells, stubbed helpers) as stock 7.4.1 addresses. A relinked image whose sections moved ships an `addrmap.tsv` (`stock_start stock_end layout_start section` per row; addresses outside every row are fixed: MMIO, heap, DMA pool, stack). Pass it with `--addr-map` (`boot`, `run`, `inspect`): every one of those addresses is translated, and the result also carries the final PC/SP and each thread's TCB/entry/stack mapped back to stock addresses. Reset PC, SP and the IRQ handler come from the image's own vector header; a base stub `ldr pc, [pc, #-4]; .word <vectors>` is followed.
+1. Boot the relinked image and compare it with a stock reference run:
+   ```bash
+   python -m emulator.cli boot -f stock.mem -n 1000000000 --json > stock_1G.json
+   python -m emulator.cli boot -f shifted.bin --addr-map addrmap.tsv -n 1000000000 --expect stock_1G.json
+   ```
+   `--expect` exits non-zero unless the status, the stock-mapped PC/SP and every thread (name, state, priority, run count, TCB/entry/stack) match.
+2. If they differ, find the first instruction where the two stop doing the same thing:
+   ```bash
+   python -m emulator.cli diverge -f shifted.bin --addr-map addrmap.tsv -r stock.mem -n 1000000000
+   ```
+   Both images run in lockstep with `boot()`'s slicing; a slice whose end state differs is replayed and single-stepped. A divergence is control flow (PC that does not map back, CPSR), an MMIO write that differs, or a CPU fault; register values that differ without mapping back are listed as the soft differences that led there.
+
 ### Save and Restore State Snapshots
 1. Save a snapshot to disk:
    ```bash
@@ -196,7 +210,7 @@ All emulator code, tests, documentation, assets, and test configuration reside i
 
 ```
 emulator/
-├── core/                  # CPU (Unicorn JIT), SystemBus, FirmwareManager, SnapshotManager, Faults
+├── core/                  # CPU (Unicorn JIT), SystemBus, FirmwareManager, AddrMap, divergence finder, SnapshotManager, Faults
 ├── devices/               # OMAP3630 peripherals (INTC, PRCM, GPTimer, sDMA, McSPI, UART, I2C, GPMC, GPIO, DSS)
 ├── coprocessors/          # Xtensa (IOB0, IOB1, ISP), TI C64x+ DSP, and C2C interconnect
 ├── rcp/                   # RED Command Protocol parser, TCP server, and script engine

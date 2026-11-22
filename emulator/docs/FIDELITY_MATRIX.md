@@ -49,10 +49,10 @@ This matrix lists the fidelity level of each component in the emulator.
 
 ## Fidelity Caveats and Flash-Safety Constraints
 
-### 1. DDR Memory Mapping Size (`512 MB` Mapped vs `128 MB` Physical)
-- `SystemBus` maps 512 MB at `0x80000000` (`0x80000000`–`0x9FFFFFFF`). Physical DSMC2 hardware has 128 MB of DDR.
-- The 512 MB window accommodates high-address stack pointers (`0x881D2690`) and framebuffer windows (`0x8E200000`).
-- **Caveat**: Pointer or heap accesses above 128 MB do not fault in the emulator, but those accesses cause a hardware Data Abort on physical hardware. Do not use non-faulting accesses above 128 MB as proof of hardware memory safety.
+### 1. DDR Memory Mapping Size (`512 MB` Mapped vs `256 MB` Physical)
+- `SystemBus` maps 512 MB at `0x80000000` (`0x80000000`–`0x9FFFFFFF`). Physical DSMC2 hardware has 256 MB of DDR (`0x80000000`–`0x8FFFFFFF`).
+- The initial stack top (`0x881D2690`), the heap ceiling and framebuffer windows (`0x8E200000`) all lie inside the physical 256 MB.
+- **Caveat**: Accesses at `0x90000000` and above do not fault in the emulator, but they cause a hardware Data Abort on physical hardware. Do not use non-faulting accesses above 256 MB as proof of hardware memory safety.
 
 ### 2. Full-Boot Park (`0x80E9C368`) & Dispatch-Path Thread Harness
 - At the end of the default 45,000,000-instruction `boot()` budget, the CPU stops in `_tx_thread_schedule` (`0x80E9C368`, `SP = 0x814CAB14`, `CPSR = 0x60000053`), which spins waiting for a non-zero `_tx_thread_execute_ptr`.

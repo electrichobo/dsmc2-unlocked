@@ -6,6 +6,8 @@ Targets Cortex-A8 (ARMv7-A) architecture of TI DM3725 / OMAP3630 SoC.
 import unicorn
 from unicorn import arm_const
 
+from emulator.core.addrmap import AddrMap
+
 
 class ArmCpu:
     """Wraps Unicorn ARM engine with DSMC2-specific exception and mode handling."""
@@ -18,17 +20,22 @@ class ArmCpu:
     MODE_UND = 0x1B
     MODE_SYS = 0x1F
 
+    # OMAP3 PPA ROM TrustZone monitor call sites (smc #0), stock 7.4.1
+    SMC_PCS = (0x80A294B0, 0x80A294AC)
+    DEFAULT_IRQ_VECTOR = 0x80829F00
+
     def __init__(self):
         self.mu = unicorn.Uc(unicorn.UC_ARCH_ARM, unicorn.UC_MODE_ARM)
         self.uc = self.mu # Convenient alias
+        self.addr_map = AddrMap()               # stock -> loaded-image addresses (camera sets it)
+        self.irq_vector = self.DEFAULT_IRQ_VECTOR  # IRQ handler of the loaded image
         self._setup_exception_hooks()
 
     def _setup_exception_hooks(self):
         """Install exception hooks for OMAP TrustZone SMC calls."""
         def hook_intr(uc, intno, user_data):
             pc = uc.reg_read(arm_const.UC_ARM_REG_PC)
-            # OMAP3 PPA ROM TrustZone monitor calls (smc #0)
-            if pc in (0x80a294b0, 0x80a294ac):
+            if self.addr_map.to_stock(pc) in self.SMC_PCS:
                 uc.reg_write(arm_const.UC_ARM_REG_R0, 0)
                 uc.reg_write(arm_const.UC_ARM_REG_PC, pc + 4)
 
@@ -96,11 +103,13 @@ class ArmCpu:
         """Check if IRQ bit (bit 7) is clear in CPSR."""
         return (self.cpsr & 0x80) == 0
 
-    def inject_irq(self, vector: int = 0x80829F00) -> bool:
+    def inject_irq(self, vector: int = None) -> bool:
         """
-        Deliver a hardware IRQ exception to the CPU.
-        Returns True if IRQ was accepted, False if masked.
+        Deliver a hardware IRQ exception to the CPU (to ``vector``, default the loaded image's
+        IRQ handler). Returns True if IRQ was accepted, False if masked.
         """
+        if vector is None:
+            vector = self.irq_vector
         if not self.are_interrupts_enabled():
             return False
 

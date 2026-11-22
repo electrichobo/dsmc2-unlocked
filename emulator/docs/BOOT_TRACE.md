@@ -164,7 +164,7 @@ At this point, the four threads have the following states:
 `SystemInitThread` has not completed its late initialization stages at this point. As a result, late-stage globals such as `hw_cap` (`0x815811F4`) still contain `0x00000000`.
 
 ### 6.2 Why Static Memory Pokes Do Not Prove Flash Safety
-Writing a value to `0x815811F4` while the CPU sits at `0x80E9C368` only modifies RAM. The firmware does not read `0x815811F4` while in the idle loop. When execution continues into the initialization routine, the firmware overwrites the modified value. In addition, the emulator maps 512 MB of DDR at `0x80000000`, whereas physical hardware has 128 MB of DDR. Out-of-range pointer accesses above 128 MB do not fault in the default virtual memory map.
+Writing a value to `0x815811F4` while the CPU sits at `0x80E9C368` only modifies RAM. The firmware does not read `0x815811F4` while in the idle loop. When execution continues into the initialization routine, the firmware overwrites the modified value. In addition, the emulator maps 512 MB of DDR at `0x80000000`, whereas physical hardware has 256 MB of DDR. Out-of-range pointer accesses above 256 MB do not fault in the default virtual memory map.
 
 ### 6.3 How to Verify a Behavioral Modification
 Follow these steps to verify that the firmware uses a modified global variable:
