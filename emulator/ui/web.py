@@ -111,7 +111,7 @@ class ScreenCompositor:
             is_blank = (fb_bytes == self._zero_fb_buf)
 
             if not is_blank and len(fb_bytes) >= self.NATIVE_WIDTH * self.NATIVE_HEIGHT * 4:
-                img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes)
+                img = Image.frombytes("RGBA", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), fb_bytes).convert("RGB")
             elif self.sensor_feed_image:
                 img = self.sensor_feed_image.copy()
             elif self.splash_image:
@@ -119,9 +119,11 @@ class ScreenCompositor:
             else:
                 img = Image.new("RGB", (self.NATIVE_WIDTH, self.NATIVE_HEIGHT), (15, 15, 15))
 
-            # Draw RED HUD
+            # Draw RED HUD (respecting overlay_mode)
             try:
-                self._draw_hud(img)
+                overlay_mode = getattr(self.redui, "overlay_mode", "Standard")
+                if overlay_mode != "Clean":
+                    self._draw_hud(img)
             except Exception as e:
                 print(f"[Compositor] Error drawing HUD: {e}")
 
@@ -266,7 +268,7 @@ class ScreenCompositor:
         return img
 
     def _draw_hud(self, img: Image.Image):
-        draw = ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(img, "RGBA")
         rcp = self.camera.rcp
         fps = rcp.state.get(rcp.PARAM_FPS, "23.98")
         shutter = rcp.state.get(rcp.PARAM_SHUTTER, "1/48")
