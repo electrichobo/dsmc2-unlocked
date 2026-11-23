@@ -94,6 +94,18 @@ class Dsmc2Camera:
     IOB0_MAILBOX = 0x800B0FFC
     IOB1_MAILBOX = 0x800B17FC
 
+    # Late driver-init bring-up (thread_DRIVER_entry @0x8066C92C). The Driver thread spawns
+    # ThreadX ``init_parallel_thread`` children; each sets a bit in the primary init event-flag
+    # group @0x81E54834 (+0x08 = current set flags) on success, and ``wait_for_init_flags``
+    # @0x8066C7D8 blocks the Driver thread on ``_tx_event_flags_get`` until named bits set.
+    # (sdk findings/boot/BOOT_FLOW_MAP.md.) Bits: RTC 0x1, FileX 0x2, CRYPT 0x4, NAND FS 0x8.
+    INIT_EVENT_FLAGS_GROUP = 0x81E54834
+    INIT_EVENT_FLAGS_SET_OFFSET = 0x08
+    # Milestone 1 ("late driver init reached"): CRYPT+RTC+FileX parallel-init have completed and
+    # the Driver thread is blocked in wait_for_init_flags on the NAND-FS barrier (the next
+    # milestone). 0x7 = 0x1 | 0x2 | 0x4.
+    LATE_INIT_FLAGS_TARGET = 0x7
+
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
         self.addr_map = addr_map if addr_map is not None else AddrMap()
@@ -468,14 +480,27 @@ class Dsmc2Camera:
             except Exception:
                 pass
 
+    def _deliver_idle_irq(self):
+        """If the core is parked in the scheduler idle loop with a deliverable IRQ, take it.
+
+        ThreadX's ``_tx_thread_schedule`` idle loop (0x80E9C368) spins with IRQs enabled
+        waiting for the next hardware interrupt to ready a thread. Unicorn has no hardware
+        INTC, so we deliver the pending line as an ARM IRQ exception at the slice boundary.
+        """
+        if self.is_idle_pc(self.cpu.pc) and self.intc.has_pending_irq() \
+                and self.cpu.are_interrupts_enabled():
+            self.cpu.inject_irq()
+
+    def _tick_timers(self):
+        """Advance running GPTimers one slice. Timer 2 is the ThreadX 1000 Hz system tick
+        (TLDR 0xFFFFFFE0 -> 32-count period -> one OVF -> IRQ 38 per slice)."""
+        for tmr in self.timers.values():
+            if tmr.tclr & 0x01:  # Running
+                tmr.tick(steps=32 if tmr.timer_id == 2 else 100)
+
     def step_slice(self, count: int = 500_000):
         """Execute an instruction slice and service interrupts/timers."""
-        pc = self.cpu.pc
-
-        # Check for interrupt delivery if in scheduler idle loop
-        if self.is_idle_pc(pc) and self.intc.has_pending_irq():
-            if self.cpu.are_interrupts_enabled():
-                self.cpu.inject_irq()
+        self._deliver_idle_irq()
 
         # Run CPU slice. The wall-clock timeout guarantees the call returns even if
         # the core halts (WFI with no interrupt source) and never retires `count`.
@@ -486,13 +511,7 @@ class Dsmc2Camera:
             # Check if exception is benign or stop
             pass
 
-        # Tick active hardware timers (Timer 2 is ThreadX system tick at 1000Hz)
-        for tmr in self.timers.values():
-            if tmr.tclr & 0x01: # Running
-                if tmr.timer_id == 2:
-                    tmr.tick(steps=32)
-                else:
-                    tmr.tick(steps=100)
+        self._tick_timers()
 
     # Upper bound on wall-clock time for one interactive CPU slice (50ms max).
     SLICE_TIMEOUT_US = 50_000
@@ -508,23 +527,13 @@ class Dsmc2Camera:
         done = 0
         while done < initial_instructions:
             n = min(step_size, initial_instructions - done)
-            pc = self.cpu.pc
-            if self.is_idle_pc(pc) and self.intc.has_pending_irq():
-                if self.cpu.are_interrupts_enabled():
-                    self.cpu.inject_irq()
+            self._deliver_idle_irq()
             self.cpu.run(self.cpu.pc, 0, count=n)
             done += n
             self.boot_progress = done / initial_instructions
             if progress_cb:
                 progress_cb(self.boot_progress)
-
-            # Service active hardware timers
-            for tmr in self.timers.values():
-                if tmr.tclr & 0x01:
-                    if tmr.timer_id == 2:
-                        tmr.tick(steps=32)
-                    else:
-                        tmr.tick(steps=100)
+            self._tick_timers()
 
         self.instruction_count += initial_instructions
         self.is_booted = True
@@ -544,6 +553,87 @@ class Dsmc2Camera:
                 self.bus.load_binary(0x8C000000, s_rgba)
             except Exception:
                 pass
+
+    def init_event_flags(self) -> int:
+        """Current set bits in the primary driver-init event-flag group (0 before kernel is up)."""
+        try:
+            return struct.unpack(
+                "<I",
+                self.bus.read_mem(
+                    self.fw(self.INIT_EVENT_FLAGS_GROUP) + self.INIT_EVENT_FLAGS_SET_OFFSET, 4
+                ),
+            )[0]
+        except Exception:
+            return 0
+
+    def boot_to_late_init(
+        self,
+        kernel_instructions: int = 45_000_000,
+        max_instructions: int = 400_000_000,
+        slice_size: int = 100_000,
+        progress_cb: Optional[Callable[[float], None]] = None,
+        _already_booted: bool = False,
+    ) -> Dict[str, Any]:
+        """Boot the RTOS kernel, then drive the scheduler past the idle park into late driver init.
+
+        ``boot()`` retires a fixed instruction budget in coarse (1M) slices and delivers the
+        GPTimer2 1000 Hz tick IRQ at most once per slice, so ThreadX only sees a few dozen ticks
+        over the whole run -- far too few for its timer thread to expire the sleeps and post the
+        semaphores that ready the next threads. Execution therefore parks in ``_tx_thread_schedule``
+        (0x80E9C368) with ``SystemInitThread`` still SEMAPHORE-blocked: late driver init, UI, RCP
+        and record/playback never run.
+
+        This driver keeps the kernel's own cadence faithful but *fine-grained*: it runs short
+        (~100k) slices and, every time the core returns to the scheduler idle loop with a pending
+        unmasked IRQ, delivers it, so the timer tick stream is continuous and the scheduler advances
+        normally. That carries boot from the bare idle park (``SystemInitThread`` blocked, 4 threads)
+        to: ``SystemInitThread`` COMPLETED, the ``Driver thread`` (thread_DRIVER_entry @0x8066C92C)
+        and ``Starter Thread`` spawned, and the CRYPT/RTC/FileX ``init_parallel`` children run with
+        their event-flag bits set (0x1|0x2|0x4). The Driver thread then blocks in
+        ``wait_for_init_flags`` on the NAND-FS barrier (bit 0x8) -- the next depth milestone
+        (YAFFS2/NAND media mount), which this method deliberately stops short of.
+
+        Deterministic: progress is bounded purely by the instruction budget, with no wall-clock
+        dependence, so stock and relinked (``--addr-map``) images advance identically.
+
+        Returns a progress dict (threads, event flags, instructions retired, milestone reached).
+        """
+        if not _already_booted:
+            self.boot(initial_instructions=kernel_instructions, chunk=3_000_000)
+
+        target = self.LATE_INIT_FLAGS_TARGET
+        done = 0
+        reached = self.init_event_flags() >= target
+        # Require a minimum of real post-kernel progress even if flags look set early.
+        min_drive = 20_000_000
+        while done < max_instructions and not (reached and done >= min_drive):
+            self._deliver_idle_irq()
+            try:
+                self.cpu.run(self.cpu.pc, 0, count=slice_size)
+            except Exception:
+                pass
+            done += slice_size
+            self.instruction_count += slice_size
+            self._tick_timers()
+            if progress_cb and (done % (slice_size * 50) == 0):
+                progress_cb(min(1.0, done / max_instructions))
+            reached = self.init_event_flags() >= target
+
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        flags = self.init_event_flags()
+        threads = self.get_threads()
+        driver = next((t for t in threads if t["name"] == "Driver thread"), None)
+        return {
+            "milestone": "late_driver_init" if (flags >= target) else "idle_park",
+            "reached": flags >= target,
+            "init_event_flags": flags,
+            "late_init_instructions": done,
+            "total_instructions": self.instruction_count,
+            "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
+            "driver_thread_spawned": driver is not None,
+            "threads": threads,
+        }
 
     def boot_until(
         self,
@@ -583,10 +673,7 @@ class Dsmc2Camera:
                     break
 
                 n = min(step_size, max_instructions - done)
-                pc = self.cpu.pc
-                if self.is_idle_pc(pc) and self.intc.has_pending_irq():
-                    if self.cpu.are_interrupts_enabled():
-                        self.cpu.inject_irq()
+                self._deliver_idle_irq()
 
                 self.cpu.run(self.cpu.pc, 0, count=n)
                 done += n
@@ -595,13 +682,7 @@ class Dsmc2Camera:
                 if hit_flag["hit"]:
                     break
 
-                # Service active hardware timers
-                for tmr in self.timers.values():
-                    if tmr.tclr & 0x01:
-                        if tmr.timer_id == 2:
-                            tmr.tick(steps=32)
-                        else:
-                            tmr.tick(steps=100)
+                self._tick_timers()
         finally:
             try:
                 self.cpu.mu.hook_del(hook_handle)
