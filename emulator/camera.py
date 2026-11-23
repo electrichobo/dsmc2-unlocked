@@ -460,6 +460,19 @@ class Dsmc2Camera:
         # Seed default CAMERA_TYPE fallback (-> 0x0016 Scarlet-W)
         self.bus.write(self.fw(self.CAMERA_TYPE_FALLBACK), 2, 0x0016)
 
+        # Stage a minimal, generic YAFFS2 ``/env`` into the emulated GPMC NAND. Intent: have the
+        # firmware's own init_filesystem mount (@0x80008310) read a shipped-version (6)
+        # PARTITION_TABLE and skip the unbounded v0->v6 partition-table upgrade/reformat loop that
+        # a blank chip triggers (fallback table @0x8140898c is version 0). Empty filesystem
+        # otherwise: no serials, no cal, no env vars (public repo). The chunk tags / object-header
+        # layout match the firmware's readers (packed_tags2, OH name@0x12C) but the YAFFS2
+        # block-sequence structure is not yet complete enough for the scan to register the file,
+        # so the firmware currently still falls back to the v0 table -- see nand_image.py. Kept
+        # staged (verified harmless to the 158-test suite and to #67 late-init depth) as the
+        # continuation point for the next NAND-mount depth increment.
+        from emulator.devices.nand_image import write_env_image, PARTITIONS
+        write_env_image(self.gpmc, env_start_block=PARTITIONS[0][1])
+
         # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
         splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
         if not os.path.exists(splash_file):
