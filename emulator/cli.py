@@ -78,7 +78,11 @@ def cmd_boot(args):
     reset_pc = cam.cpu.pc
 
     t0 = time.time()
-    cam.boot(initial_instructions=args.instructions)
+    late = None
+    if getattr(args, "late_init", False):
+        late = cam.boot_to_late_init(kernel_instructions=args.instructions)
+    else:
+        cam.boot(initial_instructions=args.instructions)
     duration = time.time() - t0
 
     threads = cam.get_threads()
@@ -95,6 +99,15 @@ def cmd_boot(args):
         "threads": threads,
         "unknown_mmio_count": len(cam.bus.unknown_mmio)
     }
+    if late is not None:
+        result["late_init"] = {
+            "milestone": late["milestone"],
+            "reached": late["reached"],
+            "init_event_flags": f"0x{late['init_event_flags']:08X}",
+            "late_init_instructions": late["late_init_instructions"],
+            "driver_thread_spawned": late["driver_thread_spawned"],
+            "stock_pc": late["pc"],
+        }
     if not cam.addr_map.is_identity:
         result["addr_map"] = cam.addr_map.path
         result["reset_pc"] = f"0x{reset_pc:08X}"
@@ -119,6 +132,11 @@ def cmd_boot(args):
         print(f"PC: {result['pc']} | SP: {result['sp']} | CPSR: {result['cpsr']}")
         if "stock" in result:
             print(f"Stock-mapped PC: {result['stock']['pc']} (addr map {result['addr_map']})")
+        if "late_init" in result:
+            li = result["late_init"]
+            print(f"Late init: milestone={li['milestone']} reached={li['reached']} "
+                  f"flags={li['init_event_flags']} driver_thread={li['driver_thread_spawned']} "
+                  f"(+{li['late_init_instructions']:,} insns)")
         print(f"Active ThreadX Threads ({result['threads_detected']}):")
         for t in threads:
             print(f"  - [{t['name']}] state={t['state']} prio={t['priority']} SP={t['sp']}")
@@ -304,6 +322,9 @@ def main():
     p_boot.add_argument("-n", "--instructions", type=int, default=45_000_000, help="Initial instructions to execute")
     p_boot.add_argument("-f", "--firmware", type=str, default=None, help="Path to dsmc_program.mem")
     p_boot.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_boot.add_argument("--late-init", action="store_true",
+                        help="After the kernel budget, drive the scheduler past the idle park into "
+                             "late driver init (Driver/Starter threads spawned, CRYPT/RTC/FileX init run)")
     p_boot.add_argument("--addr-map", type=str, default=None, help=ADDR_MAP_HELP)
     p_boot.add_argument("--expect", type=str, default=None,
                         help="Reference boot --json result; exit 1 unless status, stock-mapped pc/sp and every thread "
