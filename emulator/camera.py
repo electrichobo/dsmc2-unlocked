@@ -29,6 +29,7 @@ from emulator.devices.sdma import OmapSdma
 from emulator.devices.mcspi import OmapMcspi, MCSPI_MAP
 from emulator.devices.mcbsp import OmapMcBSP, MCBSP_MAP
 from emulator.devices.cam_isp import OmapCamIsp
+from emulator.devices.iob_xaui import IobXauiWindow
 from emulator.devices.hdq_onewire import OmapHdq1Wire
 from emulator.devices.i2c_ucd import (
     UcdPowerSequencer,
@@ -229,6 +230,36 @@ class Dsmc2Camera:
 
         self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, idle, idle)
 
+    def _install_iob_xaui_hook(self):
+        """Serve the IOB XAUI AHB aperture (0x1C000000) link-status words from IobXauiWindow.
+
+        The aperture sits below the bus device-hook window (0x40000000..0x7FFFFFFF), so a bus
+        Device would never be invoked for it. This dedicated MEM_READ hook answers the XAUI
+        PCS/PHY status offsets the firmware polls (FUN_80727028), overwriting the backing RAM
+        with the link-up value for the beat; all other reads keep the RAM contents. Writes into
+        the window fall through to RAM.
+        """
+        win = self.iob_xaui
+
+        def _xaui_read_hook(uc, access, address, size, value, user_data):
+            off = address - 0x1C000000
+            if not win.is_status_reg(off):
+                return
+            val = win.read(off, size)
+            try:
+                if size == 1:
+                    uc.mem_write(address, bytes([val & 0xFF]))
+                elif size == 2:
+                    uc.mem_write(address, struct.pack("<H", val & 0xFFFF))
+                else:
+                    uc.mem_write(address, struct.pack("<I", val & 0xFFFFFFFF))
+            except Exception:
+                pass
+
+        self._iob_xaui_hook_handle = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_MEM_READ, _xaui_read_hook, None, 0x1C000000, 0x1C0FFFFF
+        )
+
     def _init_hardware(self):
         """Cleanly initialize or re-initialize SoC hardware, registers, and memory mappings."""
         # Save previous log lines if re-initializing
@@ -383,6 +414,13 @@ class Dsmc2Camera:
         self.bus.add_ram_region(0x18000000, 0x10000)
         self.cpu.uc.mem_map(0x1C000000, 0x100000)
         self.bus.add_ram_region(0x1C000000, 0x100000)
+        # IOB XAUI AHB aperture: present an UP IOB<->LSB-FPGA XAUI link on the status words the
+        # firmware polls via FUN_80727028 (`*((addr & 0x3FFFFFF) | 0x1C000000)`), so the real
+        # weapon_left_side_board_init XAUI bring-up completes. The window is below the bus
+        # device-hook range (0x40000000+), so this is a dedicated Unicorn MEM_READ hook; writes
+        # (PHY config / latch clears) fall through to RAM. See devices/iob_xaui.py.
+        self.iob_xaui = IobXauiWindow(link_up=True)
+        self._install_iob_xaui_hook()
 
         # 10b. System DMA (sDMA Controller @ 0x48056000)
         self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc)
@@ -762,6 +800,12 @@ class Dsmc2Camera:
         barrier_passed = (flags & barrier) == barrier
         missing = barrier & ~flags
         blocked_boards = missing & self.UI_BRINGUP_BOARD_BITS
+        # The IOB/LSB-FPGA XAUI link model is installed and presents an UP link on the status
+        # words the firmware's ``lsb_fpga_report_xaui_status`` (@0x809BCF64) polls -- the IOB
+        # AHB window (``IobXauiWindow`` @0x1C000000) answers the PCS/PHY status registers, and
+        # the FPGA-side link regs are seeded on the ``ts_fpga`` SPI target. ``xaui_link_modeled``
+        # reports that the model is present and (for the IOB-window half) was reached this boot.
+        xaui_window_reached = self.iob_xaui.read_count > 0
         return {
             "milestone": "ui_bringup" if barrier_passed else "board_bringup_barrier",
             "barrier_passed": barrier_passed,
@@ -769,18 +813,34 @@ class Dsmc2Camera:
             "ui_bringup_instructions": done,
             "total_instructions": self.instruction_count,
             "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
-            # The four board-dependent bits still clear at the barrier (0 once the XAUI link
-            # bring-up is modelled). Non-zero here identifies the current blocker.
+            # The four board-dependent bits still clear at the barrier. Non-zero here identifies
+            # the current blocker.
             "missing_flags": missing,
             "blocked_board_bits": blocked_boards,
-            # Human-readable identification of the next blocker for the depth roadmap.
+            # The XAUI link-up register model is installed (IobXauiWindow + ts_fpga seeds).
+            "xaui_link_modeled": True,
+            "xaui_window_reached": xaui_window_reached,
+            # Human-readable identification of the next blocker for the depth roadmap. NOTE: the
+            # emulated full-boot blocker is EARLIER than the XAUI predicate -- the async board
+            # workers (``weapon_boards_init`` @0x809B378C, batch 1 = IOB/ISP-pre) strand on their
+            # McSPI1-over-sDMA coprocessor transfers (peripheral-synchronised SPI DMA whose
+            # completion semaphore is not posted by the current sDMA model), so the Boards child
+            # parks on the first ``_tx_event_flags_get`` and the LSB/XAUI worker
+            # (``weapon_left_side_board_init`` @0x809B5358) is never reached. The IOB/LSB-FPGA
+            # XAUI register model is in place and verified (see test_xaui_link.py:
+            # ``lsb_fpga_report_xaui_status`` reads the IOB AHB window at the firmware-polled
+            # offsets); it will carry the LSB worker to link-UP once that SPI-over-sDMA transport
+            # completes. That transport (McSPI1-ch2 <-> ts_fpga over sDMA) is the next milestone.
             "next_blocker": (
                 None if barrier_passed else
-                "weapon_left_side_board_init (@0x809B5354) stalls in LSB-FPGA/IOB XAUI link "
-                "bring-up: FUN_809BCF60 never reports link UP (IOB AHB XAUI PCS status @0x1C02002C "
-                "+ fpga_read 0x40010008); Boards/Fan/XAUI/Mailbox init-flags never set, so "
-                "run_application (UI/DSS/RCP) is never released. Needs the IOB/LSB-FPGA XAUI "
-                "coprocessor model (next milestone)."
+                "async board workers (weapon_boards_init @0x809B378C) strand on McSPI1-over-sDMA "
+                "coprocessor transfers: the peripheral-synchronised SPI DMA completion is not "
+                "posted, so batch-1 (IOB/ISP-pre) never sets its event flags and the Boards child "
+                "parks on the first _tx_event_flags_get -- the LSB/XAUI worker "
+                "(weapon_left_side_board_init @0x809B5358) is never reached. The IOB/LSB-FPGA XAUI "
+                "link-up register model (IobXauiWindow + ts_fpga seeds) is installed and verified "
+                "at the firmware's poll predicate; the remaining blocker is the SPI-over-sDMA "
+                "transport (next milestone), not the XAUI link state."
             ),
             "threads": self.get_threads(),
         }
