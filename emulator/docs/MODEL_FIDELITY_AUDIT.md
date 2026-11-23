@@ -89,6 +89,22 @@ source of truth.
    next layer. Source: `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`,
    `clean/lsb_fpga.c`, `iob.c`.
 
+   **This is the concrete milestone-2 blocker** (pinned down by `boot_to_ui_bringup` /
+   `test_ui_bringup.py`): past the NAND-FS mount, boot reaches the board-bring-up barrier
+   `wait_for_init_flags(0x03300FF7)` and stalls at init flags `0xC21003FF` — the four
+   board-dependent bits (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) never set
+   because the Boards child `weapon_boards_init` (@0x809B378C) AND-waits on six async board
+   workers and the LSB worker `weapon_left_side_board_init` (@0x809B5354) never completes: it
+   loops in the **XAUI link bring-up**, where `FUN_809BCF60` polls the IOB XAUI PCS status
+   through the AHB window `0x1C000000` (`FUN_80727028`: PCS @`0x1C02002C` must read `0x03FFC02F`,
+   RX-err counters @`…068`/`…0BC` read 0) and the LSB-FPGA regs via `fpga_read` (`0x40010008`
+   LinkUp/Aligned/Sync, `0xC2000010`, `0xC20000BC`). Making only that predicate return "link OK"
+   is **not** enough — the LSB worker still blocks earlier/elsewhere in `lsb_fpga_init` /
+   `lsb_fpga_xaui_phy_initx`, so the full live XAUI bring-up (ideally the IOB co-sim) is required.
+   Everything downstream — `run_application` → Camera State Manager → DSS framebuffer and the
+   firmware RCP server — is released only after the Driver thread finishes this cascade, so the
+   firmware-driven UI/DSS/RCP path is gated on this model.
+
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),
    mini-mag SM2246EN, Redpine RS9113 Wi-Fi SPI host interface, the C64x+ DSPLink protocol,
