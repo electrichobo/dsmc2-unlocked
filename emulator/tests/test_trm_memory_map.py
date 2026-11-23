@@ -26,7 +26,7 @@ from emulator.devices.mcspi import OmapMcspi
 from emulator.devices.mcbsp import OmapMcBSP
 from emulator.devices.hdq_onewire import OmapHdq1Wire
 from emulator.devices.cam_isp import OmapCamIsp
-from emulator.coprocessors.c2c import C2cTransport, CoprocessorSpiTarget
+from emulator.coprocessors.c2c import CoprocessorTransport, CoprocessorSpiTarget
 
 
 @pytest.fixture
@@ -116,7 +116,7 @@ def test_l4_per_ap_at_0x49000000_replaces_synthetic_c2c(camera):
     """Verify 0x49000000 is the authentic L4-PER AP interconnect model, not C2cTransport."""
     _, dev = camera.bus.devices[0x49000000]
     assert isinstance(dev, OmapL4Ap)
-    assert not isinstance(dev, C2cTransport)
+    assert not isinstance(dev, CoprocessorTransport)
     assert dev.name == "L4_PER_AP"
 
     # Component revision register at 0x49000000 returns Sonics S3220 code 0x40000800
@@ -132,56 +132,44 @@ def test_l4_per_ap_at_0x49000000_replaces_synthetic_c2c(camera):
     assert camera.bus.read_u32(0x6D000080) == 0x03588019  # SDRC_MCFG_0
 
 
-def test_spi_backed_coprocessor_mailbox_and_state_machine(camera):
+def test_coprocessor_spi_transport_and_gpmc_mailbox(camera):
     """
-    Verify coprocessor transport binds to McSPI targets (`ts_isp1`, `ts_isp2`,
-    `ts_fpga`, `ts_sensor`) and maintains `system_state_2_if` (`2 -> 6 -> 10`)
-    without tripping C2C_ERROR (25) or FAILED_IOB (29).
+    Verify the coprocessor transport uses the FW-proven SPI register frame
+    (`[0x81/0x01][addr u32][data u32]`, ACK 0x1F; ISP1=CS target 7, ISP2=8) and keeps
+    the GPMC IOB mailbox @0xA5800000 as a separate device — not the old invented
+    0xC2/0xA5 framing or an asserted REG_DEVICE_ID map.
     """
     c2c = camera.c2c
     status = c2c.get_status()
-    assert status["transport"] == "McSPI (SPI-backed mailbox)"
-    assert status["c2c_error_event_25"] is False
-    assert status["failed_iob_event_29"] is False
-    assert status["state_history"] == [
-        C2cTransport.STATE_RUN,
-        C2cTransport.STATE_PREVIEW_START,
-        C2cTransport.STATE_READY_TO_RECORD,
-    ]
-    assert status["system_state"] == C2cTransport.STATE_READY_TO_RECORD
+    assert status["transport"].startswith("SPI register frame")
+    assert status["gpmc_mailbox_base"] == "0xA5800000"
 
-    # 1. Verify native shell SPI target reads (`read spi ts_isp1/ts_isp2/ts_sensor/ts_fpga`)
-    for target_name, expected_magic in (
-        ("ts_isp1", b"1PSI"),
-        ("ts_isp2", b"2PSI"),
-        ("ts_fpga", b"AGPF"),
-        ("ts_sensor", b"SNES"),
-    ):
-        raw_id = c2c.spi_read(target_name, CoprocessorSpiTarget.REG_DEVICE_ID, 4)
-        assert raw_id == expected_magic
-        raw_state = c2c.spi_read(target_name, CoprocessorSpiTarget.REG_SYSTEM_STATE, 4)
-        assert struct.unpack("<I", raw_state)[0] == C2cTransport.STATE_READY_TO_RECORD
+    # CS-mux target ids are the firmware's (ISP1=7, ISP2=8).
+    assert c2c.spi_targets["ts_isp1"].spi_target_id == 7
+    assert c2c.spi_targets["ts_isp2"].spi_target_id == 8
 
-    # 2. Verify SPI register write & readback on ts_fpga
-    assert c2c.spi_write("ts_fpga", 0x0100, struct.pack("<I", 0xCAFE1234)) is True
-    assert struct.unpack("<I", c2c.spi_read("ts_fpga", 0x0100, 4))[0] == 0xCAFE1234
+    # 1. Register write + readback over the real frame on ts_fpga (LSB-FPGA "go" reg).
+    assert c2c.spi_write("ts_fpga", 0x44A00020, struct.pack("<I", 0x00000001)) is True
+    assert struct.unpack("<I", c2c.spi_read("ts_fpga", 0x44A00020, 4))[0] == 0x00000001
 
-    # 3. Verify McSPI hardware channel transfer with framed C2C command (0xC2 header)
-    # McSPI1 Channel 0 is wired to ts_isp1; writing 0xC2010001 sends Heartbeat (cmd 0x01)
-    mcspi1_base = 0x48098000
-    ch0_tx = mcspi1_base + OmapMcspi.CH_BASE + 0x0C
-    ch0_rx = mcspi1_base + OmapMcspi.CH_BASE + 0x10
-    camera.bus.write_u32(ch0_tx, 0xC2010001)
-    rx_ack = camera.bus.read_u32(ch0_rx)
-    assert (rx_ack >> 24) == 0xA5  # Valid C2C SPI mailbox ACK prefix
+    # 2. Byte-exact frame replay: WRITE `[0x81][addr][data]` then READ `[0x01][addr]`+ACK.
+    tgt = c2c.spi_targets["ts_iob0"]
+    tgt.reset_frame()
+    addr, data = 0x00000040, 0x12345678
+    for b in bytes([0x81]) + addr.to_bytes(4, "little") + data.to_bytes(4, "little"):
+        assert tgt.transceive_byte(b) == 0x00
+    assert tgt.last_write == (addr, data)
+    tgt.reset_frame()
+    for b in bytes([0x01]) + addr.to_bytes(4, "little"):
+        assert tgt.transceive_byte(b) == 0x00
+    assert tgt.transceive_byte(0x00) == 0x1F  # ACK
+    out = bytes(tgt.transceive_byte(0x00) for _ in range(4))
+    assert int.from_bytes(out, "little") == data
 
-    # 4. Verify packet CRC32 and sequence increments
-    prev_seq = c2c.sequence_number
-    hb_resp = c2c.send_packet(C2cTransport.CORE_IOB0, cmd=0x01, payload=[0xAA55])
-    assert hb_resp is not None
-    assert hb_resp[0] == 0x01
-    assert c2c.sequence_number == (prev_seq + 1) & 0xFFFF
-    assert c2c.last_crc32 != 0
+    # 3. The GPMC IOB mailbox @0xA5800000 is a real bus device, separate from SPI.
+    assert 0xA5800000 in camera.bus.devices
+    camera.bus.write_u32(0xA5800000, 0xCAFEF00D)
+    assert camera.bus.read_u32(0xA5800000) == 0xCAFEF00D
 
 
 def test_bus_permissive_vs_strict_mode_failsafe(camera):

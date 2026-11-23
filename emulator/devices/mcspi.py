@@ -22,6 +22,14 @@ class SpiTargetDevice:
         self.registers: Dict[int, int] = {}
         self.transfer_count = 0
 
+    def transceive_byte(self, tx_byte: int) -> Optional[int]:
+        """
+        Handle an 8-bit SPI byte transfer on this chip-select channel. Byte-oriented
+        targets (the coprocessor register frame [0x81/0x01][addr][data]+ACK) override
+        this. Return None to fall back to loopback.
+        """
+        return None
+
     def transceive_word(self, tx_word: int) -> Optional[int]:
         """
         Handle a 32-bit SPI word transfer on this chip-select channel.
@@ -173,7 +181,13 @@ class OmapMcspi(Device):
                 self.tx[ch_num] = val
                 rx_resp = None
                 target = self.targets.get(ch_num)
-                if target is not None and hasattr(target, "transceive_word"):
+                # CHCONF WL field (bits [11:7]) = SPI word length - 1. WL==7 => 8-bit
+                # transfers, the mode the coprocessor register frame uses; clock the low
+                # byte through the byte-level state machine.
+                wl = (self.chconf[ch_num] >> 7) & 0x1F
+                if target is not None and wl == 0x07 and hasattr(target, "transceive_byte"):
+                    rx_resp = target.transceive_byte(val & 0xFF)
+                if rx_resp is None and target is not None and hasattr(target, "transceive_word"):
                     rx_resp = target.transceive_word(val)
                 if rx_resp is None and self.on_word_tx is not None:
                     rx_resp = self.on_word_tx(self.port_id, ch_num, val)

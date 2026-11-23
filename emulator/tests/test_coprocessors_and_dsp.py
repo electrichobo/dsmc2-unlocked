@@ -10,7 +10,7 @@ import threading
 import pytest
 
 from emulator.camera import Dsmc2Camera
-from emulator.coprocessors.c2c import C2cTransport
+from emulator.coprocessors.c2c import CoprocessorTransport
 from emulator.coprocessors.xtensa import XtensaCore, Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
 from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
@@ -126,19 +126,46 @@ def test_isp_wavelet_compression(workspace_root):
     assert isp.frames_compressed == 1
 
 
-def test_c2c_mailbox_transport():
-    """Verify Chip-to-Chip mailbox MMIO registers, FIFO, and coprocessor packet routing."""
-    c2c = C2cTransport()
-    assert c2c.read(C2cTransport.REG_CTRL, 4) == 0x01
-    assert c2c.read(C2cTransport.REG_STATUS, 4) & C2cTransport.STAT_TX_EMPTY
+def test_coprocessor_spi_register_frame():
+    """
+    Replay the firmware's own SPI register frame against the transport model
+    (sdk findings/hardware/COPROCESSOR_TRANSPORT.md). WRITE is
+    `[0x81][addr u32][data u32]` (9 bytes); READ is `[0x01][addr u32]` then poll
+    ACK byte 0x1F and read back 4 little-endian data bytes.
+    """
+    c2c = CoprocessorTransport()
 
-    iob0 = Iob0Coprocessor()
-    c2c.register_coprocessor(C2cTransport.CORE_IOB0, iob0)
+    # ISP1 = SPI CS-mux target 7, ISP2 = target 8 (FW-proven).
+    assert c2c.spi_targets["ts_isp1"].spi_target_id == 7
+    assert c2c.spi_targets["ts_isp2"].spi_target_id == 8
 
-    # Send command packet to IOB0 (cmd 0x10 = Query SATA)
-    resp = c2c.send_packet(C2cTransport.CORE_IOB0, cmd=0x10, payload=[0x01])
-    assert resp is not None
-    assert resp[0] == 0x01 # SATA Link Up
+    # High-level primitive: write then read a register on ts_iob0.
+    c2c.spi_write_reg("ts_iob0", 0x00001234, 0xDEADBEEF)
+    assert c2c.spi_read_reg("ts_iob0", 0x00001234) == 0xDEADBEEF
+
+    # Byte-exact frame replay: clock the real WRITE frame one byte at a time.
+    tgt = c2c.spi_targets["ts_fpga"]
+    tgt.reset_frame()
+    addr, data = 0x44A00020, 0x00000001  # LSB-FPGA "go" register (real address)
+    write_frame = bytes([0x81]) + addr.to_bytes(4, "little") + data.to_bytes(4, "little")
+    assert len(write_frame) == 9
+    for b in write_frame:
+        assert tgt.transceive_byte(b) == 0x00  # target drives 0 during a write
+    assert tgt.last_write == (addr, data)
+
+    # Byte-exact READ frame: opcode + addr, then ACK 0x1F, then 4 data bytes.
+    tgt.reset_frame()
+    for b in bytes([0x01]) + addr.to_bytes(4, "little"):
+        assert tgt.transceive_byte(b) == 0x00
+    assert tgt.transceive_byte(0x00) == 0x1F  # ACK byte
+    got = bytes(tgt.transceive_byte(0x00) for _ in range(4))
+    assert int.from_bytes(got, "little") == data
+
+    # LSB-FPGA version register is seeded at its real address 0xE0000908.
+    assert c2c.spi_read_reg("ts_fpga", 0xE0000908) == 0x00000014
+
+    # GPMC IOB mailbox is a SEPARATE device at 0xA5800000, not SPI.
+    assert c2c.mailbox.BASE_ADDR == 0xA5800000
 
 
 def test_dsp_coff_parser_and_dsplink(workspace_root):
