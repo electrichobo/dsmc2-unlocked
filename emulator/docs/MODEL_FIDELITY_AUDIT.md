@@ -41,8 +41,8 @@ Counts: **24 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 |---|---|---|---|
 | `intc.OmapIntc` | OMAP3 MPU INTC @`0x48200000`, banks 0..2, MIR/ISR/PENDING. | **TRM/DATASHEET** (SPRUGN4). | — |
 | `prcm.OmapPrcm` | CM/PRM clock+reset @`0x48004000`/`0x48005000`, DPLL lock. | **TRM/DATASHEET** + fw addrs `0x80674A00`. | — |
-| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15. | **TRM/DATASHEET**. | — |
-| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/TX/RX; 8-bit byte path for the coprocessor frame. | **TRM/DATASHEET** (SPRUGN4 ch.20). **Byte-path added this PR** for the register frame. | Full DMA/FIFO-depth modes simplified; loopback default for unframed targets. |
+| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15; **peripheral-synchronised SPI-over-sDMA** (`_try_spi_over_sdma`): a channel whose endpoint is a McSPI TX/RX FIFO clocks the SPI frame through the McSPI↔`CoprocessorSpiTarget` byte state machine (full-duplex: TX channel drives MOSI + stashes MISO; the paired RX channel drains that stash), then signals channel completion/IRQ. | **TRM/DATASHEET** + fw SPI DMA driver (`_spi_write_and_read` @0x806D588C, `_spi_init_tx_dma`/`_spi_init_rx_dma` @0x806D6554/0x806D6D84, `_spi_get_tx/rx_dma_request` @0x806D6340/0x806D644C; McSPI_TX/RX at CH_BASE+ch·0x14+0x0C/0x10). **SPI-over-sDMA added this PR.** | DMA request-id SYNCHRO decode simplified (endpoint-address match instead); FIFO-depth/turbo modes not modelled; NAND/memory DMA keep the prior instant-copy. |
+| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/TX/RX; 8-bit byte path for the coprocessor frame; TX/RX FIFO reg addresses + `dma_transceive_byte` for the sDMA SPI path. | **TRM/DATASHEET** (SPRUGN4 ch.20). **Byte-path + DMA-beat path added this PR** for the register frame. | Full DMA/FIFO-depth modes simplified; loopback default for unframed targets. |
 | `mcbsp.OmapMcBSP` | McBSP 2..5, DRR/DXR, SPCR DLB loopback. | **TRM/DATASHEET** + fw offsets (omap_regs.tsv). | — |
 | `gptimer.OmapGpTimer` | GPTimers 1..11, TISR/TCLR/TCRR; timer 2 → ThreadX tick. | **TRM/DATASHEET**. | — |
 | `uart.OmapUart` | 16550 UARTs 1-4, LSR/SSR, UART3 RCP, UART4 logs. | **TRM/DATASHEET** + fw role mapping. | — |
@@ -101,19 +101,25 @@ source of truth.
    (@0x809BCF64) polls (PCS @`0x1C02002C`=`0x03FFC02F`, status @`…010`, RX-err @`…068`/`…0BC`=0,
    PLL/PHY ready), verified against the firmware predicate in `test_xaui_link.py`.
 
-   **Corrected diagnosis**: the full-boot blocker is EARLIER than the XAUI predicate. The board
-   workers run as async ThreadX threads; batch 1 (IOB/ISP-pre) strands on its **McSPI1-over-sDMA**
-   coprocessor transfers (`fpga_read`/`spi_write_wait_for_ack_then_read` → `_spi_write_and_read`,
-   peripheral-synchronised SPI DMA blocking on the DMA-completion semaphore), so the Boards child
-   parks on the first `_tx_event_flags_get(0x3)` and the LSB/XAUI worker
-   `weapon_left_side_board_init` (@0x809B5358) is **never reached**. (This is why #70 found that
-   forcing the predicate was insufficient — the predicate never runs.) The next milestone is the
-   **SPI-over-sDMA transport**: when sDMA runs a channel whose peripheral endpoint is a McSPI
-   TX/RX FIFO, clock the bytes through the McSPI↔coprocessor-target state machine (reuse
-   `CoprocessorSpiTarget`) and write RX back to the DMA dest, then post completion — plus (for the
-   IOB worker's DDR/SCL training) the IOB Xtensa co-sim (item 1). Everything downstream —
-   `run_application` → Camera State Manager → DSS framebuffer and the firmware RCP server — is
-   released only after the Driver thread finishes this cascade.
+   **SPI-over-sDMA transport landed in this PR.** The board workers run as async ThreadX threads;
+   batch 1 (IOB/ISP-pre) stranded on its **McSPI1-over-sDMA** coprocessor transfers
+   (`fpga_read`/`spi_write_wait_for_ack_then_read` → `_spi_write_and_read`, peripheral-synchronised
+   SPI DMA) because the old sDMA did a mem→mem copy and never clocked the SPI frame. Now
+   `sdma._try_spi_over_sdma` clocks a McSPI-FIFO-wired channel through the McSPI↔`CoprocessorSpiTarget`
+   byte state machine (full-duplex) and signals completion, so batch 1 finishes, batch 2 dispatches,
+   and the LSB worker `weapon_left_side_board_init` (@0x809B5354) reaches its XAUI link check
+   (`lsb_fpga_report_xaui_status` @0x809BCF64), which passes against the IOB-window + ts_fpga link-up
+   model. **Boards 0x400, XAUI 0x200000 and Mailbox 0x1000000 now set; boot reaches `0xC33007FF`.**
+   The IOB DDR/SCL init (`iob_ddr_set_speed`) uses the IOB AHB window (direct MMIO, `IobXauiWindow`)
+   with bounded register polls, so it does NOT require the IOB Xtensa core to run.
+
+   **Next blocker (this PR's measured depth): Fan 0x800.** `fan_init` (@0x8067049C) →
+   `HAL_Temp_Fan_Control_Init` (@0x809B09A8) runs but strands in the fan TACHOMETER speed test
+   (`detect_fan_type` → `HAL_Temp_SpeedTest`), a timed fan-RPM measurement no peripheral model
+   drives. The next milestone is a **fan / tach-capture register model** (not the SPI transport,
+   now modelled, and not the IOB Xtensa core). Everything downstream — `run_application` → Camera
+   State Manager → DSS framebuffer and the firmware RCP server — is released only after the Driver
+   thread finishes this cascade.
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),
