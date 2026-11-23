@@ -106,6 +106,28 @@ class Dsmc2Camera:
     # milestone). 0x7 = 0x1 | 0x2 | 0x4.
     LATE_INIT_FLAGS_TARGET = 0x7
 
+    # Milestone 2 ("UI/driver bring-up"): after the NAND-FS mount (0x8) the Driver thread runs a
+    # second init_parallel cascade and blocks on the board-bring-up barrier
+    # ``wait_for_init_flags(0x03300FF7)``. Bits added past the FS mount (sdk
+    # findings/boot/BOOT_FLOW_MAP.md): UART 0x40, Load System Config 0x80, HAL Power 0x100,
+    # Power 0x200, Boards 0x400, Fan 0x800, ASIC Memory Map 0x100000, XAUI 0x200000,
+    # Mailbox 0x1000000, HAL SYS_ID 0x2000000, HW Cap 0x40000000, Module Cap 0x80000000.
+    # The firmware reaches 0xC21003FF (everything except the four board-dependent bits
+    # Boards 0x400 | Fan 0x800 | XAUI 0x200000 | Mailbox 0x1000000 = mask 0x01200C00) and then
+    # stalls: ``weapon_boards_init`` (@0x809B378C, the Boards child) dispatches six async board
+    # bring-up workers (IOB/ISP-pre/ISP/RSB/LSB/side-handle) and AND-waits on all six completion
+    # bits; five set (group flags 0x2F) but the LSB worker ``weapon_left_side_board_init``
+    # (@0x809B5354) never finishes -- it loops in the XAUI link bring-up waiting for the LSB-FPGA /
+    # IOB XAUI link to report UP. The link-OK predicate ``FUN_809BCF60`` reads IOB XAUI registers
+    # through the AHB window at 0x1C000000 (PCS status @...02C must read 0x03FFC02F, RX err
+    # counters @...068/...0BC must read 0) and LSB-FPGA registers via ``fpga_read`` (0x40010008
+    # LinkUp/Aligned/Sync, 0xC2000010, 0xC20000BC). Modelling that live XAUI link-up is the
+    # IOB/LSB-FPGA coprocessor model the fidelity audit lists as an ASSERTED stub -- the next
+    # depth milestone. ``boot_to_ui_bringup`` drives to this barrier and reports it.
+    UI_BRINGUP_FLAGS_BARRIER = 0x03300FF7
+    UI_BRINGUP_FLAGS_REACHABLE = 0xC21003FF   # everything the current models satisfy
+    UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (blocked on XAUI link)
+
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
         self.addr_map = addr_map if addr_map is not None else AddrMap()
@@ -680,6 +702,87 @@ class Dsmc2Camera:
             "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
             "driver_thread_spawned": driver is not None,
             "threads": threads,
+        }
+
+    # weapon_boards_init async board-bring-up group: each of the six board workers
+    # (IOB/ISP-pre/ISP/RSB/LSB/side-handle) sets one bit in a dynamically created ThreadX
+    # event-flags group when it completes; ``weapon_boards_init`` AND-waits on all six (0x3F).
+    # Bit 0x10 is the LSB (Left Side Board) worker ``weapon_left_side_board_init``.
+    BOARD_GROUP_ALL_WORKERS = 0x3F
+    BOARD_GROUP_LSB_BIT = 0x10
+
+    def boot_to_ui_bringup(
+        self,
+        max_instructions: int = 300_000_000,
+        slice_size: int = 200_000,
+        _already_booted: bool = False,
+    ) -> Dict[str, Any]:
+        """Drive boot past the NAND-FS mount toward UI/driver bring-up and report the next blocker.
+
+        After ``boot_to_late_init`` reaches the filesystem mount (init event flags
+        ``0xC21000FF``: RTC|FileX|CRYPT|NAND + the HW/Module-cap cascade), the Driver thread runs a
+        second ``init_parallel`` cascade and blocks on the board-bring-up barrier
+        ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``). Only the four
+        board-dependent bits -- Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000
+        (``UI_BRINGUP_BOARD_BITS``) -- stay clear, because the Boards child ``weapon_boards_init``
+        (@0x809B378C) deadlocks: it dispatches six async board workers and AND-waits on all six
+        completion bits, but the LSB worker ``weapon_left_side_board_init`` (@0x809B5354) never
+        finishes -- it is stuck in the LSB-FPGA / IOB **XAUI link bring-up**, polling the XAUI PCS
+        status (IOB AHB window @0x1C000000, FPGA regs via ``fpga_read``) for a link that the
+        current peripheral models never bring up. Past this barrier lies ``run_application``
+        (the Camera State Manager, UI, DSS framebuffer, firmware RCP server), all of which are
+        released only after the Driver thread finishes the whole cascade, so none of them run until
+        the XAUI link is modelled. That is the IOB/LSB-FPGA coprocessor model the fidelity audit
+        lists as an ASSERTED stub -- the next depth milestone.
+
+        This method is a deterministic depth probe: it boots to the barrier and returns the exact
+        reached flags, the blocked board bits, and the identified blocker, without faking the link.
+        """
+        if not _already_booted:
+            # boot_to_late_init already drives through the FS mount to ~0xC21000FF.
+            self.boot_to_late_init()
+
+        barrier = self.UI_BRINGUP_FLAGS_BARRIER
+        done = 0
+        flags = self.init_event_flags()
+        while done < max_instructions and (flags & barrier) != barrier:
+            self._deliver_idle_irq()
+            try:
+                self.cpu.run(self.cpu.pc, 0, count=slice_size)
+            except Exception:
+                pass
+            done += slice_size
+            self.instruction_count += slice_size
+            self._tick_timers()
+            flags = self.init_event_flags()
+
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        flags = self.init_event_flags()
+        barrier_passed = (flags & barrier) == barrier
+        missing = barrier & ~flags
+        blocked_boards = missing & self.UI_BRINGUP_BOARD_BITS
+        return {
+            "milestone": "ui_bringup" if barrier_passed else "board_bringup_barrier",
+            "barrier_passed": barrier_passed,
+            "init_event_flags": flags,
+            "ui_bringup_instructions": done,
+            "total_instructions": self.instruction_count,
+            "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
+            # The four board-dependent bits still clear at the barrier (0 once the XAUI link
+            # bring-up is modelled). Non-zero here identifies the current blocker.
+            "missing_flags": missing,
+            "blocked_board_bits": blocked_boards,
+            # Human-readable identification of the next blocker for the depth roadmap.
+            "next_blocker": (
+                None if barrier_passed else
+                "weapon_left_side_board_init (@0x809B5354) stalls in LSB-FPGA/IOB XAUI link "
+                "bring-up: FUN_809BCF60 never reports link UP (IOB AHB XAUI PCS status @0x1C02002C "
+                "+ fpga_read 0x40010008); Boards/Fan/XAUI/Mailbox init-flags never set, so "
+                "run_application (UI/DSS/RCP) is never released. Needs the IOB/LSB-FPGA XAUI "
+                "coprocessor model (next milestone)."
+            ),
+            "threads": self.get_threads(),
         }
 
     def boot_until(
