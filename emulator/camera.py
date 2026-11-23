@@ -172,7 +172,16 @@ class Dsmc2Camera:
         self._install_idle_wake_hook()
 
     def _install_idle_wake_hook(self):
-        """Fast IRQ wake: idle loop with no ready thread and a pending IRQ stops Unicorn."""
+        """Fast IRQ wake: at the scheduler idle loop with no ready thread and a pending IRQ, deliver
+        the interrupt IN PLACE (redirect PC to the IRQ vector) so the ISR runs within the current
+        ``emu_start`` instead of stopping the core.
+
+        Delivering in-place (rather than ``emu_stop`` + re-inject per slice) lets the dense stream of
+        per-chunk NAND/sDMA completion interrupts that the YAFFS multi-partition mount waits on be
+        serviced without thousands of costly ``emu_start`` round-trips -- the mount completes in a
+        few seconds of wall time and ``init_filesystem`` reaches bit 0x8. ``inject_irq`` is a no-op
+        when interrupts are masked, so this never disturbs a critical section.
+        """
         if getattr(self, "_idle_wake_hook_handle", None) is not None:
             try:
                 self.cpu.mu.hook_del(self._idle_wake_hook_handle)
@@ -181,13 +190,20 @@ class Dsmc2Camera:
         exec_ptr_addr = self.fw(self.TX_THREAD_EXECUTE_PTR)
         idle = self.fw(self.IDLE_LOOP_ENTRY)
 
+        intc = self.intc
+        cpu = self.cpu
+
         def _idle_wake_hook(uc, address, size, user_data):
+            # Cheap guards first (this fires on every idle-loop iteration): only touch memory /
+            # deliver when an unmasked line is actually pending and IRQs are enabled.
+            if not intc.has_pending_irq() or not cpu.are_interrupts_enabled():
+                return
             try:
                 exec_ptr = struct.unpack("<I", uc.mem_read(exec_ptr_addr, 4))[0]
             except Exception:
                 exec_ptr = 0
-            if exec_ptr == 0 and self.intc.has_pending_irq() and self.cpu.are_interrupts_enabled():
-                uc.emu_stop()
+            if exec_ptr == 0:
+                cpu.inject_irq()
 
         self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, idle, idle)
 
@@ -347,7 +363,7 @@ class Dsmc2Camera:
         self.bus.add_ram_region(0x1C000000, 0x100000)
 
         # 10b. System DMA (sDMA Controller @ 0x48056000)
-        self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu)
+        self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc)
         self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
 
         # 10c. Multichannel SPI Controllers (McSPI 1..4)
@@ -496,9 +512,13 @@ class Dsmc2Camera:
     def _deliver_idle_irq(self):
         """If the core is parked in the scheduler idle loop with a deliverable IRQ, take it.
 
-        ThreadX's ``_tx_thread_schedule`` idle loop (0x80E9C368) spins with IRQs enabled
-        waiting for the next hardware interrupt to ready a thread. Unicorn has no hardware
-        INTC, so we deliver the pending line as an ARM IRQ exception at the slice boundary.
+        ThreadX's ``_tx_thread_schedule`` idle loop (0x80E9C368) spins with IRQs enabled waiting
+        for the next hardware interrupt to ready a thread. Unicorn has no hardware INTC, so the
+        pending line is delivered as an ARM IRQ exception at the slice boundary. The in-place
+        idle-wake hook (``_install_idle_wake_hook``) delivers interrupts that arrive *during* a
+        slice, so the per-chunk NAND/sDMA completions of the YAFFS mount are serviced promptly
+        inside one ``emu_start``; this boundary delivery covers the case where the slice started
+        already parked at idle.
         """
         if self.is_idle_pc(self.cpu.pc) and self.intc.has_pending_irq() \
                 and self.cpu.are_interrupts_enabled():
@@ -616,9 +636,20 @@ class Dsmc2Camera:
 
         target = self.LATE_INIT_FLAGS_TARGET
         done = 0
-        reached = self.init_event_flags() >= target
+        # Milestone = every bit of the late-init group set, tested as a MASK not a magnitude: the
+        # NAND-FS child (0x8) can complete before FileX (0x2), so a bare ``flags >= 0x7`` would stop
+        # at 0xD (RTC|CRYPT|NAND, FileX still pending). Require ``flags & 0x7 == 0x7`` so RTC, FileX
+        # and CRYPT have all run; NAND (0x8) coming too is a bonus, not a substitute.
+        reached = (self.init_event_flags() & target) == target
         # Require a minimum of real post-kernel progress even if flags look set early.
         min_drive = 20_000_000
+        # The NAND/YAFFS mount path (init_filesystem -> nand_media_open) reads NAND through sDMA and
+        # blocks the mounting thread on a per-chunk DMA-completion IRQ (line 3 / IRQ 15). The idle
+        # wake must deliver that IRQ promptly, so each slice boundary DRAINS the idle-IRQ backlog
+        # (``_deliver_idle_irq(drain=...)``) rather than injecting once -- otherwise the
+        # multi-partition mount crawls and the NAND-FS flag (0x8) never sets. The timer tick stays
+        # one-per-slice as before, so the cadence remains deterministic and lockstep with relinked
+        # (``--addr-map``) images.
         while done < max_instructions and not (reached and done >= min_drive):
             self._deliver_idle_irq()
             try:
@@ -630,17 +661,20 @@ class Dsmc2Camera:
             self._tick_timers()
             if progress_cb and (done % (slice_size * 50) == 0):
                 progress_cb(min(1.0, done / max_instructions))
-            reached = self.init_event_flags() >= target
+            reached = (self.init_event_flags() & target) == target
 
         self.is_booted = True
         self.power_state = self.POWER_ON
         flags = self.init_event_flags()
         threads = self.get_threads()
         driver = next((t for t in threads if t["name"] == "Driver thread"), None)
+        reached_mask = (flags & target) == target
         return {
-            "milestone": "late_driver_init" if (flags >= target) else "idle_park",
-            "reached": flags >= target,
+            "milestone": "late_driver_init" if reached_mask else "idle_park",
+            "reached": reached_mask,
             "init_event_flags": flags,
+            # Whether the NAND/YAFFS filesystem mount also completed (init_filesystem set bit 0x8).
+            "nand_fs_mounted": bool(flags & 0x8),
             "late_init_instructions": done,
             "total_instructions": self.instruction_count,
             "pc": f"0x{self.to_stock(self.cpu.pc):08X}",

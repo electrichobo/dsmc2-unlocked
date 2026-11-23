@@ -104,6 +104,7 @@ def cmd_boot(args):
             "milestone": late["milestone"],
             "reached": late["reached"],
             "init_event_flags": f"0x{late['init_event_flags']:08X}",
+            "nand_fs_mounted": late.get("nand_fs_mounted", False),
             "late_init_instructions": late["late_init_instructions"],
             "driver_thread_spawned": late["driver_thread_spawned"],
             "stock_pc": late["pc"],
@@ -135,7 +136,8 @@ def cmd_boot(args):
         if "late_init" in result:
             li = result["late_init"]
             print(f"Late init: milestone={li['milestone']} reached={li['reached']} "
-                  f"flags={li['init_event_flags']} driver_thread={li['driver_thread_spawned']} "
+                  f"flags={li['init_event_flags']} nand_fs_mounted={li.get('nand_fs_mounted')} "
+                  f"driver_thread={li['driver_thread_spawned']} "
                   f"(+{li['late_init_instructions']:,} insns)")
         print(f"Active ThreadX Threads ({result['threads_detected']}):")
         for t in threads:

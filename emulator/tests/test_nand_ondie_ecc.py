@@ -119,6 +119,17 @@ def test_env_image_programs_partition_table_into_nand():
     hdr = g.nand_image.get(base)
     assert hdr is not None
     import struct
-    assert struct.unpack_from("<I", hdr, 0)[0] == nand_image.YAFFS_OBJECT_TYPE_FILE  # type = file
-    # name lives at OH offset 0x12C (scan reads it via FUN_80a19e7c(oh + 0x12C)).
-    assert hdr[0x12C:0x12C + 15] == b"PARTITION_TABLE"
+    assert struct.unpack_from("<I", hdr, 0)[0] == nand_image.YAFFS_OBJECT_TYPE_FILE  # type @ 0x00
+    assert struct.unpack_from("<I", hdr, 0x04)[0] == nand_image.YAFFS_OBJECTID_ROOT   # parent @ 0x04
+    # The object's short name lives at OH offset 0x0A (the scan applies it via
+    # FUN_80a179d8 -> FUN_80a1795c(obj, OH + 0x0A); yaffs_find_by_name then matches its sum).
+    assert hdr[0x0A:0x0A + 15] == b"PARTITION_TABLE"
+    assert hdr[0x0A + 15] == 0x00  # NUL-terminated (<= 15 chars)
+    # yst_mode @ 0x10C carries the read bit (0x100) that red_open gates file access on.
+    assert struct.unpack_from("<I", hdr, 0x10C)[0] & 0x100
+    # OH spare tags: packed_tags2 words at OOB offsets 4/20/36/52 (one per 16-byte sub-spare).
+    spare = g.nand_image[base][OmapGpmc.PAGE_SIZE:OmapGpmc.PAGE_SIZE + OmapGpmc.SPARE_SIZE]
+    seq, w1, w2, bc = [struct.unpack_from("<I", spare, 4 + i * 16)[0] for i in range(4)]
+    assert w2 & 0x80000000                     # header-chunk marker
+    assert (w1 >> 28) == nand_image.YAFFS_OBJECT_TYPE_FILE  # object type in tag word 1
+    assert (w2 & 0x0FFFFFFF) == nand_image.YAFFS_OBJECTID_ROOT  # parent object id
