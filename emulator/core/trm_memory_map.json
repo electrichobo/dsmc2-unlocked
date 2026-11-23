@@ -372,6 +372,13 @@
       "size": "0x20000000",
       "category": "SDRAM",
       "trm_section": "Table 2-1 (CS0 SDRAM Space)"
+    },
+    {
+      "name": "GPMC_IOB_MAILBOX",
+      "base": "0xA5800000",
+      "size": "0x00800000",
+      "category": "GPMC_MEMORY",
+      "trm_section": "Chapter 11 (GPMC) \u2014 IOB AHB mailbox memory-slave window (RED DSMC2; sdk COPROCESSOR_TRANSPORT.md)"
     }
   ]
 }

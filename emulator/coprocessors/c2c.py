@@ -1,363 +1,337 @@
 """
-SPI-Backed Coprocessor Transport & C2C Mailbox Subsystem.
+Coprocessor register transport (SPI) + GPMC IOB mailbox.
 
-Architectural Provenance:
-- On physical RED DSMC2 hardware (TI DM3725 / OMAP3630), address 0x49000000 is the
-  L4-PER AP (Address Protection / Interconnect Firewall) per DM37xx TRM Table 2-4,
-  NOT an external chip-to-chip bus.
-- The OMAP3630 supervisor communicates with coprocessor ASICs (ISP1, ISP2, IOB0, IOB1,
-  LSB FPGA, Sensor) over McSPI (Multichannel Serial Port Interface, McSPI 1..4) and
-  shared-memory mailbox doorbells, as proven by native camera debug shell commands:
-    `read spi ts_isp1 <addr> <len>`
-    `read spi ts_isp2 <addr> <len>`
-    `read spi ts_sensor <addr> <len>`
-    `read spi ts_fpga <addr> <len>`
-- High-bandwidth video DMA between IOB and ISP runs over the 4-lane XAUI SerDes bus,
-  while `system_state_2_if` coordinates state transitions (`RUN (2)` -> `PREVIEW_START (6)`
-  -> `READY_TO_RECORD (10)`) and heartbeats over SPI and mailbox interrupts without
-  tripping `C2C_ERROR` (Event 25) or `FAILED_IOB` (Event 29).
+FW-PROVEN TRANSPORT (sdk findings/hardware/COPROCESSOR_TRANSPORT.md; memory
+`omap-iob-transport`; sdk PR #92). The DSMC2 brain (TI DM3725 / OMAP3630-class) talks
+to the ISP1/ISP2/IOB/LSB-FPGA coprocessors over THREE separate buses — do not conflate
+them:
+
+  1. SPI  — config *register* read/write. On-wire byte frame (fpga_write @0x8070eec0 /
+            fpga_read @0x8070ef5c / isp_reg_read_with_error_code @0x807630b0 ->
+            spi_write_read @0x806d5390; iomap channel builder FUN_8070eec0 emits exactly
+            `{0x81, u32 addr, u32 val}`):
+
+              WRITE: byte[0]=0x81 ; byte[1..4]=addr(u32) ; byte[5..8]=data(u32)  -> 9 bytes
+              READ : byte[0]=0x01 ; byte[1..4]=addr(u32) ; then poll ACK byte 0x1F
+                     (<=10 tries) and read 4 bytes back (little-endian u32)
+
+            addr/data are little-endian on the wire. Target is selected by a CS mux
+            ("SPI CS MuxSel 1/2/3"): ISP1 = SPI target 7, ISP2 = SPI target 8,
+            IOB = `iobspi`, slave/second IOB = `iobslavespi`, LSB-FPGA = iomap channel 6.
+
+  2. GPMC — the IOB appears as a memory-mapped slave; its AHB mailbox lives at
+            0xA580_0000. This IS the mailbox (events EVNT_MAILBOX_IOB0/1,
+            EVNT_MAILBOX_ISP0/1/2). Kept SEPARATE from SPI below (IobMailboxDevice).
+
+  3. XAUI/C2C — a SerDes PHY used for BULK DMA ONLY (frames / cal maps / video),
+            6 endpoints (IOB, ISP0-2, MON0, EXP1/2). NOT a network, NOT register access.
+            Not modelled here (register access never uses it).
+
+NOTE (provenance correction): earlier revisions of this file invented a framed "C2C SPI
+mailbox" (0xC2 magic header, 0xA5 ACK reply, a REG_DEVICE_ID/REG_MAILBOX_CMD register
+map). No such framing exists in the firmware. This model now replays the real opcode
+frame above and drives the drivers' real register addresses (e.g. the LSB-FPGA AXI space
+0x44A00000 reached over iomap ch6; version read at 0xE0000908).
 """
 
 import struct
-import zlib
 from typing import Dict, Any, List, Optional, Tuple
-from collections import deque
 from emulator.core.bus import Device
 from emulator.devices.mcspi import OmapMcspi, SpiTargetDevice
 
 
+# SPI frame opcodes (byte[0] of a transfer), FW-proven.
+SPI_OP_WRITE = 0x81
+SPI_OP_READ = 0x01
+SPI_ACK = 0x1F           # byte the target drives when a read result is ready
+SPI_ACK_MAX_POLLS = 10   # spi_write_wait_for_ack_then_read tries=10
+
+
 class CoprocessorSpiTarget(SpiTargetDevice):
     """
-    SPI Target Bridge binding an OmapMcspi channel (`ts_isp1`, `ts_isp2`, `ts_fpga`,
-    `ts_sensor`, `ts_iob0`, `ts_iob1`) to its underlying coprocessor model and C2C mailbox.
+    One SPI-selected coprocessor register file (ISP1, ISP2, IOB, LSB-FPGA ...).
+
+    Implements the firmware's byte-stream frame as a *state machine* clocked one SPI
+    byte at a time (SPI word length is 8 bits for this bus):
+
+      host clocks 0x81 -> collect 4 addr bytes -> collect 4 data bytes -> commit write
+      host clocks 0x01 -> collect 4 addr bytes -> arm read:
+                          next poll bytes return 0x00 until ACK, then 0x1F,
+                          then the 4 little-endian data bytes of the register.
+
+    `registers` maps a 32-bit register address -> 32-bit value, exactly the addresses the
+    driver pokes (not an invented 0x0000/0x0004 map).
     """
 
-    # Standard SPI Target Status & Identity Registers
-    REG_DEVICE_ID = 0x0000
-    REG_FW_VERSION = 0x0004
-    REG_SYSTEM_STATE = 0x0008
-    REG_HEARTBEAT = 0x000C
-    REG_C2C_STATUS = 0x0010
-    REG_MAILBOX_CMD = 0x0014
-    REG_MAILBOX_CRC = 0x0018
+    # Frame phases
+    _IDLE = 0
+    _W_ADDR = 1      # collecting write address bytes
+    _W_DATA = 2      # collecting write data bytes
+    _R_ADDR = 3      # collecting read address bytes
+    _R_ACK = 4       # driving 0x00.. then ACK 0x1F
+    _R_DATA = 5      # shifting out the 4 result bytes
 
-    TARGET_DEVICE_IDS = {
-        "ts_isp1": 0x49535031,    # 'ISP1'
-        "ts_isp2": 0x49535032,    # 'ISP2'
-        "ts_fpga": 0x46504741,    # 'FPGA' (Kintex-7 LSB)
-        "ts_sensor": 0x53454E53,  # 'SENS' (DRAGON / HELIUM / MONSTRO)
-        "ts_iob0": 0x494F4230,    # 'IOB0'
-        "ts_iob1": 0x494F4231,    # 'IOB1'
-        "ts_lma": 0x4C4D4130,     # 'LMA0'
-        "ts_audio": 0x41554430,   # 'AUD0'
-        "ts_wireless": 0x574C414E # 'WLAN'
-    }
-
-    def __init__(self, name: str, port_id: int, channel: int, core_id: int, transport: "C2cTransport"):
+    def __init__(self, name: str, port_id: int, channel: int, spi_target_id: int,
+                 transport: "CoprocessorTransport", default_reg: int = 0x00000000):
         super().__init__(name, port_id, channel)
-        self.core_id = core_id
+        self.spi_target_id = spi_target_id       # CS-mux selector (ISP1=7, ISP2=8, ...)
         self.transport = transport
-        self.heartbeat_seq = 1
-        self.registers[self.REG_DEVICE_ID] = self.TARGET_DEVICE_IDS.get(name, 0x52454432)
-        self.registers[self.REG_FW_VERSION] = 0x00070401  # v7.4.1
-        self.registers[self.REG_SYSTEM_STATE] = C2cTransport.STATE_READY_TO_RECORD
-        self.registers[self.REG_HEARTBEAT] = 0x00000001
-        self.registers[self.REG_C2C_STATUS] = 0x00000001  # Link OK, zero errors
+        self.default_reg = default_reg
+        # Frame state machine
+        self._phase = self._IDLE
+        self._buf = bytearray()
+        self._cur_addr = 0
+        self._ack_polls = 0
+        self._out = bytearray()
+        self.last_write: Optional[Tuple[int, int]] = None
+        self.last_read: Optional[Tuple[int, int]] = None
+
+    # --- register backing store -------------------------------------------------
+    def reg_get(self, addr: int) -> int:
+        return self.registers.get(addr & 0xFFFFFFFF, self.default_reg)
+
+    def reg_set(self, addr: int, val: int) -> None:
+        self.registers[addr & 0xFFFFFFFF] = val & 0xFFFFFFFF
+
+    # --- byte-level SPI frame (the real transport) ------------------------------
+    def transceive_byte(self, tx_byte: int) -> int:
+        """
+        Clock one SPI byte. Returns the byte the target drives on MISO for this beat.
+        Implements the FW frame: [0x81|0x01][addr u32][data u32?] + ACK 0x1F + 4B read.
+        """
+        self.transfer_count += 1
+        tx_byte &= 0xFF
+
+        if self._phase == self._IDLE:
+            if tx_byte == SPI_OP_WRITE:
+                self._phase = self._W_ADDR
+                self._buf = bytearray()
+            elif tx_byte == SPI_OP_READ:
+                self._phase = self._R_ADDR
+                self._buf = bytearray()
+            # Any other opcode: ignore, stay idle (MISO 0).
+            return 0x00
+
+        if self._phase == self._W_ADDR:
+            self._buf.append(tx_byte)
+            if len(self._buf) == 4:
+                self._cur_addr = int.from_bytes(self._buf, "little")
+                self._buf = bytearray()
+                self._phase = self._W_DATA
+            return 0x00
+
+        if self._phase == self._W_DATA:
+            self._buf.append(tx_byte)
+            if len(self._buf) == 4:
+                data = int.from_bytes(self._buf, "little")
+                self.reg_set(self._cur_addr, data)
+                self.last_write = (self._cur_addr, data)
+                self._phase = self._IDLE
+            return 0x00
+
+        if self._phase == self._R_ADDR:
+            self._buf.append(tx_byte)
+            if len(self._buf) == 4:
+                self._cur_addr = int.from_bytes(self._buf, "little")
+                self._ack_polls = 0
+                self._phase = self._R_ACK
+            return 0x00
+
+        if self._phase == self._R_ACK:
+            # Target becomes ready immediately in the model; drive the ACK byte.
+            self._ack_polls += 1
+            val = self.reg_get(self._cur_addr)
+            self.last_read = (self._cur_addr, val)
+            self._out = bytearray(val.to_bytes(4, "little"))
+            self._phase = self._R_DATA
+            return SPI_ACK
+
+        if self._phase == self._R_DATA:
+            out = self._out.pop(0) if self._out else 0x00
+            if not self._out:
+                self._phase = self._IDLE
+            return out
+
+        return 0x00
 
     def transceive_word(self, tx_word: int) -> Optional[int]:
         """
-        Process SPI word transfer.
-        If the word is a framed C2C SPI mailbox header (magic upper byte 0xC2),
-        route through the C2C mailbox protocol and return the ACK word.
-        Otherwise return None so standard McSPI loopback behavior is preserved.
+        Legacy 32-bit-word entry point retained for McSPI drivers that clock a full word.
+        Decomposes the word into 4 big-endian-on-MSB-first SPI beats (MSB clocked first,
+        as the OMAP McSPI does for an 8-bit-per-element >1-word transfer) and returns the
+        assembled MISO word. Byte-oriented callers should use transceive_byte directly.
         """
-        self.transfer_count += 1
-        if (tx_word >> 24) == 0xC2:
-            cmd = (tx_word >> 16) & 0xFF
-            arg = tx_word & 0xFFFF
-            resp = self.transport.send_packet(self.core_id, cmd, [arg])
-            ack_payload = (resp[0] & 0xFFFF) if resp else 0x0001
-            return (0xA5000000 | ((cmd & 0xFF) << 16) | ack_payload) & 0xFFFFFFFF
-        return None
+        rx = 0
+        for shift in (24, 16, 8, 0):
+            rx = (rx << 8) | self.transceive_byte((tx_word >> shift) & 0xFF)
+        return rx & 0xFFFFFFFF
 
-    def read_reg(self, addr: int, length: int = 4) -> bytes:
-        self.transfer_count += 1
-        self.heartbeat_seq = (self.heartbeat_seq + 1) & 0xFFFFFFFF
-        self.registers[self.REG_HEARTBEAT] = self.heartbeat_seq
-        self.registers[self.REG_SYSTEM_STATE] = self.transport.system_state
-        return super().read_reg(addr, length)
+    def reset_frame(self) -> None:
+        self._phase = self._IDLE
+        self._buf = bytearray()
+        self._out = bytearray()
 
 
-class C2cTransport(Device):
+class IobMailboxDevice(Device):
     """
-    SPI-Backed Chip-to-Chip (C2C) Mailbox and Coprocessor Transport Subsystem.
+    GPMC AHB mailbox the IOB exposes as a memory-mapped slave at 0xA580_0000.
 
-    Coordinates communication between the OMAP3630 ARM Cortex-A8 (ThreadX) and
-    coprocessor targets (`ts_isp1`, `ts_isp2`, `ts_fpga`, `ts_sensor`, `ts_iob0`, `ts_iob1`)
-    over McSPI controllers (McSPI 1..4) and shared DDR mailbox rings.
+    This is transport #1 (GPMC), SEPARATE from SPI. The OMAP writes a mailbox descriptor
+    here and the IOB raises EVNT_MAILBOX_IOB0/1 / EVNT_MAILBOX_ISP0/1/2. Register access
+    (config) does NOT go through here — it goes over SPI (CoprocessorSpiTarget).
+    Modelled as a simple word-addressable region with an optional command callback.
     """
 
-    # Canonical McSPI4 Coprocessor Mailbox Host Base Address (TRM Table 2-3: McSPI4 @ 0x480BA000, IRQ 48)
-    BASE_ADDR = 0x480BA000
-    SIZE = 0x1000
+    BASE_ADDR = 0xA5800000
+    SIZE = 0x00800000  # 0xA5800000 - 0xA5FFFFFF
 
-    # Core IDs
-    CORE_IOB0 = 0
-    CORE_IOB1 = 1
-    CORE_ISP1 = 2
-    CORE_ISP2 = 3
+    def __init__(self, intc=None, mailbox_irq: Optional[int] = None):
+        self.intc = intc
+        self.mailbox_irq = mailbox_irq
+        self.mem: Dict[int, int] = {}
+        self.command_log: List[Tuple[int, int]] = []
 
-    # system_state_2_if State Machine Constants
-    STATE_INIT = 0
-    STATE_RUN = 2
-    STATE_PREVIEW_START = 6
-    STATE_READY_TO_RECORD = 10
+    def read(self, offset: int, size: int) -> int:
+        return self.mem.get(offset & ~0x3, 0x00000000)
 
-    # Event IDs (must remain clear during healthy operation)
-    EVENT_C2C_ERROR = 25
-    EVENT_FAILED_IOB = 29
+    def write(self, offset: int, size: int, val: int):
+        off = offset & ~0x3
+        self.mem[off] = val & 0xFFFFFFFF
+        self.command_log.append((off, val & 0xFFFFFFFF))
+        if self.mailbox_irq is not None and self.intc:
+            self.intc.assert_irq(self.mailbox_irq)
 
-    # Mailbox Register Offsets (for direct register/FIFO inspection & legacy tests)
-    REG_CTRL = 0x00         # Control register (Reset, Enable, Flush)
-    REG_STATUS = 0x04       # Status (TX Empty, TX Full, RX Valid, Busy, Error)
-    REG_TARGET = 0x08       # Selected target coprocessor (0..3)
-    REG_TX_DATA = 0x0C      # ARM -> Coprocessor 32-bit Data FIFO
-    REG_RX_DATA = 0x10      # Coprocessor -> ARM 32-bit Data FIFO
-    REG_IRQ_ENABLE = 0x14   # Interrupt enable mask
-    REG_IRQ_STATUS = 0x18   # Interrupt status (write 1 to clear)
-    REG_PACKET_LEN = 0x1C   # Current packet length in words
-    REG_SEQ_NUM = 0x20      # Mailbox packet sequence counter
-    REG_LAST_CRC = 0x24     # Last validated packet CRC32
-    REG_SYS_STATE = 0x28    # system_state_2_if current state (2 -> 6 -> 10)
 
-    # Status Flags
-    STAT_TX_EMPTY = 0x01
-    STAT_TX_FULL = 0x02
-    STAT_RX_VALID = 0x04
-    STAT_BUSY = 0x08
-    STAT_ERROR = 0x10
+class CoprocessorTransport(Device):
+    """
+    Binds the SPI coprocessor targets to the McSPI controllers and exposes the firmware's
+    `read spi <target> <addr> <len>` / register-write primitives directly (byte frame).
 
-    # Canonical SPI Target Topology -> (mcspi_port_id, channel, core_id)
+    No invented mailbox/state-machine protocol: registers move over SPI; the GPMC mailbox
+    (IobMailboxDevice) is a separate device; bulk DMA (XAUI/C2C) is out of scope here.
+    """
+
+    # CS-mux SPI target ids (FW-proven: ISP1 = target 7, ISP2 = target 8).
+    SPI_TARGET_ISP1 = 7
+    SPI_TARGET_ISP2 = 8
+    SPI_TARGET_IOB = 0          # `iobspi` (distinct mux leg)
+    SPI_TARGET_IOB_SLAVE = 1    # `iobslavespi` / IOB2
+    IOMAP_CHANNEL_LSB_FPGA = 6  # LSB-FPGA reached over iomap channel 6
+
+    # LSB-FPGA real registers (sdk LSB_FPGA_CHARACTERIZED/NAMED): internal AXI 0x44A00000
+    # space + version at 0xE0000908. Seed bring-up values so driver reads see them.
+    LSB_FPGA_VERSION_ADDR = 0xE0000908
+    LSB_FPGA_VERSION = 0x00000014      # rev 0x14 (unlocks low 0x44A0xxxx window)
+
+    # Named target -> (mcspi_port_id, channel, spi_target_id). Ports/channels are the
+    # emulator's McSPI wiring; the spi_target_id is the FW CS-mux selector.
     SPI_TARGET_MAP: Dict[str, Tuple[int, int, int]] = {
-        "ts_isp1": (1, 0, CORE_ISP1),
-        "ts_isp2": (1, 1, CORE_ISP2),
-        "ts_fpga": (2, 0, CORE_IOB0),
-        "ts_sensor": (2, 1, CORE_IOB1),
-        "ts_iob0": (3, 0, CORE_IOB0),
-        "ts_iob1": (3, 1, CORE_IOB1),
-        "ts_lma": (3, 2, CORE_IOB0),
-        "ts_audio": (3, 3, CORE_IOB0),
-        "ts_wireless": (4, 0, CORE_IOB0),
+        "ts_isp1": (1, 0, SPI_TARGET_ISP1),
+        "ts_isp2": (1, 1, SPI_TARGET_ISP2),
+        "ts_iob0": (3, 0, SPI_TARGET_IOB),
+        "ts_iob1": (3, 1, SPI_TARGET_IOB_SLAVE),
+        "ts_fpga": (2, 0, IOMAP_CHANNEL_LSB_FPGA),
     }
 
     def __init__(self, intc=None, mcspi: Optional[Dict[int, OmapMcspi]] = None):
         self.intc = intc
-        self.ctrl = 0x01         # Enabled
-        self.target_core = self.CORE_IOB0
-        self.irq_enable = 0x00
-        self.irq_status = 0x00
-
-        # Dedicated Core FIFOs: core_id -> deque of 32-bit words
-        self.tx_fifos: Dict[int, deque] = {i: deque(maxlen=256) for i in range(4)}
-        self.rx_fifos: Dict[int, deque] = {i: deque(maxlen=256) for i in range(4)}
-
-        # Registered coprocessor models
-        self.coprocessors: Dict[int, Any] = {}
-        self.packet_counter = 0
-        self.sequence_number = 0
-        self.last_crc32 = 0x00000000
-
-        # system_state_2_if state progression: RUN (2) -> PREVIEW_START (6) -> READY_TO_RECORD (10)
-        self.state_history: List[int] = [
-            self.STATE_RUN,
-            self.STATE_PREVIEW_START,
-            self.STATE_READY_TO_RECORD,
-        ]
-        self.system_state = self.STATE_READY_TO_RECORD
-        self.active_events: Dict[int, bool] = {
-            self.EVENT_C2C_ERROR: False,
-            self.EVENT_FAILED_IOB: False,
-        }
-
-        # Named SPI targets bound to McSPI controllers
         self.spi_targets: Dict[str, CoprocessorSpiTarget] = {}
         self.mcspi_controllers: Dict[int, OmapMcspi] = {}
         self._init_spi_targets()
+        self.mailbox = IobMailboxDevice(intc=intc)
         if mcspi:
             self.bind_mcspi(mcspi)
 
     def _init_spi_targets(self):
-        for name, (port_id, channel, core_id) in self.SPI_TARGET_MAP.items():
-            self.spi_targets[name] = CoprocessorSpiTarget(
-                name=name,
-                port_id=port_id,
-                channel=channel,
-                core_id=core_id,
-                transport=self,
+        for name, (port_id, channel, target_id) in self.SPI_TARGET_MAP.items():
+            tgt = CoprocessorSpiTarget(
+                name=name, port_id=port_id, channel=channel,
+                spi_target_id=target_id, transport=self,
             )
+            if name == "ts_fpga":
+                tgt.reg_set(self.LSB_FPGA_VERSION_ADDR, self.LSB_FPGA_VERSION)
+            self.spi_targets[name] = tgt
 
     def bind_mcspi(self, mcspi_controllers: Dict[int, OmapMcspi]):
-        """Bind coprocessor SPI targets (`ts_isp1`, `ts_isp2`, `ts_fpga`, `ts_sensor`, etc.) to McSPI 1..4."""
         self.mcspi_controllers = mcspi_controllers
         for name, target in self.spi_targets.items():
             ctrl = mcspi_controllers.get(target.port_id)
             if ctrl is not None:
                 ctrl.attach_target(target.channel, target)
 
-    def register_coprocessor(self, core_id: int, coproc: Any):
-        """Register a coprocessor model to receive C2C / SPI mailbox packets."""
-        self.coprocessors[core_id] = coproc
-
-    def read(self, offset: int, size: int) -> int:
-        """Handle reads from C2C mailbox state registers."""
-        if offset == self.REG_CTRL:
-            return self.ctrl
-        elif offset == self.REG_STATUS:
-            status = self.STAT_TX_EMPTY
-            if self.rx_fifos[self.target_core]:
-                status |= self.STAT_RX_VALID
-            return status
-        elif offset == self.REG_TARGET:
-            return self.target_core
-        elif offset == self.REG_RX_DATA:
-            if self.rx_fifos[self.target_core]:
-                return self.rx_fifos[self.target_core].popleft()
-            return 0x00000000
-        elif offset == self.REG_IRQ_ENABLE:
-            return self.irq_enable
-        elif offset == self.REG_IRQ_STATUS:
-            return self.irq_status
-        elif offset == self.REG_PACKET_LEN:
-            return len(self.rx_fifos[self.target_core])
-        elif offset == self.REG_SEQ_NUM:
-            return self.sequence_number
-        elif offset == self.REG_LAST_CRC:
-            return self.last_crc32
-        elif offset == self.REG_SYS_STATE:
-            return self.system_state
-        return 0x00000000
-
-    def write(self, offset: int, size: int, val: int):
-        """Handle writes to C2C mailbox state registers."""
-        if offset == self.REG_CTRL:
-            self.ctrl = val
-            if val & 0x02:  # Flush
-                for f in self.tx_fifos.values():
-                    f.clear()
-                for f in self.rx_fifos.values():
-                    f.clear()
-        elif offset == self.REG_TARGET:
-            self.target_core = val & 0x03
-        elif offset == self.REG_TX_DATA:
-            self.send_word(self.target_core, val)
-        elif offset == self.REG_IRQ_ENABLE:
-            self.irq_enable = val
-        elif offset == self.REG_IRQ_STATUS:
-            self.irq_status &= ~val
-        elif offset == self.REG_SYS_STATE:
-            self.transition_system_state(val)
-
-    def transition_system_state(self, new_state: int) -> int:
-        """Advance `system_state_2_if` state (`RUN (2)` -> `PREVIEW_START (6)` -> `READY_TO_RECORD (10)`)."""
-        self.system_state = int(new_state)
-        if self.system_state not in self.state_history:
-            self.state_history.append(self.system_state)
-        for t in self.spi_targets.values():
-            t.registers[CoprocessorSpiTarget.REG_SYSTEM_STATE] = self.system_state
-        return self.system_state
-
-    def send_word(self, target_core: int, word: int):
-        """Write a 32-bit word into target coprocessor TX FIFO and dispatch over SPI mailbox."""
-        fifo = self.tx_fifos[target_core]
-        fifo.append(word & 0xFFFFFFFF)
-        self.packet_counter += 1
-
-        if target_core in self.coprocessors:
-            resp = self.coprocessors[target_core].handle_c2c_word(word)
-            if resp is not None:
-                self.rx_fifos[target_core].append(resp & 0xFFFFFFFF)
-                if self.intc and (self.irq_enable & 0x01):
-                    self.intc.assert_irq(48)  # McSPI4 / Mailbox IRQ 48
-
-    @staticmethod
-    def compute_packet_crc(words: List[int]) -> int:
-        """Compute 32-bit CRC over a sequence of 32-bit mailbox packet words."""
-        raw = b"".join(struct.pack("<I", w & 0xFFFFFFFF) for w in words)
-        return zlib.crc32(raw) & 0xFFFFFFFF
-
-    def send_packet(self, target_core: int, cmd: int, payload: List[int]) -> Optional[List[int]]:
-        """
-        Send a framed RTOS mailbox packet (header, sequence number, payload, CRC32)
-        to a coprocessor and return the response words.
-        """
-        self.sequence_number = (self.sequence_number + 1) & 0xFFFF
-        # Header: (target << 24) | (cmd << 16) | len(payload)
-        hdr = ((target_core & 0xFF) << 24) | ((cmd & 0xFF) << 16) | (len(payload) & 0xFFFF)
-        frame_words = [hdr, self.sequence_number] + [w & 0xFFFFFFFF for w in payload]
-        self.last_crc32 = self.compute_packet_crc(frame_words)
-
-        self.send_word(target_core, hdr)
-        for w in payload:
-            self.send_word(target_core, w)
-
-        # Handle heartbeat / state queries at transport layer if needed
-        if cmd == 0x01:  # Heartbeat ping
-            return [0x01, self.sequence_number, self.system_state, self.last_crc32]
-        elif cmd == 0x02 and payload:  # system_state_2_if transition
-            new_st = self.transition_system_state(payload[0])
-            return [0x00, new_st]
-
-        coproc = self.coprocessors.get(target_core)
-        if coproc and hasattr(coproc, "handle_c2c_command"):
-            return coproc.handle_c2c_command(cmd, payload)
-        return [0x00000000]
-
-    def spi_read(self, target_name: str, addr: int, length: int = 4) -> bytes:
-        """
-        Execute `read spi <target> <addr> <len>` against a named SPI target
-        (`ts_isp1`, `ts_isp2`, `ts_sensor`, `ts_fpga`, `ts_iob0`, `ts_iob1`).
-        """
-        norm = target_name.strip().lower()
-        target = self.spi_targets.get(norm)
-        if target is None:
+    def _target(self, target_name: str) -> CoprocessorSpiTarget:
+        tgt = self.spi_targets.get(target_name.strip().lower())
+        if tgt is None:
             raise KeyError(f"Unknown SPI target: {target_name}")
-        self.packet_counter += 1
-        return target.read_reg(addr, length)
+        return tgt
+
+    # --- firmware-faithful register primitives (byte frame) ---------------------
+    def spi_write_reg(self, target_name: str, addr: int, data: int) -> None:
+        """Clock a real WRITE frame `[0x81][addr u32][data u32]` into a target."""
+        tgt = self._target(target_name)
+        tgt.reset_frame()
+        frame = bytes([SPI_OP_WRITE]) + (addr & 0xFFFFFFFF).to_bytes(4, "little") \
+            + (data & 0xFFFFFFFF).to_bytes(4, "little")
+        for b in frame:
+            tgt.transceive_byte(b)
+
+    def spi_read_reg(self, target_name: str, addr: int) -> int:
+        """Clock a real READ frame `[0x01][addr u32]` + ACK 0x1F + 4B; return the u32."""
+        tgt = self._target(target_name)
+        tgt.reset_frame()
+        for b in bytes([SPI_OP_READ]) + (addr & 0xFFFFFFFF).to_bytes(4, "little"):
+            tgt.transceive_byte(b)
+        # Poll for ACK (<=10), then shift out 4 data bytes.
+        ack = 0x00
+        for _ in range(SPI_ACK_MAX_POLLS):
+            ack = tgt.transceive_byte(0x00)
+            if ack == SPI_ACK:
+                break
+        if ack != SPI_ACK:
+            raise TimeoutError(f"SPI read ACK 0x1F not seen for {target_name} @ 0x{addr:08X}")
+        data = bytes(tgt.transceive_byte(0x00) for _ in range(4))
+        return int.from_bytes(data, "little")
+
+    # --- convenience: `read spi <target> <addr> <len>` shell semantics ----------
+    def spi_read(self, target_name: str, addr: int, length: int = 4) -> bytes:
+        out = bytearray()
+        for off in range(0, length, 4):
+            out.extend(self.spi_read_reg(target_name, addr + off).to_bytes(4, "little"))
+        return bytes(out[:length])
 
     def spi_write(self, target_name: str, addr: int, data: bytes) -> bool:
-        """
-        Execute a register write to a named SPI target (`ts_isp1`, `ts_isp2`, `ts_sensor`, `ts_fpga`).
-        """
-        norm = target_name.strip().lower()
-        target = self.spi_targets.get(norm)
-        if target is None:
-            raise KeyError(f"Unknown SPI target: {target_name}")
-        self.packet_counter += 1
-        return target.write_reg(addr, data)
+        for off in range(0, len(data), 4):
+            chunk = data[off:off + 4].ljust(4, b"\x00")
+            self.spi_write_reg(target_name, addr + off, int.from_bytes(chunk, "little"))
+        return True
 
     def get_status(self) -> Dict[str, Any]:
-        """Return SPI-backed C2C diagnostic telemetry."""
         return {
-            "enabled": bool(self.ctrl & 0x01),
-            "transport": "McSPI (SPI-backed mailbox)",
-            "target_core": self.target_core,
-            "packets_transmitted": self.packet_counter,
-            "sequence_number": self.sequence_number,
-            "last_crc32": f"0x{self.last_crc32:08X}",
-            "system_state": self.system_state,
-            "state_history": list(self.state_history),
-            "c2c_error_event_25": self.active_events[self.EVENT_C2C_ERROR],
-            "failed_iob_event_29": self.active_events[self.EVENT_FAILED_IOB],
-            "spi_targets": list(self.spi_targets.keys()),
-            "connected_cores": list(self.coprocessors.keys()),
-            "rx_queue_lengths": {c: len(f) for c, f in self.rx_fifos.items()},
+            "transport": "SPI register frame [0x81/0x01][addr][data], ACK 0x1F",
+            "spi_targets": {
+                name: {
+                    "spi_target_id": t.spi_target_id,
+                    "transfers": t.transfer_count,
+                    "last_write": t.last_write,
+                    "last_read": t.last_read,
+                }
+                for name, t in self.spi_targets.items()
+            },
+            "gpmc_mailbox_base": f"0x{IobMailboxDevice.BASE_ADDR:08X}",
+            "gpmc_mailbox_writes": len(self.mailbox.command_log),
         }
 
 
 class IobDoorbellDevice(Device):
     """
-    Hardware Doorbell MMIO device for Tensilica IOB0 (0x3FFE8000) and IOB1 (0x4FFE8000).
-    Triggered by ARM Cortex-A8 ThreadX at 0x3FFE8004 and 0x4FFE8004 to dispatch shared-memory C2C mailbox packets.
+    Tensilica IOB-local shared-memory doorbell MMIO (IOB0 @0x3FFE8000, IOB1 @0x4FFE8000),
+    in the Xtensa DRAM region. A write to +0x04 rings the doorbell: the model fetches a
+    16-byte descriptor from the shared DDR mailbox (0x800B0FFC / 0x800B17FC) and dispatches
+    it to the Xtensa core's handle_c2c_command.
+
+    This is a local DDR-descriptor doorbell (how the OMAP kicks the IOB after writing a
+    descriptor to shared memory), distinct from both the SPI register frame (regs) and the
+    GPMC AHB mailbox @0xA5800000. It carries no SPI register protocol.
     """
 
     BASE_ADDR_IOB0 = 0x3FFE8000
@@ -383,7 +357,6 @@ class IobDoorbellDevice(Device):
     def write(self, offset: int, size: int, val: int):
         if offset == 0x04:
             self.doorbell_count = val & 0xFFFFFFFF
-            # Fetch 16-byte mailbox descriptor from DDR shared memory
             try:
                 raw = self.bus.read_mem(self.mailbox_base_addr, 16)
                 cmd, arg0, arg1, arg2 = struct.unpack("<4I", raw)

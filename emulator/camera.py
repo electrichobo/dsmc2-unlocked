@@ -45,7 +45,7 @@ from emulator.devices.i2c_dsmc2_chips import (
 from emulator.devices.l4_interconnect import OmapL4Ap, OmapScm, OmapScmId, OmapPrm, OmapSdrc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.devices.rig_manager import RigManager, ConnectorPosition
-from emulator.coprocessors.c2c import C2cTransport, IobDoorbellDevice
+from emulator.coprocessors.c2c import CoprocessorTransport, IobDoorbellDevice, IobMailboxDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
 from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
@@ -358,23 +358,23 @@ class Dsmc2Camera:
         self.cam_isp = OmapCamIsp()
         self.bus.register_device(OmapCamIsp.BASE_ADDR, OmapCamIsp.SIZE, self.cam_isp)
 
-        # 11. SPI-Backed Chip-to-Chip (C2C) Mailbox & Coprocessor ASICs
-        # Note: 0x49000000 is L4-PER AP (registered above as self.l4_per_ap);
-        # C2cTransport binds directly to McSPI 1..4 targets (ts_isp1, ts_isp2, ts_fpga, ts_sensor).
-        self.c2c = C2cTransport(intc=self.intc, mcspi=self.mcspi)
+        # 11. Coprocessor transport (FW-proven). Config registers move over SPI as a byte
+        # frame [0x81/0x01][addr u32][data u32] + ACK 0x1F (see coprocessors/c2c.py), bound
+        # to the McSPI controllers (ts_isp1/ts_isp2/ts_iob0/ts_iob1/ts_fpga). The GPMC IOB
+        # AHB mailbox @0xA5800000 is a SEPARATE device. Note: 0x49000000 is L4-PER AP.
+        self.c2c = CoprocessorTransport(intc=self.intc, mcspi=self.mcspi)
+        self.bus.register_device(IobMailboxDevice.BASE_ADDR, IobMailboxDevice.SIZE, self.c2c.mailbox)
 
+        # Xtensa coprocessor cores (asserted behavioural models; see FIDELITY_MATRIX).
         self.iob0 = Iob0Coprocessor()
         self.iob1 = Iob1Coprocessor()
         self.isp1 = IspCoprocessor(core_id=2)
         self.isp2 = IspCoprocessor(core_id=3)
-        self.c2c.register_coprocessor(C2cTransport.CORE_IOB0, self.iob0)
-        self.c2c.register_coprocessor(C2cTransport.CORE_IOB1, self.iob1)
-        self.c2c.register_coprocessor(C2cTransport.CORE_ISP1, self.isp1)
-        self.c2c.register_coprocessor(C2cTransport.CORE_ISP2, self.isp2)
 
-        # 11b. Tensilica IOB0 and IOB1 Mailbox Doorbell MMIO
+        # 11b. Tensilica IOB0/IOB1 local shared-memory doorbell MMIO (DDR descriptor kick,
+        # distinct from the SPI register frame and the GPMC mailbox).
         self.iob0_doorbell = IobDoorbellDevice(
-            core_id=C2cTransport.CORE_IOB0,
+            core_id=0,
             bus=self.bus,
             coprocessor=self.iob0,
             mailbox_base_addr=self.fw(self.IOB0_MAILBOX)
@@ -382,7 +382,7 @@ class Dsmc2Camera:
         self.bus.register_device(IobDoorbellDevice.BASE_ADDR_IOB0, IobDoorbellDevice.SIZE, self.iob0_doorbell)
 
         self.iob1_doorbell = IobDoorbellDevice(
-            core_id=C2cTransport.CORE_IOB1,
+            core_id=1,
             bus=self.bus,
             coprocessor=self.iob1,
             mailbox_base_addr=self.fw(self.IOB1_MAILBOX)

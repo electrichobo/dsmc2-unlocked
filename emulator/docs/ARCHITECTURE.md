@@ -74,7 +74,8 @@ The `SystemBus` models the physical address space of the Texas Instruments DM372
 | `0x4806A000 - 0x4806CFFF` | 12 KB | OMAP UART1 (`0x4806A000`) & UART2 (`0x4806C000`) | `OmapUart` |
 | `0x48070000 - 0x48073FFF` | 16 KB | OMAP I2C1 (`0x48070000`) & I2C2 (`0x48072000`) | `OmapI2c` |
 | `0x48086000 - 0x49040FFF` | Varies | OMAP GPTimer 1..11 (`TIMER_MAP`) | `OmapGPTimer` |
-| `0x48098000 - 0x480BAFFF` | Varies | OMAP McSPI 1..4 (`MCSPI_MAP`, SPI Coprocessor Targets) | `OmapMcspi` + `C2cTransport` |
+| `0x48098000 - 0x480BAFFF` | Varies | OMAP McSPI 1..4 (`MCSPI_MAP`, SPI Coprocessor Targets) | `OmapMcspi` + `CoprocessorTransport` (SPI register frame `[0x81/0x01][addr][data]`, ACK 0x1F) |
+| `0xA5800000 - 0xA5FFFFFF` | 8 MB | GPMC IOB AHB mailbox (memory-slave), separate from SPI | `IobMailboxDevice` |
 | `0x48200000 - 0x48200FFF` | 4 KB | OMAP MPU Interrupt Controller (INTC) | `OmapIntc` |
 | `0x48306000 - 0x48307FFF` | 8 KB | OMAP L4-Wakeup Power & Reset Management (`PRM`) | `OmapPrm` |
 | `0x48310000 - 0x49059FFF` | Varies | OMAP GPIO 1..6 (`GPIO_MAP`) | `OmapGpio` |
