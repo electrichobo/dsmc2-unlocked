@@ -15,7 +15,7 @@ Legend for **Source**:
 - **SYNTHETIC (intentional)** — deliberately fake placeholder data (e.g. redacted serials),
   correct by design for a public clean-room emulator.
 
-Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
+Counts: **24 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
 
 ---
 
@@ -23,7 +23,7 @@ Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 
 | Model | What it claims | Source | Gaps |
 |---|---|---|---|
-| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, CS-mux target ids (ISP1=7, ISP2=8, IOB=iobspi, LSB-FPGA=iomap ch6); LSB-FPGA regs at real AXI `0x44A00000` space + version `0xE0000908`. | **FINDING** — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; memory `omap-iob-transport`. **Fixed in this PR** (was the invented 0xC2/0xA5 frame + REG_DEVICE_ID map). | Register *contents*/side-effects not modeled (reads return last-written or seeded value); no gating logic (rev<0x14 low-window block, XAUI-up high-window gate) yet; targets are register files, not live logic. |
+| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, CS-mux target ids (ISP1=7, ISP2=8, IOB=iobspi, LSB-FPGA=iomap ch6); LSB-FPGA regs at real AXI `0x44A00000` space + version `0xE0000908`; `ts_fpga` bound to McSPI1 ch2 (the firmware's `fpga_read(6,…)` port) and seeded with the XAUI link-up regs (`0x40010008`→`0x7E0`, `0xC2000010`=0, `0xC20000BC`=0, shared with `iob_xaui.FPGA_LINK_UP_REGS`). | **FINDING** — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; memory `omap-iob-transport`. **Fixed in this PR** (was the invented 0xC2/0xA5 frame + REG_DEVICE_ID map; `ts_fpga` was on the wrong McSPI port). | Register *contents*/side-effects not modeled (reads return last-written or seeded value); no gating logic (rev<0x14 low-window block, XAUI-up high-window gate) yet; the firmware's `fpga_read` reaches `ts_fpga` only once the SPI-over-sDMA transport is modeled (next milestone) — today it is DMA-routed and never clocks the target. |
 | `c2c.IobMailboxDevice` | GPMC AHB IOB mailbox memory-slave @`0xA5800000`, separate from SPI. | **FINDING** — `COPROCESSOR_TRANSPORT.md` §1 (GPMC). **Added in this PR.** | Mailbox event/IRQ semantics (EVNT_MAILBOX_IOB0/1, ISP0/1/2) and descriptor format not modeled; plain word store. |
 | `c2c.IobDoorbellDevice` | Xtensa-local doorbell MMIO @`0x3FFE8000`/`0x4FFE8000`; +0x04 write fetches a 16-byte DDR descriptor (`0x800B0FFC`/`0x800B17FC`) and dispatches to the core. | **ASSERTED** (shape plausible; descriptor layout + the `handle_c2c_command` opcodes are invented). Decoupled from SPI in this PR. | Real doorbell register layout and descriptor schema unverified against fw; dispatched command set is asserted. |
 | `xtensa.Iob0Coprocessor` | SATA 3.0 link status, HDMI 1080p tx, STACCELERO accelerometer tilt. | **ASSERTED** — fabricated state (fixed accel vector, HDCP flag, tilt math). Topology contradicts findings (SATA controller is in the IOB and HBA0 goes via SATA3 FPGA; side-SATA is a Marvell serial bridge — memories `marvell-side-sata-bridge`, `dsmc2-two-sata-hbas-one-active`). | Not real Xtensa fw; `handle_c2c_command` opcodes (0x10/0x20/0x26) invented. Depth target: co-sim real `iob0` fw. |
@@ -52,6 +52,7 @@ Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 | `hdq_onewire.OmapHdq1Wire` | HDQ/1-Wire @`0x480B2000`; Maxim ROM cmds, CRC-8, MD5 salt, signature offsets. | **FINDING** — `findings/peripherals/ONEWIRE_SIGNATURE_AND_SENSOR_ID.md` (salt, record offsets). | Board ROM IDs/serials are synthetic (see below) — correct by design. |
 | `hdq_onewire` board data | 5 synthetic DSMC2 boards (LSB `131-0727`, RSB `131-0726`). | **SYNTHETIC (intentional)** — placeholder ROM IDs/serials; real serials are unit-identifying and must never be committed (per RED redaction rule). | By design; part numbers (`131-07xx`) are public-OK, suffixes faked. |
 | `cam_isp.OmapCamIsp` | OMAP Camera ISP @`0x480BC000` + SCM_ID `0x4830A000`. | **TRM/DATASHEET** + fw regs (omap_regs.tsv); DIE_ID synthetic. | — |
+| `iob_xaui.IobXauiWindow` | IOB XAUI AHB aperture @`0x1C000000`: presents an UP IOB↔LSB-FPGA XAUI link on the status words `lsb_fpga_report_xaui_status` (@0x809BCF64) polls via `FUN_80727028` — PCS `+0x2C`=`0x03FFC02F`, XAUI status `+0x10` (PHY-ready set / RX-fault clear), len-err `+0x68`=0, CRC-err `+0xBC`=0, PHY_CLK_CTRL `+0x248` PLL-ready — on both the EXP1 (win `0x20000`) and MON0 (win `0x60000`) port blocks. | **FINDING** — `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; `clean/lsb_fpga.c` + `clean/weapon_left_side_board.c`; memory `omap-iob-transport`, `xaui-lane-sharing-sata-mon0`. Verified at the firmware predicate (`test_xaui_link.py`). | Register *state* only (the real link PHY/PCS bring-up is not simulated); the FPGA-side half (over `fpga_read(6,…)` → `ts_fpga`) requires the McSPI1-over-sDMA transport to complete (next milestone), so the LSB worker is not yet reached in a full boot. |
 | `l4_interconnect` (`OmapL4Ap`/`OmapScm`) | L4 AP/Link Agent, SCM/PADCONF; `0x49000000` = L4-PER AP (Sonics S3220 `0x40000800`). | **TRM/DATASHEET** (Table 2-3/2-4). Correctly replaces the old synthetic C2C at `0x49000000`. | — |
 | `i2c_dsmc2_chips.Si5346ClockSynth` | Si5346 (`0x6C`) ISP clock synth, page map. | **FINDING** — `findings/peripherals/SI5346_CLOCK.md`; `reference/I2C_DEVICE_MAP.md`; memory `si5346-isp-clock`. | 378-entry register map not fully loaded; ACK-level only. |
 | `i2c_dsmc2_chips` (DAC7578, FT5x06) | DAC7578 (`0x49`/`0x4B`), FocalTech FT5x06 (`0x3E`). | **DATASHEET** + `reference/I2C_DEVICE_MAP.md` (IDs synthetic). | — |
@@ -89,21 +90,30 @@ source of truth.
    next layer. Source: `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`,
    `clean/lsb_fpga.c`, `iob.c`.
 
-   **This is the concrete milestone-2 blocker** (pinned down by `boot_to_ui_bringup` /
-   `test_ui_bringup.py`): past the NAND-FS mount, boot reaches the board-bring-up barrier
-   `wait_for_init_flags(0x03300FF7)` and stalls at init flags `0xC21003FF` — the four
-   board-dependent bits (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) never set
-   because the Boards child `weapon_boards_init` (@0x809B378C) AND-waits on six async board
-   workers and the LSB worker `weapon_left_side_board_init` (@0x809B5354) never completes: it
-   loops in the **XAUI link bring-up**, where `FUN_809BCF60` polls the IOB XAUI PCS status
-   through the AHB window `0x1C000000` (`FUN_80727028`: PCS @`0x1C02002C` must read `0x03FFC02F`,
-   RX-err counters @`…068`/`…0BC` read 0) and the LSB-FPGA regs via `fpga_read` (`0x40010008`
-   LinkUp/Aligned/Sync, `0xC2000010`, `0xC20000BC`). Making only that predicate return "link OK"
-   is **not** enough — the LSB worker still blocks earlier/elsewhere in `lsb_fpga_init` /
-   `lsb_fpga_xaui_phy_initx`, so the full live XAUI bring-up (ideally the IOB co-sim) is required.
-   Everything downstream — `run_application` → Camera State Manager → DSS framebuffer and the
-   firmware RCP server — is released only after the Driver thread finishes this cascade, so the
-   firmware-driven UI/DSS/RCP path is gated on this model.
+   **Milestone-2 state** (pinned down by `boot_to_ui_bringup` / `test_ui_bringup.py`): past the
+   NAND-FS mount, boot reaches the board-bring-up barrier `wait_for_init_flags(0x03300FF7)` and
+   stalls at init flags `0xC21003FF` — the four board-dependent bits (Boards 0x400, Fan 0x800,
+   XAUI 0x200000, Mailbox 0x1000000) never set because the Boards child `weapon_boards_init`
+   (@0x809B378C) never completes.
+
+   The **XAUI link-up register model landed in this PR** (`iob_xaui.IobXauiWindow` + `ts_fpga`
+   seeds): the IOB AHB window `0x1C000000` answers the PCS/PHY status `lsb_fpga_report_xaui_status`
+   (@0x809BCF64) polls (PCS @`0x1C02002C`=`0x03FFC02F`, status @`…010`, RX-err @`…068`/`…0BC`=0,
+   PLL/PHY ready), verified against the firmware predicate in `test_xaui_link.py`.
+
+   **Corrected diagnosis**: the full-boot blocker is EARLIER than the XAUI predicate. The board
+   workers run as async ThreadX threads; batch 1 (IOB/ISP-pre) strands on its **McSPI1-over-sDMA**
+   coprocessor transfers (`fpga_read`/`spi_write_wait_for_ack_then_read` → `_spi_write_and_read`,
+   peripheral-synchronised SPI DMA blocking on the DMA-completion semaphore), so the Boards child
+   parks on the first `_tx_event_flags_get(0x3)` and the LSB/XAUI worker
+   `weapon_left_side_board_init` (@0x809B5358) is **never reached**. (This is why #70 found that
+   forcing the predicate was insufficient — the predicate never runs.) The next milestone is the
+   **SPI-over-sDMA transport**: when sDMA runs a channel whose peripheral endpoint is a McSPI
+   TX/RX FIFO, clock the bytes through the McSPI↔coprocessor-target state machine (reuse
+   `CoprocessorSpiTarget`) and write RX back to the DMA dest, then post completion — plus (for the
+   IOB worker's DDR/SCL training) the IOB Xtensa co-sim (item 1). Everything downstream —
+   `run_application` → Camera State Manager → DSS framebuffer and the firmware RCP server — is
+   released only after the Driver thread finishes this cascade.
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),

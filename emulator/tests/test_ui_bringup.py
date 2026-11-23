@@ -6,17 +6,26 @@ After the filesystem mounts (milestone 3, init event flags ``0xC21000FF``) the D
 second ``init_parallel`` cascade and blocks on the board-bring-up barrier
 ``wait_for_init_flags(0x03300FF7)`` (@0x8066C7D8). Boot reaches ``0xC21003FF`` and then stalls on the
 four board-dependent bits -- Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000 -- because the
-Boards child ``weapon_boards_init`` (@0x809B378C) deadlocks: its six async board workers all run but
-the LSB worker ``weapon_left_side_board_init`` (@0x809B5354) never completes, stuck in the LSB-FPGA /
-IOB **XAUI link bring-up** (``FUN_809BCF60`` polling the XAUI PCS status it never sees go UP).
+Boards child ``weapon_boards_init`` (@0x809B378C) never completes.
+
+CORRECTED DIAGNOSIS (emulation, this PR): the stall is EARLIER than the LSB/XAUI worker. The six
+board workers run as async ThreadX threads (``async_group_run_ext``); batch 1 (IOB/ISP-pre) is
+entered but strands on its **McSPI1-over-sDMA coprocessor transfers** -- the peripheral-synchronised
+SPI DMA completion semaphore is not posted by the current sDMA model -- so the Boards child parks on
+the first ``_tx_event_flags_get`` and the LSB/XAUI worker ``weapon_left_side_board_init``
+(@0x809B5358) is never reached. The IOB/LSB-FPGA **XAUI link-up register model** (``IobXauiWindow``
+@0x1C000000 + ``ts_fpga`` link-up seeds) is installed and verified at the firmware's own poll
+predicate (``lsb_fpga_report_xaui_status`` @0x809BCF64 reads the IOB AHB window at the polled
+offsets; see ``test_xaui_link.py``); it carries the LSB worker to link-UP once the SPI-over-sDMA
+transport completes. That transport (McSPI1-ch2 <-> ts_fpga over sDMA) is the next milestone.
 
 Past this barrier lie ``run_application`` -> Camera State Manager -> UI / DSS framebuffer / firmware
-RCP server, all released only when the Driver thread finishes the cascade. Modelling the live XAUI
-link-up is the IOB/LSB-FPGA coprocessor model (fidelity audit ASSERTED stub) -- the next milestone.
+RCP server, all released only when the Driver thread finishes the cascade.
 
 Source of truth: sdk findings/boot/BOOT_FLOW_MAP.md (init_parallel cascade + board barrier),
-RED research/docs/build/VBRAIN_DEPTH_DESIGN.md (milestone 2). This test documents the reached depth
-and the identified blocker so the regression is visible when the XAUI model lands.
+clean/weapon_boards.c / weapon_left_side_board.c / lsb_fpga.c / spi.c,
+RED research/docs/build/VBRAIN_DEPTH_DESIGN.md (milestone 2). This test documents the reached depth,
+the installed XAUI model, and the corrected next blocker.
 """
 
 import pytest
@@ -45,16 +54,26 @@ def test_boot_reaches_board_bringup_barrier(bringup):
     assert res["init_event_flags"] & 0x7 == 0x7  # RTC|FileX|CRYPT
 
 
-def test_next_blocker_is_lsb_fpga_xaui(bringup):
-    """The barrier is blocked exactly on the four board-dependent bits (XAUI link bring-up)."""
+def test_next_blocker_is_board_worker_spi_dma(bringup):
+    """The barrier is blocked on the four board-dependent bits; the corrected root cause is the
+    async board workers stranding on their McSPI-over-sDMA transfers (not the XAUI predicate)."""
     res = bringup
     assert res["barrier_passed"] is False
     assert res["milestone"] == "board_bringup_barrier"
-    # Precisely Boards | Fan | XAUI | Mailbox -- all gated on the LSB XAUI link coming up.
+    # Precisely Boards | Fan | XAUI | Mailbox -- all gated on weapon_boards_init completing.
     assert res["blocked_board_bits"] == Dsmc2Camera.UI_BRINGUP_BOARD_BITS
     assert res["missing_flags"] == Dsmc2Camera.UI_BRINGUP_BOARD_BITS
     assert res["next_blocker"] is not None
-    assert "XAUI" in res["next_blocker"]
+    # Corrected diagnosis: the SPI-over-sDMA board-worker transport, with the XAUI model in place.
+    assert "sDMA" in res["next_blocker"]
+    assert "weapon_boards_init" in res["next_blocker"]
+
+
+def test_xaui_link_model_is_installed(bringup):
+    """The IOB/LSB-FPGA XAUI link-up register model is installed (and its next_blocker note says
+    the XAUI link state is no longer the blocker)."""
+    res = bringup
+    assert res["xaui_link_modeled"] is True
 
 
 def test_driver_thread_still_blocked_before_run_application(bringup):

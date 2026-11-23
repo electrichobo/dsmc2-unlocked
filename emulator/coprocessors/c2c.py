@@ -223,14 +223,26 @@ class CoprocessorTransport(Device):
     LSB_FPGA_VERSION_ADDR = 0xE0000908
     LSB_FPGA_VERSION = 0x00000014      # rev 0x14 (unlocks low 0x44A0xxxx window)
 
+    # LSB-FPGA XAUI link-status registers read by lsb_fpga_report_xaui_status (@0x809BCF64)
+    # over fpga_read(6, addr) -> FUN_809ba680: present an UP link so the firmware's own
+    # left-side-board bring-up (weapon_left_side_board_init @0x809B5358) completes. Values and
+    # provenance live in devices/iob_xaui.py (FPGA_LINK_UP_REGS), shared so the IOB AHB-window
+    # and the FPGA-SPI halves of the link agree.
+
     # Named target -> (mcspi_port_id, channel, spi_target_id). Ports/channels are the
     # emulator's McSPI wiring; the spi_target_id is the FW CS-mux selector.
+    # ts_fpga: the LSB-FPGA (iomap channel 6 / CS-mux target 6) is driven over McSPI1
+    # channel 2 -- verified by tracing the firmware's fpga_read(6,...) -> FUN_806d50c0 ->
+    # spi_write_wait_for_ack_then_read, which programs MCSPI1 (0x48098000) CH2CONF @0x54 /
+    # CH2CTRL @0x5C (memory `omap-iob-transport` "ISP1=t7 ISP2=t8 IOB=iobspi FPGA via CS mux";
+    # #70's "McSPI1-ch2"). Binding it here lets the firmware's own frame reach the seeded
+    # link-up registers.
     SPI_TARGET_MAP: Dict[str, Tuple[int, int, int]] = {
         "ts_isp1": (1, 0, SPI_TARGET_ISP1),
         "ts_isp2": (1, 1, SPI_TARGET_ISP2),
         "ts_iob0": (3, 0, SPI_TARGET_IOB),
         "ts_iob1": (3, 1, SPI_TARGET_IOB_SLAVE),
-        "ts_fpga": (2, 0, IOMAP_CHANNEL_LSB_FPGA),
+        "ts_fpga": (1, 2, IOMAP_CHANNEL_LSB_FPGA),
     }
 
     def __init__(self, intc=None, mcspi: Optional[Dict[int, OmapMcspi]] = None):
@@ -250,6 +262,10 @@ class CoprocessorTransport(Device):
             )
             if name == "ts_fpga":
                 tgt.reg_set(self.LSB_FPGA_VERSION_ADDR, self.LSB_FPGA_VERSION)
+                # Seed the XAUI link-up status regs (fpga side of the IOB<->LSB-FPGA link).
+                from emulator.devices.iob_xaui import FPGA_LINK_UP_REGS
+                for addr, val in FPGA_LINK_UP_REGS.items():
+                    tgt.reg_set(addr, val)
             self.spi_targets[name] = tgt
 
     def bind_mcspi(self, mcspi_controllers: Dict[int, OmapMcspi]):
