@@ -163,6 +163,38 @@ class OmapGpmc(Device):
         else:
             self.nand_buffer.extend(frame[self._active_col :])
 
+    def drain_prefetch(self, nbytes: int) -> bytes:
+        """Pop ``nbytes`` from the NAND serial read FIFO for a prefetch+DMA transfer.
+
+        The firmware reads NAND through the GPMC prefetch engine feeding sDMA (``_nand_dma_copy``
+        @0x8067cb4c: ``GPMC_PREFETCH_CONFIG2 = byteCount; GPMC_PREFETCH_CONTROL = 1``; a DMA channel
+        then drains the prefetch FIFO into SRAM). The FIFO was staged by the ``0x30`` read-confirm
+        at the active page/column, so this returns exactly those page/OOB bytes; a short/empty FIFO
+        (unwritten page) is padded with 0xFF, matching an erased chip.
+        """
+        out = bytearray()
+        for _ in range(nbytes):
+            if self.nand_buffer:
+                out.append(self.nand_buffer.popleft())
+            else:
+                out.append(0xFF)
+        # The prefetch engine services one armed transfer then stops (CONTROL start bit self-clears
+        # when the programmed count is exhausted). Clear it so a later non-NAND sDMA transfer is not
+        # misrouted to the (now empty) NAND FIFO -- leaving it armed starved FileX/media DMA of its
+        # own fill and regressed the FileX init-flag (0x2).
+        self.prefetch_control &= ~0x01
+        return bytes(out)
+
+    @property
+    def prefetch_armed(self) -> bool:
+        """True while a NAND prefetch read transfer is armed (CONTROL start bit set).
+
+        Set by ``GPMC_PREFETCH_CONTROL = 1`` in ``_nand_dma_copy`` and cleared once the transfer's
+        bytes are drained, so only the NAND read DMA (not unrelated sDMA channels) pulls from the
+        GPMC FIFO.
+        """
+        return bool(self.prefetch_control & 0x01)
+
     def read(self, offset: int, size: int) -> int:
         """Handle 8/16/32-bit MMIO reads from GPMC register space."""
         if offset == self.REG_SYSSTATUS:
@@ -271,23 +303,28 @@ class OmapGpmc(Device):
                         self.REG_CONFIG7_0):
             self.cs_configs[offset] = val
 
-    def _page_from_addr_cycles(self):  # -> (page, column)
-        """Decode the accumulated address cycles into (page, column).
+    def _page_from_addr_cycles(self):  # -> (page, byte_column)
+        """Decode the accumulated address cycles into (page, byte_column).
 
         _nand_read_sector (@0x8067ccc8) issues 2 column bytes then 3 row (page) bytes. The row is
-        the absolute page number; the column selects data (0) or OOB-only (PAGE_SIZE>>1 word addr,
-        i.e. PAGE_SIZE byte addr on a x8 part) start.
+        the absolute page number. The DSMC2 NAND is a **16-bit (x16)** part (GPMC CONFIG1_0 =
+        0x800), so the column address is in **16-bit WORDS**, not bytes: the firmware reads the OOB
+        by addressing word ``pageBytes>>1`` (``2048>>1 = 1024``), which is byte offset ``2048`` --
+        the start of the spare area. We convert the decoded word column to a byte offset (``<< 1``)
+        so it indexes correctly into the byte-addressed (data+spare) frame; without this an OOB
+        read at word 1024 would wrongly serve data bytes at offset 1024 (mid-page), the tags would
+        decode as erased (0xFFFFFFFF), and every YAFFS2 header/data chunk would be discarded.
         """
         cyc = self._addr_cycles
-        col = 0
+        word_col = 0
         page = 0
         if len(cyc) >= 2:
-            col = cyc[0] | (cyc[1] << 8)
+            word_col = cyc[0] | (cyc[1] << 8)
         if len(cyc) >= 5:
             page = cyc[2] | (cyc[3] << 8) | (cyc[4] << 16)
         elif len(cyc) >= 3:  # program/erase may send fewer column bytes
             page = cyc[-3] | (cyc[-2] << 8) | (cyc[-1] << 16)
-        return page, col
+        return page, word_col << 1
 
     def _handle_nand_command(self, cmd: int):
         """Service standard ONFI / Micron NAND commands."""

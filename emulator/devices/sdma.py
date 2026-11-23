@@ -37,9 +37,10 @@ class OmapSdma(Device):
     CHANNEL_STRIDE = 0x60
     CHANNEL_BASE = 0x80
 
-    def __init__(self, intc=None, cpu=None):
+    def __init__(self, intc=None, cpu=None, gpmc=None):
         self.intc = intc
         self.cpu = cpu
+        self.gpmc = gpmc  # GPMC model: NAND reads stream through its prefetch FIFO (not 0xFF fill)
         self.revision = 0x00000040  # OMAP3 sDMA revision 4.0
         self.sysstatus = 0x00000001 # bit 0: RESETDONE = 1
         self.ocp_sysconfig = 0x00000015 # AUTOIDLE=1, SIDLEMODE=smart, MIDLEMODE=smart
@@ -113,27 +114,52 @@ class OmapSdma(Device):
                     if val & 0x80: # Channel Enable
                         # Complete transfer instantly for NAND / memory DMA
                         if self.cpu and hasattr(self.cpu, "mu"):
-                            cdsa = self.channels[ch_num].get(0x20, 0) # DMA4_CDSA
+                            cssa = self.channels[ch_num].get(0x1C, 0) # DMA4_CSSA (source)
+                            cdsa = self.channels[ch_num].get(0x20, 0) # DMA4_CDSA (dest)
                             cen = self.channels[ch_num].get(0x14, 0) & 0xFFFF # DMA4_CEN
                             cfn = self.channels[ch_num].get(0x18, 0) & 0xFFFF # DMA4_CFN
                             csdp = self.channels[ch_num].get(0x10, 0) # DMA4_CSDP
                             elem_size = 1 << (csdp & 3)
                             total_bytes = (cen if cen else 1) * (cfn if cfn else 1) * elem_size
+                            # The NAND read DMA sources from the GPMC CS0 window (0x10000000) with the
+                            # prefetch engine armed. Only THAT transfer drains the GPMC FIFO; every
+                            # other sDMA channel (FileX/media/memory) is left to the model's own
+                            # handling so it is not misrouted to the NAND FIFO -- gating on
+                            # prefetch_armed alone starved the FileX init DMA and dropped flag 0x2.
+                            is_nand_read = (
+                                self.gpmc is not None
+                                and self.gpmc.prefetch_armed
+                                and 0x10000000 <= cssa < 0x18000000
+                            )
                             if total_bytes > 0 and 0x40000000 <= cdsa < 0x90000000:
+                                if is_nand_read:
+                                    n = min(total_bytes, 1 << 20)
+                                    payload = self.gpmc.drain_prefetch(n)
+                                else:
+                                    # Preserve the prior behavior for non-NAND / memory DMA: an
+                                    # erased (0xFF) fill, which a blank source would also produce.
+                                    payload = b"\xFF" * min(total_bytes, 8192)
                                 try:
-                                    self.cpu.mu.mem_write(cdsa, b"\xFF" * min(total_bytes, 8192))
+                                    self.cpu.mu.mem_write(cdsa, payload)
                                 except Exception:
                                     pass
 
-                        # Set CSR bit 5 (BLOCK_DONE = 0x20)
+                        # Signal transfer complete in the per-channel status register DMA4_CSRi.
+                        # On OMAP3630 that register is at channel offset 0x28 (NOT 0x0C -- 0x0C is
+                        # CLNK_CTRL); the DMA ISR reads CSRi to learn which event completed before
+                        # posting the channel's completion semaphore. Set FRAME_DONE (0x08) and
+                        # BLOCK_DONE (0x20) and clear the active bit; also keep 0x0C updated for any
+                        # reader of the legacy offset. Without CSRi set, the ISR clears IRQSTATUS but
+                        # never posts the semaphore, so the waiting NAND/FileX thread never wakes.
+                        self.channels[ch_num][0x28] = (self.channels[ch_num].get(0x28, 0) | 0x28)
                         self.channels[ch_num][0x0C] = (self.channels[ch_num].get(0x0C, 0) | 0x20) & ~0x80
                         # Assert IRQ on Line 3 (IRQ 15)
                         self.irqstatus[3] |= (1 << ch_num)
                         if (self.irqenable[3] & (1 << ch_num)) and self.intc:
                             self.intc.assert_irq(15)
-                elif reg_offset == 0x0C: # DMA4_CSR (Write 1 to clear status bits)
-                    current_csr = self.channels[ch_num].get(0x0C, 0)
-                    self.channels[ch_num][0x0C] = current_csr & ~val
+                elif reg_offset in (0x0C, 0x28): # DMA4_CSR status (write 1 to clear)
+                    self.channels[ch_num][reg_offset] = \
+                        self.channels[ch_num].get(reg_offset, 0) & ~val
                 else:
                     self.channels[ch_num][reg_offset] = val
         else:

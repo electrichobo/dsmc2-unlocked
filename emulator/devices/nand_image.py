@@ -111,10 +111,25 @@ def _pack_tags2(seq: int, obj_id: int, chunk_id: int, byte_count: int) -> bytes:
                        chunk_id & 0xFFFFFFFF, byte_count & 0xFFFFFFFF)
 
 
+# The 2048-byte page is covered by four 512-byte on-die-ECC sub-sectors, each with its own
+# 16-byte OOB sub-spare. The firmware's yaffs2 packed_tags2 are NOT contiguous at OOB byte 0:
+# each 16-byte sub-spare keeps its first 4 bytes reserved (ECC/bad-block marker) and stores one
+# 32-bit tag word at byte 4, so the four tag words land at OOB offsets 4, 20, 36, 52.
+# yflash2_ReadChunkWithTagsFromNANDInternalECC (@0x80a1fdb0) reads the 64-byte OOB into a stack
+# buffer (sp+0x48) then copies the words at sp+0x4c / sp+0x5c / sp+0x6c / sp+0x7c (OOB +4/+20/+36/
+# +52) into a contiguous block before FUN_80a160a8 unpacks. A contiguous 0..15 layout (or a
+# base-0 stride) shifts every tag word, the chunk decodes as erased (0xFFFFFFFF), and the whole
+# YAFFS2 object is discarded during the scan.
+TAG_WORD_BASE = 4
+TAG_WORD_STRIDE = 16
+
+
 def _make_spare(tags: bytes) -> bytes:
-    """Place the 16-byte tags at the start of the 64-byte OOB; remainder erased (0xFF)."""
+    """Lay the 4 packed_tags2 words into the 64-byte OOB at offsets 4/20/36/52 (per sub-sector)."""
     spare = bytearray(b"\xFF" * SPARE_SIZE)
-    spare[0:16] = tags
+    for i in range(4):
+        off = TAG_WORD_BASE + i * TAG_WORD_STRIDE
+        spare[off : off + 4] = tags[i * 4 : i * 4 + 4]
     return bytes(spare)
 
 
@@ -130,19 +145,25 @@ def _build_obj_header(obj_type: int, parent_obj_id: int, name: str,
     hdr = bytearray(b"\x00" * PAGE_SIZE)
     struct.pack_into("<I", hdr, 0x00, obj_type)        # type: file/dir/symlink (yaffs_verify_oh @0)
     struct.pack_into("<I", hdr, 0x04, parent_obj_id)   # parent obj id (yaffs_verify_oh @4)
-    struct.pack_into("<H", hdr, 0x08, 0xFFFF)          # checksum: no longer used
-    # name lives at OH offset 0x12C: the scan copies it via FUN_80a19e7c(oh + 0x12C) (0x4b words),
-    # max 0x9F bytes. (RE: yaffs2_scan_chunk @0x80a115bc.)
-    nb = name.encode("ascii")[:0x9E]
-    hdr[0x12C : 0x12C + len(nb)] = nb
-    hdr[0x12C + len(nb)] = 0x00
-    # POSIX-ish attribute block precedes the name (yst_mode etc.). Keep a plausible mode; yaffs
-    # keys registration off type + name, so exact attrs are not load-bearing for the mount.
+    struct.pack_into("<H", hdr, 0x08, 0xFFFF)          # name sum (recomputed from name on scan)
+    # The object's name is the SHORT name at OH offset 0xA (NUL-terminated, <= 15 chars). The scan
+    # applies it via FUN_80a179d8 -> FUN_80a1795c(obj, OH + 0xA): a non-empty byte there is
+    # strcpy'd into the object (obj+0x38) and its 16-bit sum stored at obj+4, which yaffs_find_by_name
+    # matches against. An empty 0xA makes the scan synthesize a fallback "obj<id>" name, so
+    # red_open("/env/PARTITION_TABLE") never resolves. (The 0x12C field is the symlink ALIAS,
+    # read only for symlink objects via FUN_80a19e7c(OH + 0x12C); not the file name.)
+    nb = name.encode("ascii")[:0x0F]  # yaffs short-name limit: 15 chars + NUL (FUN_80a226f0 < 0x10)
+    hdr[0x0A : 0x0A + len(nb)] = nb
+    hdr[0x0A + len(nb)] = 0x00
+    # yst_mode at OH+0x10C: the scan copies it to the object (obj[0xd] = OH[0x43]) and red_open
+    # gates read access on bit 0x100 (S_IRUSR) -- a zero mode yields EACCES (-13) even though the
+    # object is found by name. Use POSIX 0100644 for a file / 0040755 for a dir.
     struct.pack_into("<I", hdr, 0x10C,
-                     0x000081A4 if obj_type == YAFFS_OBJECT_TYPE_FILE else 0x000041ED)  # st_mode
-    # file size (yaffs2 32-bit low / high split) sits just after the name field region.
-    struct.pack_into("<I", hdr, 0x228, file_size & 0xFFFFFFFF)   # file_size_low
-    struct.pack_into("<I", hdr, 0x22C, 0)                        # file_size_high
+                     0x000081A4 if obj_type == YAFFS_OBJECT_TYPE_FILE else 0x000041ED)
+    # file size at OH+0x124 (FUN_80a1f530 returns *(OH + 0x124)); read by the scan to size the
+    # file object. yaffs2's 64-bit split stores the high word separately; a <4GB table needs only
+    # the low word here.
+    struct.pack_into("<I", hdr, 0x124, file_size & 0xFFFFFFFF)
     return bytes(hdr)
 
 
