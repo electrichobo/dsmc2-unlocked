@@ -113,21 +113,21 @@ class Dsmc2Camera:
     # findings/boot/BOOT_FLOW_MAP.md): UART 0x40, Load System Config 0x80, HAL Power 0x100,
     # Power 0x200, Boards 0x400, Fan 0x800, ASIC Memory Map 0x100000, XAUI 0x200000,
     # Mailbox 0x1000000, HAL SYS_ID 0x2000000, HW Cap 0x40000000, Module Cap 0x80000000.
-    # The firmware reaches 0xC21003FF (everything except the four board-dependent bits
-    # Boards 0x400 | Fan 0x800 | XAUI 0x200000 | Mailbox 0x1000000 = mask 0x01200C00) and then
-    # stalls: ``weapon_boards_init`` (@0x809B378C, the Boards child) dispatches six async board
-    # bring-up workers (IOB/ISP-pre/ISP/RSB/LSB/side-handle) and AND-waits on all six completion
-    # bits; five set (group flags 0x2F) but the LSB worker ``weapon_left_side_board_init``
-    # (@0x809B5354) never finishes -- it loops in the XAUI link bring-up waiting for the LSB-FPGA /
-    # IOB XAUI link to report UP. The link-OK predicate ``FUN_809BCF60`` reads IOB XAUI registers
-    # through the AHB window at 0x1C000000 (PCS status @...02C must read 0x03FFC02F, RX err
-    # counters @...068/...0BC must read 0) and LSB-FPGA registers via ``fpga_read`` (0x40010008
-    # LinkUp/Aligned/Sync, 0xC2000010, 0xC20000BC). Modelling that live XAUI link-up is the
-    # IOB/LSB-FPGA coprocessor model the fidelity audit lists as an ASSERTED stub -- the next
-    # depth milestone. ``boot_to_ui_bringup`` drives to this barrier and reports it.
+    # With the McSPI1-over-sDMA coprocessor transport modelled (the peripheral-synchronised SPI
+    # DMA, sdma.py `_try_spi_over_sdma`), the async board workers that ``weapon_boards_init``
+    # (@0x809B378C) dispatches run to completion: batch 1 (IOB/ISP-pre) no longer strands on its
+    # SPI reads, so batch 2 dispatches, the LSB worker ``weapon_left_side_board_init`` (@0x809B5354)
+    # runs, its XAUI link check (``lsb_fpga_report_xaui_status`` @0x809BCF64 -> IOB AHB window +
+    # ``fpga_read`` over ts_fpga) passes against the #71 link-up model, and the Boards/XAUI/Mailbox
+    # bits all set. Boot now reaches 0xC33007FF; the only board-dependent bit still clear is
+    # Fan 0x800. Its worker ``fan_init`` (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8)
+    # runs but strands in the fan TACHOMETER speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``),
+    # a timed fan-RPM measurement no peripheral model drives -- the next depth milestone (a fan /
+    # tach-capture register model, NOT the SPI transport, and NOT the IOB Xtensa core).
+    # ``boot_to_ui_bringup`` drives to this barrier and reports it.
     UI_BRINGUP_FLAGS_BARRIER = 0x03300FF7
-    UI_BRINGUP_FLAGS_REACHABLE = 0xC21003FF   # everything the current models satisfy
-    UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (blocked on XAUI link)
+    UI_BRINGUP_FLAGS_REACHABLE = 0xC33007FF   # everything the current models satisfy (Fan 0x800 clear)
+    UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (board-dependent bits)
 
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -432,6 +432,11 @@ class Dsmc2Camera:
             spi = OmapMcspi(port_id, base, irq, intc=self.intc)
             self.mcspi[port_id] = spi
             self.bus.register_device(base, 0x1000, spi)
+
+        # Bind the McSPI controllers to the sDMA so a channel wired to a McSPI TX/RX FIFO
+        # (peripheral-synchronised SPI DMA) clocks the SPI frame through the coprocessor target
+        # (the firmware's `_spi_write_and_read` DMA transport), not a mem->mem copy.
+        self.sdma.bind_mcspi(self.mcspi)
 
         # 10d. Multi-Channel Buffered Serial Ports (McBSP 2..5), HDQ / 1-Wire & OMAP Camera ISP
         self.mcbsp: Dict[int, OmapMcBSP] = {}
@@ -760,21 +765,28 @@ class Dsmc2Camera:
         After ``boot_to_late_init`` reaches the filesystem mount (init event flags
         ``0xC21000FF``: RTC|FileX|CRYPT|NAND + the HW/Module-cap cascade), the Driver thread runs a
         second ``init_parallel`` cascade and blocks on the board-bring-up barrier
-        ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``). Only the four
-        board-dependent bits -- Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000
-        (``UI_BRINGUP_BOARD_BITS``) -- stay clear, because the Boards child ``weapon_boards_init``
-        (@0x809B378C) deadlocks: it dispatches six async board workers and AND-waits on all six
-        completion bits, but the LSB worker ``weapon_left_side_board_init`` (@0x809B5354) never
-        finishes -- it is stuck in the LSB-FPGA / IOB **XAUI link bring-up**, polling the XAUI PCS
-        status (IOB AHB window @0x1C000000, FPGA regs via ``fpga_read``) for a link that the
-        current peripheral models never bring up. Past this barrier lies ``run_application``
-        (the Camera State Manager, UI, DSS framebuffer, firmware RCP server), all of which are
-        released only after the Driver thread finishes the whole cascade, so none of them run until
-        the XAUI link is modelled. That is the IOB/LSB-FPGA coprocessor model the fidelity audit
-        lists as an ASSERTED stub -- the next depth milestone.
+        ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``).
+
+        With the peripheral-synchronised **McSPI1-over-sDMA** coprocessor transport modelled
+        (``sdma.py``: a channel wired to a McSPI TX/RX FIFO clocks the SPI frame through the
+        ``CoprocessorSpiTarget`` byte state machine, full-duplex, instead of a mem->mem copy), the
+        six async board workers ``weapon_boards_init`` (@0x809B378C) dispatches run to completion:
+        batch 1 (IOB/ISP-pre) no longer strands on its SPI reads, batch 2 dispatches, the LSB worker
+        ``weapon_left_side_board_init`` (@0x809B5354) runs, and its XAUI link check
+        (``lsb_fpga_report_xaui_status`` @0x809BCF64 -> IOB AHB window @0x1C000000 +
+        ``fpga_read``/ts_fpga) passes against the installed link-up model. The Boards 0x400,
+        XAUI 0x200000 and Mailbox 0x1000000 bits all set; boot reaches ``0xC33007FF``.
+
+        The only board-dependent bit still clear is **Fan 0x800**: its worker ``fan_init``
+        (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) runs but strands in the fan
+        TACHOMETER speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``), a timed fan-RPM
+        measurement no peripheral model drives. Past the barrier lies ``run_application`` (the
+        Camera State Manager, UI, DSS framebuffer, firmware RCP server), released only after the
+        Driver thread finishes the whole cascade -- so the fan tach-capture register model is the
+        next depth milestone (NOT the SPI transport, and NOT the IOB Xtensa core).
 
         This method is a deterministic depth probe: it boots to the barrier and returns the exact
-        reached flags, the blocked board bits, and the identified blocker, without faking the link.
+        reached flags, the blocked board bits, and the identified blocker, without faking anything.
         """
         if not _already_booted:
             # boot_to_late_init already drives through the FS mount to ~0xC21000FF.
@@ -820,27 +832,26 @@ class Dsmc2Camera:
             # The XAUI link-up register model is installed (IobXauiWindow + ts_fpga seeds).
             "xaui_link_modeled": True,
             "xaui_window_reached": xaui_window_reached,
-            # Human-readable identification of the next blocker for the depth roadmap. NOTE: the
-            # emulated full-boot blocker is EARLIER than the XAUI predicate -- the async board
-            # workers (``weapon_boards_init`` @0x809B378C, batch 1 = IOB/ISP-pre) strand on their
-            # McSPI1-over-sDMA coprocessor transfers (peripheral-synchronised SPI DMA whose
-            # completion semaphore is not posted by the current sDMA model), so the Boards child
-            # parks on the first ``_tx_event_flags_get`` and the LSB/XAUI worker
-            # (``weapon_left_side_board_init`` @0x809B5358) is never reached. The IOB/LSB-FPGA
-            # XAUI register model is in place and verified (see test_xaui_link.py:
-            # ``lsb_fpga_report_xaui_status`` reads the IOB AHB window at the firmware-polled
-            # offsets); it will carry the LSB worker to link-UP once that SPI-over-sDMA transport
-            # completes. That transport (McSPI1-ch2 <-> ts_fpga over sDMA) is the next milestone.
+            # The peripheral-synchronised McSPI1-over-sDMA coprocessor transport is modelled, so the
+            # board workers run: Boards/XAUI/Mailbox now set (the LSB worker reaches and passes the
+            # XAUI link check against the installed link-up model). Count of SPI frames clocked over
+            # sDMA this boot (non-zero => the transport carried the board-init SPI reads).
+            "spi_over_sdma_frames": getattr(self.sdma, "spi_dma_transfers", 0),
+            # Human-readable identification of the next blocker for the depth roadmap. With the
+            # SPI-over-sDMA transport in place the board bring-up completes except the Fan 0x800 bit:
+            # ``fan_init`` (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) strands in
+            # the fan tachometer speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``), a timed
+            # fan-RPM measurement no peripheral model drives. That fan / tach-capture model is the
+            # next depth milestone -- NOT the SPI transport (now modelled), and NOT the IOB Xtensa.
             "next_blocker": (
                 None if barrier_passed else
-                "async board workers (weapon_boards_init @0x809B378C) strand on McSPI1-over-sDMA "
-                "coprocessor transfers: the peripheral-synchronised SPI DMA completion is not "
-                "posted, so batch-1 (IOB/ISP-pre) never sets its event flags and the Boards child "
-                "parks on the first _tx_event_flags_get -- the LSB/XAUI worker "
-                "(weapon_left_side_board_init @0x809B5358) is never reached. The IOB/LSB-FPGA XAUI "
-                "link-up register model (IobXauiWindow + ts_fpga seeds) is installed and verified "
-                "at the firmware's poll predicate; the remaining blocker is the SPI-over-sDMA "
-                "transport (next milestone), not the XAUI link state."
+                "board bring-up now completes over the modelled McSPI1-over-sDMA SPI transport "
+                "(Boards 0x400, XAUI 0x200000, Mailbox 0x1000000 all set; boot reaches 0xC33007FF). "
+                "The only board-dependent bit still clear is Fan 0x800: fan_init (@0x8067049C) -> "
+                "HAL_Temp_Fan_Control_Init (@0x809B09A8) strands in the fan TACHOMETER speed test "
+                "(detect_fan_type -> HAL_Temp_SpeedTest), a timed fan-RPM measurement no peripheral "
+                "model drives. Next milestone: a fan / tach-capture register model (not the SPI "
+                "transport, not the IOB Xtensa core)."
             ),
             "threads": self.get_threads(),
         }

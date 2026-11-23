@@ -108,6 +108,49 @@ class OmapMcspi(Device):
         if 0 <= channel < self.NUM_CHANNELS:
             self.targets[channel] = target
 
+    # --- channel FIFO register addresses (for the sDMA peripheral-synchronised path) ---
+    # The firmware's SPI driver points the TX sDMA channel's CDSA at MCSPI_TXn and the RX
+    # channel's CSSA at MCSPI_RXn (TRM Table 20-16: CHxTX at CH_BASE+ch*CH_STRIDE+0x0C,
+    # CHxRX at +0x10). `_spi_write_and_read` (@0x806D588C) -> `_spi_init_tx_dma`/`_spi_init_rx_dma`
+    # (@0x806D6554/0x806D6D84) set these via FUN_80675B38 (CDSA @0xA0) / FUN_80675B00 (CSSA @0x9C).
+    def tx_fifo_addr(self, channel: int) -> int:
+        return self.base_addr + self.CH_BASE + channel * self.CH_STRIDE + 0x0C
+
+    def rx_fifo_addr(self, channel: int) -> int:
+        return self.base_addr + self.CH_BASE + channel * self.CH_STRIDE + 0x10
+
+    def channel_for_tx_fifo(self, addr: int) -> Optional[int]:
+        for ch in range(self.NUM_CHANNELS):
+            if addr == self.tx_fifo_addr(ch):
+                return ch
+        return None
+
+    def channel_for_rx_fifo(self, addr: int) -> Optional[int]:
+        for ch in range(self.NUM_CHANNELS):
+            if addr == self.rx_fifo_addr(ch):
+                return ch
+        return None
+
+    def dma_transceive_byte(self, channel: int, tx_byte: int) -> int:
+        """Clock one SPI byte through the channel's attached target for a DMA beat.
+
+        This is the byte state machine the McSPI shift register runs on a FIFO beat, factored
+        out of the MMIO TX-register write path (write()/reg_off 0x0C) so the sDMA peripheral-
+        synchronised path drives the SAME `CoprocessorSpiTarget` frame. Returns the MISO byte
+        (loopback of the low byte when no target or the target declines the beat).
+        """
+        target = self.targets.get(channel)
+        rx = None
+        if target is not None and hasattr(target, "transceive_byte"):
+            rx = target.transceive_byte(tx_byte & 0xFF)
+        if rx is None:
+            rx = tx_byte & 0xFF
+        # Mirror the shift into the channel TX/RX holding regs + CHSTAT, as a real beat would.
+        self.tx[channel] = tx_byte & 0xFF
+        self.rx[channel] = rx & 0xFF
+        self.chstat[channel] |= 0x07  # RXS | TXS | EOT
+        return rx & 0xFF
+
     def read(self, offset: int, size: int) -> int:
         if offset == self.REG_REVISION:
             return self.revision
