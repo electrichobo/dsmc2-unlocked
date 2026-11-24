@@ -43,6 +43,7 @@ from emulator.devices.i2c_dsmc2_chips import (
     FocalTechTouch,
     FixedIdI2cDevice,
 )
+from emulator.devices.i2c_fan_controller import MaxFanController
 from emulator.devices.l4_interconnect import OmapL4Ap, OmapScm, OmapScmId, OmapPrm, OmapSdrc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.devices.rig_manager import RigManager, ConnectorPosition
@@ -80,6 +81,21 @@ class Dsmc2Camera:
     TX_THREAD_CREATED_PTR = 0x8149CE68
     TX_THREAD_CURRENT_PTR = 0x8149CE60
     TX_THREAD_EXECUTE_PTR = 0x8149DDE8
+
+    # Fan tachometer speed-test (temp_hal_weapon.c). HAL_Temp_SpeedTest spins the BRAIN fan up at
+    # full PWM, then calls tx_thread_sleep(0x1770 = 6000 ticks) to wait for mechanical spin-up
+    # before sampling the tachometer. That 6000-ms wait is a real hardware spin-up delay: in the
+    # emulator's compressed tick model (one GPTimer2 OVF per scheduler slice) 6000 ThreadX ticks
+    # never accrue within a practical boot, so the fan worker's sleep never returns and the Fan
+    # init-event bit 0x800 never sets. The sleep-compression hook below clamps the spin-up sleep
+    # *only when it is issued from inside HAL_Temp_SpeedTest* to a few ticks, so the fan worker
+    # proceeds to the tach read (which the MaxFanController model answers) and completes. The
+    # firmware still runs the full start/sleep/read/classify sequence; only the spin-up duration
+    # is time-compressed, exactly as the tick cadence already compresses every other timed wait.
+    HAL_TEMP_SPEEDTEST_ENTRY = 0x809B061C   # push {..} true entry
+    HAL_TEMP_SPEEDTEST_RET   = 0x809B08BC   # ldm sp,{..,pc} epilogue (speed test body end)
+    TX_THREAD_SLEEP_ENTRY    = 0x80E9E32C   # tx_thread_sleep (r0 = tick count)
+    FAN_SPINUP_SLEEP_TICKS   = 4            # compressed spin-up wait (ticks) in the emulator
 
     # ThreadX TCBs this build creates by 1G instructions (static .data/.bss objects)
     TCB_ADDRS = (0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0, 0x81E51F5C, 0x814C6B28)
@@ -119,15 +135,29 @@ class Dsmc2Camera:
     # SPI reads, so batch 2 dispatches, the LSB worker ``weapon_left_side_board_init`` (@0x809B5354)
     # runs, its XAUI link check (``lsb_fpga_report_xaui_status`` @0x809BCF64 -> IOB AHB window +
     # ``fpga_read`` over ts_fpga) passes against the #71 link-up model, and the Boards/XAUI/Mailbox
-    # bits all set. Boot now reaches 0xC33007FF; the only board-dependent bit still clear is
-    # Fan 0x800. Its worker ``fan_init`` (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8)
-    # runs but strands in the fan TACHOMETER speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``),
-    # a timed fan-RPM measurement no peripheral model drives -- the next depth milestone (a fan /
-    # tach-capture register model, NOT the SPI transport, and NOT the IOB Xtensa core).
-    # ``boot_to_ui_bringup`` drives to this barrier and reports it.
+    # bits all set. With the BRAIN fan controller (MaxFanController @ I2C1 0x4D) and the fan-tach
+    # spin-up sleep compression now modelled, the Fan worker ``fan_init`` (@0x8067049C) ->
+    # ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) -> ``detect_fan_type`` (@0x809B08C4) ->
+    # ``HAL_Temp_SpeedTest`` (@0x809B061C) measures a valid fan RPM and the Fan bit 0x800 sets too.
+    # Boot now crosses the whole board-bring-up barrier: init event flags reach **0xC3300FFF**.
+    # ``boot_to_ui_bringup`` drives to this barrier (now PASSED) and reports it.
     UI_BRINGUP_FLAGS_BARRIER = 0x03300FF7
-    UI_BRINGUP_FLAGS_REACHABLE = 0xC33007FF   # everything the current models satisfy (Fan 0x800 clear)
+    UI_BRINGUP_FLAGS_REACHABLE = 0xC3300FFF   # board barrier now fully satisfied (Fan 0x800 set)
     UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (board-dependent bits)
+
+    # Milestone 3 ("run_application / storage bring-up"): once the board barrier passes, the Driver
+    # thread (@0x8066C92C) dispatches two more ``init_parallel`` stages -- "SATA" (worker
+    # @0x80670504, completion bit 0x04000000) and "Media" (worker @0x8067060C, completion bit
+    # 0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)`` (@0x8066D000 ->
+    # ``wait_for_init_flags`` @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) waiting for both.
+    # The UI ``Starter Thread`` (thread_0_entry @0x80008E24 -> run_application -> Camera State
+    # Manager / DSS framebuffer / RCP server) stays semaphore-blocked until the Driver cascade
+    # completes. The SATA/Media storage init workers do not complete under the current models, so
+    # bits 0x04000000 / 0x08000000 never set -- that storage (SATA/AHCI + media) bring-up is the
+    # next depth milestone. ``boot_to_run_application`` drives past the fan barrier and reports it.
+    RUN_APP_FLAGS_BARRIER = 0x0C000000        # SATA 0x04000000 | Media 0x08000000
+    RUN_APP_SATA_BIT = 0x04000000
+    RUN_APP_MEDIA_BIT = 0x08000000
 
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -260,6 +290,58 @@ class Dsmc2Camera:
             unicorn.UC_HOOK_MEM_READ, _xaui_read_hook, None, 0x1C000000, 0x1C0FFFFF
         )
 
+    def _install_fan_spinup_hook(self):
+        """Compress the fan-tachometer spin-up sleep inside ``HAL_Temp_SpeedTest``.
+
+        ``HAL_Temp_SpeedTest`` (@0x809B061C) starts the BRAIN fan at full PWM, then calls
+        ``tx_thread_sleep(6000)`` (@0x80E9E32C) to wait ~6 s for the fan to reach speed before it
+        samples the tachometer (``fan_tach_read`` @0x809B18B0 -> ``fan_tach_regread`` @0x809B750C,
+        answered by ``MaxFanController`` @ I2C1 0x4D). In the emulator's compressed tick model a
+        6000-tick ThreadX sleep never expires within a practical boot, so the fan worker strands and
+        the Fan init-event bit 0x800 never sets.
+
+        This hook tracks whether the CPU is executing inside the ``HAL_Temp_SpeedTest`` body and,
+        when ``tx_thread_sleep`` is entered from there, clamps its tick argument (r0) to
+        ``FAN_SPINUP_SLEEP_TICKS``. The firmware still performs the start -> sleep -> tach-read ->
+        classify sequence unchanged; only the spin-up *duration* is compressed, which is the same
+        modeling decision the one-OVF-per-slice tick cadence already makes for every timed wait.
+        All addresses go through ``self.fw()`` so the hook is correct under a relinked
+        (``--addr-map``) image as well as the stock layout.
+        """
+        for h in ("_fan_spinup_enter_h", "_fan_spinup_exit_h", "_fan_spinup_sleep_h"):
+            handle = getattr(self, h, None)
+            if handle is not None:
+                try:
+                    self.cpu.mu.hook_del(handle)
+                except Exception:
+                    pass
+            setattr(self, h, None)
+
+        st_entry = self.fw(self.HAL_TEMP_SPEEDTEST_ENTRY)
+        st_ret = self.fw(self.HAL_TEMP_SPEEDTEST_RET)
+        sleep_entry = self.fw(self.TX_THREAD_SLEEP_ENTRY)
+        clamp = self.FAN_SPINUP_SLEEP_TICKS
+        state = self._fan_spinup_active  # one-element list, survives across slices
+
+        def _enter(uc, address, size, user_data):
+            state[0] = True
+
+        def _exit(uc, address, size, user_data):
+            state[0] = False
+
+        def _sleep(uc, address, size, user_data):
+            if state[0]:
+                r0 = uc.reg_read(unicorn.arm_const.UC_ARM_REG_R0)
+                if r0 > clamp:
+                    uc.reg_write(unicorn.arm_const.UC_ARM_REG_R0, clamp)
+
+        self._fan_spinup_enter_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _enter, None, st_entry, st_entry)
+        self._fan_spinup_exit_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _exit, None, st_ret, st_ret)
+        self._fan_spinup_sleep_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _sleep, None, sleep_entry, sleep_entry)
+
     def _init_hardware(self):
         """Cleanly initialize or re-initialize SoC hardware, registers, and memory mappings."""
         # Save previous log lines if re-initializing
@@ -335,14 +417,22 @@ class Dsmc2Camera:
         self.ucd_iob_idx.rails = self.ucd_iob.rails
 
         # I2C1: Power Management (TWL4030 @ 0x48), Thermal (TMP411 @ 0x4C), LED Driver (0x45),
-        #       IOB PMBus UCD9090 index entry (0x7C), RSB Fan Driver (0x4D), RSB OLPF Expander (0x38)
+        #       IOB PMBus UCD9090 index entry (0x7C), BRAIN Fan Controller (MAX6639-class @ 0x4D),
+        #       RSB OLPF Expander (0x38)
         self.pmic = Twl4030Pmic(0x48)
         self.thermal = Tmp411Thermal(0x4C)
+        # BRAIN fan controller (MAX6639-class dual-channel PWM/tach). The firmware's thermal/fan
+        # HAL (temp_hal_weapon.c) drives it over I2C1 @ 0x4D: fan_init (@0x8067049C) ->
+        # HAL_Temp_Fan_Control_Init (@0x809B09A8) -> detect_fan_type (@0x809B08C4) ->
+        # HAL_Temp_SpeedTest (@0x809B061C), which spins the fan up and reads its tachometer. The
+        # model answers the tach-count registers so the measured RPM lands in the firmware's valid
+        # band and the Fan init-event bit 0x800 sets. (See MODEL_FIDELITY_AUDIT.md "Fan tach".)
+        self.fan_controller = MaxFanController(0x4D)
         self.i2c[1].attach_slave(I2cSlave(0x45))
         self.i2c[1].attach_slave(self.pmic)
         self.i2c[1].attach_slave(self.thermal)
         self.i2c[1].attach_slave(self.ucd_iob_idx)
-        self.i2c[1].attach_slave(FixedIdI2cDevice(0x4D, "RSB_FAN", 0x01))
+        self.i2c[1].attach_slave(self.fan_controller)
         self.i2c[1].attach_slave(FixedIdI2cDevice(0x38, "RSB_OLPF", 0x00))
         self.i2c[1].attach_slave(Twl4030Pmic(0x49))
         self.i2c[1].attach_slave(Twl4030Pmic(0x4A))
@@ -421,6 +511,11 @@ class Dsmc2Camera:
         # (PHY config / latch clears) fall through to RAM. See devices/iob_xaui.py.
         self.iob_xaui = IobXauiWindow(link_up=True)
         self._install_iob_xaui_hook()
+
+        # Fan tach spin-up sleep compression (HAL_Temp_SpeedTest). The one-element list tracks
+        # whether the CPU is inside HAL_Temp_SpeedTest; it must exist before the hook installs.
+        self._fan_spinup_active = [False]
+        self._install_fan_spinup_hook()
 
         # 10b. System DMA (sDMA Controller @ 0x48056000)
         self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc)
@@ -777,13 +872,19 @@ class Dsmc2Camera:
         ``fpga_read``/ts_fpga) passes against the installed link-up model. The Boards 0x400,
         XAUI 0x200000 and Mailbox 0x1000000 bits all set; boot reaches ``0xC33007FF``.
 
-        The only board-dependent bit still clear is **Fan 0x800**: its worker ``fan_init``
-        (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) runs but strands in the fan
-        TACHOMETER speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``), a timed fan-RPM
-        measurement no peripheral model drives. Past the barrier lies ``run_application`` (the
-        Camera State Manager, UI, DSS framebuffer, firmware RCP server), released only after the
-        Driver thread finishes the whole cascade -- so the fan tach-capture register model is the
-        next depth milestone (NOT the SPI transport, and NOT the IOB Xtensa core).
+        The last board-dependent bit, **Fan 0x800**, is now modelled too: ``fan_init``
+        (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) -> ``detect_fan_type``
+        (@0x809B08C4) -> ``HAL_Temp_SpeedTest`` (@0x809B061C) spins the BRAIN fan up and samples
+        its tachometer over I2C1 @ 0x4D (``MaxFanController``); the fan-tach spin-up sleep is
+        compressed (``_install_fan_spinup_hook``) so the worker proceeds to the tach read, measures
+        a valid RPM, and sets Fan 0x800. The board-bring-up barrier therefore now PASSES and boot
+        reaches init event flags **0xC3300FFF**.
+
+        Past the barrier the Driver thread dispatches the "SATA" / "Media" ``init_parallel`` stages
+        and blocks on ``wait_for_init_flags(0x0C000000)`` (@0x8066D000); that storage bring-up is the
+        next depth milestone (see ``boot_to_run_application``). ``run_application`` (Camera State
+        Manager, UI, DSS framebuffer, firmware RCP server) is released only after the Driver cascade
+        completes.
 
         This method is a deterministic depth probe: it boots to the barrier and returns the exact
         reached flags, the blocked board bits, and the identified blocker, without faking anything.
@@ -837,23 +938,100 @@ class Dsmc2Camera:
             # XAUI link check against the installed link-up model). Count of SPI frames clocked over
             # sDMA this boot (non-zero => the transport carried the board-init SPI reads).
             "spi_over_sdma_frames": getattr(self.sdma, "spi_dma_transfers", 0),
-            # Human-readable identification of the next blocker for the depth roadmap. With the
-            # SPI-over-sDMA transport in place the board bring-up completes except the Fan 0x800 bit:
-            # ``fan_init`` (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) strands in
-            # the fan tachometer speed test (``detect_fan_type`` -> ``HAL_Temp_SpeedTest``), a timed
-            # fan-RPM measurement no peripheral model drives. That fan / tach-capture model is the
-            # next depth milestone -- NOT the SPI transport (now modelled), and NOT the IOB Xtensa.
+            # The fan controller + spin-up model is installed: the fan tach speed test now measures
+            # a valid RPM and Fan 0x800 sets, so the whole board barrier passes (0xC3300FFF).
+            "fan_tach_modeled": True,
+            # Human-readable identification of the next blocker for the depth roadmap. The board
+            # barrier (incl. Fan 0x800) now passes; the next blocker is the post-barrier SATA/Media
+            # storage init, reported in full by ``boot_to_run_application``.
             "next_blocker": (
-                None if barrier_passed else
-                "board bring-up now completes over the modelled McSPI1-over-sDMA SPI transport "
-                "(Boards 0x400, XAUI 0x200000, Mailbox 0x1000000 all set; boot reaches 0xC33007FF). "
-                "The only board-dependent bit still clear is Fan 0x800: fan_init (@0x8067049C) -> "
-                "HAL_Temp_Fan_Control_Init (@0x809B09A8) strands in the fan TACHOMETER speed test "
-                "(detect_fan_type -> HAL_Temp_SpeedTest), a timed fan-RPM measurement no peripheral "
-                "model drives. Next milestone: a fan / tach-capture register model (not the SPI "
-                "transport, not the IOB Xtensa core)."
+                "board bring-up now completes fully (Boards 0x400, Fan 0x800, XAUI 0x200000, "
+                "Mailbox 0x1000000 all set; init event flags reach 0xC3300FFF). The Driver thread "
+                "(@0x8066C92C) then dispatches the SATA/Media init_parallel stages and blocks on "
+                "wait_for_init_flags(0x0C000000) (@0x8066D000) for the SATA (0x04000000) and Media "
+                "(0x08000000) completion bits. Next milestone: SATA/AHCI + media storage bring-up "
+                "(see boot_to_run_application)."
+                if barrier_passed else
+                "board bring-up incomplete: missing board bits 0x%X still clear at the barrier." % blocked_boards
             ),
             "threads": self.get_threads(),
+        }
+
+    def boot_to_run_application(
+        self,
+        max_instructions: int = 220_000_000,
+        slice_size: int = 200_000,
+    ) -> Dict[str, Any]:
+        """Drive boot past the board barrier toward ``run_application`` and report the next blocker.
+
+        ``boot_to_ui_bringup`` now crosses the board-bring-up barrier (init event flags
+        ``0xC3300FFF``; the Fan 0x800 bit sets via the ``MaxFanController`` tach model + spin-up
+        sleep compression). This method continues from there: the Driver thread (@0x8066C92C)
+        dispatches two further ``init_parallel`` stages -- "SATA" (worker @0x80670504, completion
+        bit ``RUN_APP_SATA_BIT`` 0x04000000) and "Media" (worker @0x8067060C, completion bit
+        ``RUN_APP_MEDIA_BIT`` 0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)``
+        (@0x8066D000 -> @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) for both.
+
+        The UI ``Starter Thread`` (thread_0_entry @0x80008E24 -> ``run_application`` -> Camera State
+        Manager / DSS framebuffer / RCP server) stays semaphore-blocked until that Driver cascade
+        completes. Under the current models the SATA/Media storage init workers do not post their
+        completion bits, so 0x04000000 / 0x08000000 stay clear -- the next depth milestone is the
+        SATA/AHCI + media storage bring-up. This is a deterministic probe: it reports the reached
+        flags, the unmet SATA/Media bits, and the identified blocker without faking anything.
+        """
+        # Reach the board barrier first (Fan included) via the existing depth probe.
+        self.boot_to_ui_bringup()
+
+        barrier = self.RUN_APP_FLAGS_BARRIER
+        done = 0
+        flags = self.init_event_flags()
+        while done < max_instructions and (flags & barrier) != barrier:
+            self._deliver_idle_irq()
+            try:
+                self.cpu.run(self.cpu.pc, 0, count=slice_size)
+            except Exception:
+                pass
+            done += slice_size
+            self.instruction_count += slice_size
+            self._tick_timers()
+            flags = self.init_event_flags()
+
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        flags = self.init_event_flags()
+        barrier_passed = (flags & barrier) == barrier
+        missing = barrier & ~flags
+        threads = self.get_threads()
+        names = {t["name"]: t for t in threads}
+        starter = names.get("Starter Thread")
+        return {
+            "milestone": "run_application" if barrier_passed else "storage_init_barrier",
+            "barrier_passed": barrier_passed,
+            "init_event_flags": flags,
+            # The board barrier (incl. Fan) is passed on entry; confirm it is retained.
+            "board_barrier_passed": (flags & self.UI_BRINGUP_FLAGS_BARRIER) == self.UI_BRINGUP_FLAGS_BARRIER,
+            "fan_bit_set": bool(flags & 0x800),
+            "run_app_instructions": done,
+            "total_instructions": self.instruction_count,
+            "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
+            # The post-barrier SATA/Media init bits still clear. Non-zero here identifies the blocker.
+            "missing_flags": missing,
+            "sata_bit_set": bool(flags & self.RUN_APP_SATA_BIT),
+            "media_bit_set": bool(flags & self.RUN_APP_MEDIA_BIT),
+            # The UI app (run_application) is released only when the Driver cascade finishes.
+            "run_application_released": bool(starter is not None and starter["state"] != "SEMAPHORE"),
+            "next_blocker": (
+                None if barrier_passed else
+                "board bring-up complete (0xC3300FFF, Fan 0x800 set). The Driver thread "
+                "(@0x8066C92C) now blocks at wait_for_init_flags(0x0C000000) (@0x8066D000 -> "
+                "wait_for_init_flags @0x8066C7D8 -> red_event_flags_get @0x8070E748) for the SATA "
+                "(0x04000000) and Media (0x08000000) init_parallel completion bits. The SATA "
+                "(worker @0x80670504) and Media (worker @0x8067060C) storage-init stages do not "
+                "complete under the current models, so those bits never set and run_application "
+                "(Starter Thread @0x80008E24) stays semaphore-blocked. Next milestone: SATA/AHCI + "
+                "media storage bring-up."
+            ),
+            "threads": threads,
         }
 
     def boot_until(

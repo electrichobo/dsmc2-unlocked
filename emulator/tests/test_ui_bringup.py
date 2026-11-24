@@ -18,17 +18,19 @@ window @0x1C000000 + ``fpga_read``/ts_fpga) passes against the installed link-up
 (``IobXauiWindow`` + ts_fpga seeds; verified in ``test_xaui_link.py``). The Boards, XAUI and Mailbox
 bits all set and boot reaches ``0xC33007FF``.
 
-The only board-dependent bit still clear is **Fan 0x800**: its worker ``fan_init`` (@0x8067049C) ->
-``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) runs but strands in the fan TACHOMETER speed test
-(``detect_fan_type`` -> ``HAL_Temp_SpeedTest``), a timed fan-RPM measurement no peripheral model
-drives. Past the barrier lie ``run_application`` -> Camera State Manager -> UI / DSS framebuffer /
-firmware RCP server, released only when the Driver thread finishes the cascade. The fan /
-tach-capture register model is the next depth milestone (NOT the SPI transport, NOT the IOB Xtensa).
+The last board-dependent bit, **Fan 0x800**, is now modelled too (see ``test_fan_tach.py``): its
+worker ``fan_init`` (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) -> ``detect_fan_type``
+(@0x809B08C4) -> ``HAL_Temp_SpeedTest`` (@0x809B061C) spins the BRAIN fan up and samples its
+tachometer over I2C1 @ 0x4D (``MaxFanController``); with the fan-tach spin-up sleep compressed the
+worker proceeds to the tach read, measures a valid RPM, and sets Fan 0x800. The board-bring-up
+barrier therefore now PASSES and boot reaches ``0xC3300FFF``. The next blocker is the post-barrier
+SATA / Media storage init (``boot_to_run_application`` / ``test_run_application.py``).
 
 Source of truth: sdk findings/boot/BOOT_FLOW_MAP.md (init_parallel cascade + board barrier),
 clean/weapon_boards.c / weapon_left_side_board.c / lsb_fpga.c / spi.c / fpga_utils.c,
-RED research/docs/build/vbrain_ui_bringup_findings.md (milestone 2). This test documents the reached
-depth, the SPI-over-sDMA transport, the XAUI model, and the corrected next blocker (Fan tach).
+temp_hal_weapon.c (fan HAL), RED research/docs/build/vbrain_ui_bringup_findings.md. This test
+documents the reached depth, the SPI-over-sDMA transport, the XAUI model, the fan-tach model, and
+the corrected next blocker (SATA/Media storage init).
 """
 
 import pytest
@@ -49,39 +51,41 @@ def bringup():
 
 
 def test_boot_reaches_board_bringup_barrier(bringup):
-    """Boot advances past the FS mount AND the board bring-up to the Fan-tach barrier (0xC33007FF)."""
+    """Boot advances past the FS mount AND the whole board bring-up barrier (0xC3300FFF)."""
     res = bringup
-    assert res["init_event_flags"] == Dsmc2Camera.UI_BRINGUP_FLAGS_REACHABLE == 0xC33007FF
+    assert res["init_event_flags"] == Dsmc2Camera.UI_BRINGUP_FLAGS_REACHABLE == 0xC3300FFF
     # The NAND-FS mount (milestone 3 depth) is retained -- no regression.
     assert res["init_event_flags"] & 0x8  # NAND FS
     assert res["init_event_flags"] & 0x7 == 0x7  # RTC|FileX|CRYPT
 
 
-def test_board_bringup_completes_except_fan(bringup):
-    """Boards/XAUI/Mailbox now set over the modelled SPI-over-sDMA transport; only Fan 0x800 clear."""
+def test_board_bringup_completes_including_fan(bringup):
+    """Boards/XAUI/Mailbox set over SPI-over-sDMA AND Fan 0x800 now sets via the fan-tach model."""
     res = bringup
-    assert res["barrier_passed"] is False
-    assert res["milestone"] == "board_bringup_barrier"
+    assert res["barrier_passed"] is True
+    assert res["milestone"] == "ui_bringup"
     # The SPI-over-sDMA transport carried the board-init coprocessor reads (non-zero frame count).
     assert res["spi_over_sdma_frames"] > 0
-    # Boards 0x400, XAUI 0x200000 and Mailbox 0x1000000 are now SET (no longer blocked).
+    # Boards 0x400, XAUI 0x200000 and Mailbox 0x1000000 are set.
     assert res["init_event_flags"] & 0x400        # Boards
     assert res["init_event_flags"] & 0x200000     # XAUI
     assert res["init_event_flags"] & 0x1000000    # Mailbox
-    # The only board-dependent bit still clear is Fan 0x800.
-    assert res["blocked_board_bits"] == FAN_BIT
-    assert res["missing_flags"] == FAN_BIT
+    # Fan 0x800 is now SET too -- no board-dependent bit remains blocked.
+    assert res["init_event_flags"] & FAN_BIT      # Fan
+    assert res["blocked_board_bits"] == 0
+    assert res["missing_flags"] == 0
+    assert res["fan_tach_modeled"] is True
 
 
-def test_next_blocker_is_fan_tach(bringup):
-    """The corrected next blocker is the fan tachometer speed test, not the SPI transport/XAUI."""
+def test_next_blocker_is_sata_media_storage(bringup):
+    """With Fan modelled, the board barrier passes; the next blocker is the SATA/Media storage init."""
     res = bringup
     assert res["next_blocker"] is not None
     nb = res["next_blocker"]
-    assert "Fan 0x800" in nb
-    assert "HAL_Temp_Fan_Control_Init" in nb or "HAL_Temp_SpeedTest" in nb
-    # Board bring-up / SPI transport is no longer the blocker.
-    assert "0xC33007FF" in nb
+    assert "0xC3300FFF" in nb
+    # The board barrier (incl. Fan) is no longer the blocker; storage init is next.
+    assert "SATA" in nb and "Media" in nb
+    assert "0x0C000000" in nb
 
 
 def test_xaui_link_model_is_installed(bringup):
@@ -92,13 +96,23 @@ def test_xaui_link_model_is_installed(bringup):
     assert res["xaui_window_reached"] is True
 
 
-def test_driver_thread_still_blocked_before_run_application(bringup):
-    """The Driver thread is event-flag blocked on the (fan) barrier; the UI app is not yet released."""
+def test_driver_thread_advances_past_fan_barrier(bringup):
+    """The Driver thread crossed the board barrier (incl. Fan); the UI app is not yet released.
+
+    After the board barrier passes the Driver thread dispatches the SATA/Media init_parallel
+    stages and blocks again on wait_for_init_flags(0x0C000000) for them (the new blocker), so it is
+    still EVENT_FLAG. The Starter Thread (thread_0_entry -> run_application) therefore remains
+    semaphore-blocked: the UI / DSS / RCP app is released only when the whole driver cascade
+    completes.
+    """
     res = bringup
     names = {t["name"]: t for t in res["threads"]}
     driver = names.get("Driver thread")
-    assert driver is not None and driver["state"] == "EVENT_FLAG"
-    # The Starter Thread (thread_0_entry -> run_application) is still semaphore-blocked: the UI /
-    # DSS / RCP app is released only when the whole driver cascade completes.
+    # At the instant the barrier passes the Driver thread has just been readied by the Fan bit and
+    # is mid-cascade (dispatching SATA/Media), so it is READY or already re-blocked (EVENT_FLAG) on
+    # the storage wait -- either way it is past the fan barrier, not blocked on it.
+    assert driver is not None and driver["state"] in ("READY", "EVENT_FLAG")
+    # The UI app is still gated: run_application's Starter Thread remains semaphore-blocked until
+    # the whole driver cascade (storage init included) completes.
     starter = names.get("Starter Thread")
     assert starter is not None and starter["state"] == "SEMAPHORE"
