@@ -269,7 +269,7 @@ fn split_before_timestamp(blob: &str, ts: &Regex) -> Vec<String> {
 }
 
 /// Per-session triage metadata (fields used by the reports).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionMeta {
     pub lines: usize,
     pub wallclock: Option<String>,
@@ -594,6 +594,49 @@ pub struct LogStats {
     pub total_warns: usize,
     pub error_frequencies: Vec<ErrorStatEntry>,
     pub top_repeated_lines: Vec<LineRepeatStat>,
+}
+
+/// One session's triage verdict.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionTriage {
+    pub index: usize,
+    pub meta: SessionMeta,
+    pub furthest: String,
+    /// Reached READY_TO_RECORD with no SYSTEM_ERROR.
+    pub passed: bool,
+}
+
+/// Whole-log triage: per-session verdicts + the cross-session stats.
+#[derive(Debug, Clone, Serialize)]
+pub struct Triage {
+    pub healthy: bool,
+    pub sessions: Vec<SessionTriage>,
+    pub stats: LogStats,
+}
+
+/// Triage split sessions (from [`rejoin_and_split`]). `only` restricts the
+/// per-session verdicts (and so `healthy`) to one session index; `stats` always
+/// cover every session.
+pub fn triage(
+    sessions: &[Vec<String>],
+    p: &Patterns,
+    dict: &crate::error_dict::ErrorDictionary,
+    only: Option<usize>,
+) -> Triage {
+    let stats = compute_stats(sessions, p, dict);
+    let mut out = Vec::new();
+    for (i, s) in sessions.iter().enumerate() {
+        if only.is_some_and(|t| t != i) {
+            continue;
+        }
+        let meta = session_meta(s, p);
+        let furthest = furthest_state(&meta.milestones);
+        let reaches_ready = meta.milestones.iter().any(|m| m.contains("READY_TO_RECORD"));
+        let has_sys_err = meta.failures.contains_key("SYSTEM_ERROR")
+            || s.iter().any(|ln| ln.contains("SYSTEM_ERROR"));
+        out.push(SessionTriage { index: i, meta, furthest, passed: reaches_ready && !has_sys_err });
+    }
+    Triage { healthy: out.iter().all(|s| s.passed), sessions: out, stats }
 }
 
 /// Strip timestamps `[d:dd:dd:ddd]` and memory pool stats `(nn%/nn%)` for bloat clustering.

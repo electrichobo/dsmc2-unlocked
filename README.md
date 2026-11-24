@@ -114,6 +114,11 @@ The platform is reverse-engineered end to end. What is already done and document
 
 ## Quickstart — the tools
 
+**No install: the [DSMC Workbench](web/)** runs the same tools in Chrome or Edge.
+It decodes and triages logs, opens firmware downloads (DSMC2, DSMC1 and RED ONE),
+reads and builds presets, and runs the `dsmcdbg` self-test on a camera over
+WebSerial. Everything runs in the browser tab; no file leaves the computer.
+
 The debug and firmware tools are Rust. You need the Rust toolchain
 ([rustup.rs](https://rustup.rs)). Build and run each tool from its own directory.
 
@@ -180,6 +185,8 @@ reverse-engineering CLIs live in `dsmc2-sdk`.
 
 | Area | What it is |
 |---|---|
+| [web/](web) | **DSMC Workbench**: the browser front-end (Solid + the Rust crates compiled to WebAssembly) |
+| [tools/dsmc-web/](tools/dsmc-web) | wasm-bindgen layer the workbench calls; no logic of its own |
 | [tools/dsmcdbg/](tools/dsmcdbg) | **Flagship debug CLI** (Rust): live-camera verify/selftest, capture, and diff vs the golden baseline |
 | [tools/dsmc-fw-core/](tools/dsmc-fw-core) | Firmware CLI + lib (Rust): decrypt/unpack packages, read/build `.preset`, list NAND recovery dumps |
 | [tools/dsmc-core/](tools/dsmc-core) | Shared Rust lib: serial shell driver, reply parsers, I2C/UCD maps, baseline model |

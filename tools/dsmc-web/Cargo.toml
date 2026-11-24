@@ -1,0 +1,28 @@
+[package]
+name = "dsmc-web"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for the DSMC2 web tool: log decode/triage, FW package read/extract, preset read/build, and the read-only dsh> diagnostics over a WebSerial transport supplied by the page. Thin wasm-bindgen layer over dsmc-core + dsmc-fw-core; no logic of its own."
+license = "MIT"
+repository = "https://github.com/radosek/dsmc2-unlocked"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dsmc-core = { path = "../dsmc-core", default-features = false }
+dsmc-fw-core = { path = "../dsmc-fw-core" }
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+serde-wasm-bindgen = "0.6.5"
+serde_bytes = "0.11.17"
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1.7"
+
+[profile.release]
+opt-level = "s"
+lto = true

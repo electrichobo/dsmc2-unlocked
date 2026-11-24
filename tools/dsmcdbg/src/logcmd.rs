@@ -544,30 +544,9 @@ fn cmd_triage(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let dict = ErrorDictionary::new();
-    let stats = compute_stats(&sessions, &p, &dict);
-
-    let mut has_fatal = false;
-    let mut session_summaries = Vec::new();
-
-    for (i, s) in sessions.iter().enumerate() {
-        if let Some(target) = session_filter {
-            if i != target {
-                continue;
-            }
-        }
-        let meta = session_meta(s, &p);
-        let furthest = furthest_state(&meta.milestones);
-        let reaches_ready = meta.milestones.iter().any(|m| m.contains("READY_TO_RECORD"));
-        let has_sys_err = meta.failures.contains_key("SYSTEM_ERROR")
-            || s.iter().any(|ln| ln.contains("SYSTEM_ERROR"));
-
-        let passed = reaches_ready && !has_sys_err;
-        if !passed {
-            has_fatal = true;
-        }
-
-        session_summaries.push((i, meta, furthest, passed));
-    }
+    let t = log::triage(&sessions, &p, &dict, session_filter);
+    let has_fatal = !t.healthy;
+    let stats = t.stats;
 
     if json_mode {
         let report = serde_json::json!({
@@ -642,7 +621,7 @@ fn cmd_triage(args: &[String]) -> Result<ExitCode, String> {
     // 2. Session Lifecycle Timeline
     println!("2. BOOT SESSIONS LIFECYCLE & MILESTONES:");
     println!("{}", "-".repeat(80));
-    for (i, meta, furthest, passed) in session_summaries {
+    for log::SessionTriage { index: i, meta, furthest, passed } in t.sessions {
         let status_tag = if passed { "[PASS]" } else { "[FAIL]" };
         println!(
             "  Session #{:<2} {}  Lines: {:>5}  |  Duration: {:<12}  |  Furthest: {}",
