@@ -47,3 +47,20 @@ space, not just referenced regs) via the `xaui` shell command and feed the real 
 2. Deepen one M3/M4 subsystem from isolated-unit to real-FW-driven on the booted app (RCP params first,
    once (1) lands; then record/playback).
 3. The ASIC data path (the hard frontier) — IOB/ISP co-sim or a faithful FPGA/DMA data model.
+
+## Collaborator (Daniel) tips — 2026-11-24
+
+**1. Trace probe (emulator → real HW).** The emulator can emit an event at a list of addresses when code
+flow passes through them. To do the same on real hardware, inject at each trace address either a jump or a
+soft-interrupt (some CPUs also have hardware debug breakpoints), then make sure the instruction that was
+displaced by the hook still executes (re-execute the stolen instruction before returning). Uses:
+boot-up tracing / progress + reached-milestone tracking, and — the main value — instrumenting the
+**interrupt handlers (with an external interrupt source)** to detect HOW and WHEN interrupts/events actually
+arrive from the ASICs on a real device. This is the real-HW counterpart of the emulator's `boot --cov-out`
+PC trace: emulator gives the address set; the HW probe confirms the live interrupt/event timing.
+
+**2. ASIC fw as extra simulated cores.** For ASIC firmware, add the subsystems to the simulator as
+additional CPU cores with correctly mapped memory spaces. Then it should be observable WHEN the host uploads
+the IRAM blob into a core and HOW the Xtensa-core simulation is started. This extends naturally to
+simulating the MCUs with their peripherals — the **sidekick** is a good first candidate (it has buttons, a
+display, and a serial link), i.e. a self-contained MCU+peripherals target to bring up before the big ASICs.
