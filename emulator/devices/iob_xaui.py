@@ -115,6 +115,35 @@ _SATA_SHADOW_REGS: Dict[int, int] = {
 }
 
 
+# ---- IOB command-response mailbox (xsys_iob_cmd_tx ack) ------------------------------------
+# The IOB "cmd/response" mailbox the driver polls after ``xsys_iob_cmd_tx`` dispatches a command
+# to an IOB Xtensa core. ``FUN_80727028(0x800B0018)`` reads the IOB0 response word (0x800B001C
+# for IOB1); ``0x800B0018 & 0x3FFFFFF == 0x0B0018`` lands at this window offset, page 0x20.
+#
+# The Monitor-Pipeline init child (``monitor_pipeline_init`` @0x8074C9E8 -> ``FUN_807B45FC``,
+# "iob_mon_init_black_frame") issues command 0x26 via ``xsys_iob_cmd_tx(0,0x26,...)`` then waits
+# on this word for the done bit 0x20000:
+#   * ``FUN_807B3044(0,0x20000,500)`` busy-waits (``FUN_80701EB0`` tick-spin) for bit 0x20000 SET
+#   * ``FUN_807B30DC(0,0x20000,5000)`` then waits (``_tx_thread_sleep``) for bit 0x20000 to CLEAR
+# On real hardware the IOB core asserts the done bit when the black-frame command completes, and
+# the host sees it clear once consumed -- both polls pass on their first read. The emulator does
+# not run the IOB Xtensa, so without a model this word stays 0: ``FUN_807B3044`` never sees the
+# bit set and spins in ``FUN_80701EB0``, a tick-counter busy-wait that cannot advance (the CPU
+# never returns to the scheduler idle loop where the compressed-tick model injects GPTimer2
+# ticks), hanging the Monitor-Pipeline child so it never posts its init-event bit 0x2000. That
+# strands the whole post-storage DSS/display + DSP/audio batch (0x000CE000), since the Driver
+# blocks in ``wait_for_init_flags(0xE000)`` for Monitor Pipeline | HDMI | HDSDI before it
+# dispatches DSP/Audio.  (sdk findings/subsystems/DSP_C64X_CHARACTERIZED.md, memory
+# ``omap-iob-transport``: IOB mailbox @0xA5800000/GPMC + register-poke response path.)
+#
+# Model it as a read-to-clear done pulse: the response word reads 0x20000 (done bit set) on its
+# first read -- satisfying ``FUN_807B3044`` on poll 1 so the tick-spin is never entered -- and
+# reads 0 afterwards -- satisfying ``FUN_807B30DC``'s clear-wait on its first poll. Each read
+# re-arms independently per IOB core, so a later command's poll pair sees the same set-then-clear.
+IOB_CMDRESP_OFFS = (0x0B0018, 0x0B001C)   # 0x800B0018 (IOB0) / 0x800B001C (IOB1) & 0x3FFFFFF
+IOB_CMD_DONE_BIT = 0x00020000             # command-done bit the FW polls (FUN_807B3044/30DC)
+
+
 # ---- FPGA-side (McSPI ch6) link-up register seeds, shared with the SPI transport -----------
 # 0x40010008: (v>>3 & 0xff) must == 0xFC  ->  0x7E0 gives (0x7E0>>3)&0xff = 0xFC
 FPGA_PCS_LINK_UP = 0x000007E0
@@ -143,6 +172,10 @@ class IobXauiWindow:
         self.media_present = media_present
         self.read_count = 0
         self.status_reads: Dict[int, int] = {}
+        # IOB command-response mailbox: per-core "done bit armed" latch (read-to-clear). Armed so
+        # the first poll after a command sees the done bit set; the read clears it so the paired
+        # clear-wait passes too. Keyed by window offset (0x0B0018 IOB0 / 0x0B001C IOB1).
+        self._iob_cmd_done_armed: Dict[int, bool] = {off: True for off in IOB_CMDRESP_OFFS}
 
     def _reg_off(self, window_offset: int):
         """Map a window offset to (port_base, reg_off) if it lands on a modelled XAUI port
@@ -162,8 +195,12 @@ class IobXauiWindow:
     def value_for(self, window_offset: int) -> int:
         """Return the link-up register value for an offset within the 0x1C000000 window.
 
-        Answers the two modelled XAUI port blocks (EXP1/MON0) and the SATA3 shadow-register
-        block; anything else reads 0 (handled as RAM by the caller via ``is_status_reg``)."""
+        Answers the two modelled XAUI port blocks (EXP1/MON0), the SATA3 shadow-register block,
+        and the IOB command-response mailbox (done bit); anything else reads 0 (handled as RAM by
+        the caller via ``is_status_reg``). Pure read for the cmd-response word -- the read-to-clear
+        state transition happens in ``read``; here it reflects the current armed latch."""
+        if window_offset in IOB_CMDRESP_OFFS:
+            return IOB_CMD_DONE_BIT if self._iob_cmd_done_armed.get(window_offset) else 0x00000000
         sata_idx = self._sata_idx(window_offset)
         if sata_idx is not None:
             if not self.link_up:
@@ -180,6 +217,8 @@ class IobXauiWindow:
         return _PORT_LINK_UP_REGS.get(reg_off, 0x00000000)
 
     def is_status_reg(self, window_offset: int) -> bool:
+        if window_offset in IOB_CMDRESP_OFFS:
+            return True
         sata_idx = self._sata_idx(window_offset)
         if sata_idx is not None:
             return sata_idx in _SATA_SHADOW_REGS
@@ -188,6 +227,19 @@ class IobXauiWindow:
 
     def read(self, window_offset: int, size: int) -> int:
         self.read_count += 1
+        if window_offset in IOB_CMDRESP_OFFS:
+            # Read-to-clear done-bit pulse: the done bit reads set once (satisfies the SET-wait
+            # FUN_807B3044 on poll 1, so the FUN_80701EB0 tick-spin is never entered), then reads
+            # clear (satisfies the CLEAR-wait FUN_807B30DC on its first poll). Re-arms so a later
+            # command's poll pair sees the same set-then-clear sequence.
+            armed = self._iob_cmd_done_armed.get(window_offset, False)
+            self.status_reads[window_offset] = self.status_reads.get(window_offset, 0) + 1
+            if armed:
+                self._iob_cmd_done_armed[window_offset] = False
+                return IOB_CMD_DONE_BIT
+            # Clear read observed -- re-arm for the next command's SET-wait.
+            self._iob_cmd_done_armed[window_offset] = True
+            return 0x00000000
         _, reg_off = self._reg_off(window_offset)
         if reg_off is not None:
             self.status_reads[reg_off] = self.status_reads.get(reg_off, 0) + 1
