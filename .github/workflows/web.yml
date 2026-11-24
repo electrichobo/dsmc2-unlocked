@@ -1,0 +1,84 @@
+name: web
+
+# Builds and tests the browser workbench (web/) and the Rust crates it compiles
+# to WebAssembly. Pull requests only build and test. Publishing to GitHub Pages
+# happens only when the workflow is run by hand (Actions → web → Run workflow),
+# so nothing goes live until it has been tested.
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "tools/dsmc-core/**"
+      - "tools/dsmc-fw-core/**"
+      - "tools/dsmc-web/**"
+      - "tools/dsmcdbg/**"
+      - "tools/fw-crypto/**"
+      - ".github/workflows/web.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Publish the build to GitHub Pages"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # The bundled SQLite C code needs a wasm-capable clang; Ubuntu's has it.
+      CC_wasm32_unknown_unknown: clang
+      AR_wasm32_unknown_unknown: llvm-ar
+    steps:
+      - uses: actions/checkout@v4
+      # clang + llvm-ar for the wasm32 C build; libudev for the native serialport backend
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Rust tests
+        run: |
+          for c in dsmc-core dsmc-fw-core dsmcdbg; do
+            cargo test --manifest-path tools/$c/Cargo.toml
+          done
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm wasm
+          pnpm test
+          pnpm build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

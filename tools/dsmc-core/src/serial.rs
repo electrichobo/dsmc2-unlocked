@@ -1,9 +1,16 @@
 //! Serial shell driver for the DSMC2 `dsh>` shell.
 //!
-//! The byte-pushing lives behind the [`Transport`] trait so [`DshDriver`]'s
-//! control logic (prompt waiting, the silence cutoff, command send/read) is
-//! exercised by tests with a canned in-memory transport - no real port needed.
-//! [`SerialTransport`] is the real `serialport`-backed implementation.
+//! The control logic (prompt waiting, the silence cutoff, command send/read) is
+//! written once, async, against [`AsyncTransport`], which also owns the clock
+//! and sleeping. That is what lets the same driver run natively and in a
+//! browser (WebSerial, where reads are promises and `std::time::Instant` does
+//! not exist).
+//!
+//! The synchronous [`Transport`] + [`DshDriver`] API is kept on top: a
+//! [`Blocking`] adapter gives any sync transport the async interface (real
+//! `Instant` + `thread::sleep`), and `DshDriver` drives it with
+//! `pollster::block_on`. Tests use a canned in-memory sync transport.
+//! [`SerialTransport`] (feature `serial`) is the real `serialport` backend.
 //!
 //! Behavior mirrors `tools/dsh.py`:
 //!   * 115200 8N1, no flow control.
@@ -12,8 +19,8 @@
 //!     of silence once some output arrived (3.0s if nothing arrived yet).
 //!   * `run_cmd_prompt` (`-w`): read until prompt-at-end only, no silence cutoff.
 
-use std::io::{self, Read, Write};
-use std::time::{Duration, Instant};
+use std::io;
+use std::time::Duration;
 
 use crate::reply::has_prompt;
 
@@ -21,8 +28,8 @@ use crate::reply::has_prompt;
 pub const DEFAULT_PORT: &str = "/dev/cu.usbmodem101";
 pub const BAUD: u32 = 115200;
 
-/// A byte transport to the shell. The real one is a serial port; tests use a
-/// scripted in-memory fake.
+/// A synchronous byte transport to the shell. The real one is a serial port;
+/// tests use a scripted in-memory fake.
 pub trait Transport {
     /// Write all bytes (and flush).
     fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
@@ -32,6 +39,19 @@ pub trait Transport {
     fn read_available(&mut self) -> io::Result<Vec<u8>>;
     /// Discard any buffered input (mirror of pyserial reset_input_buffer).
     fn clear_input(&mut self) -> io::Result<()>;
+}
+
+/// The async transport the driver core runs on. Besides bytes it supplies the
+/// clock and sleep, so the core never touches `std::time::Instant` or threads.
+#[allow(async_fn_in_trait)]
+pub trait AsyncTransport {
+    async fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
+    /// Whatever is available now, or after a short wait; may be empty.
+    async fn read_available(&mut self) -> io::Result<Vec<u8>>;
+    async fn clear_input(&mut self) -> io::Result<()>;
+    async fn sleep(&mut self, d: Duration);
+    /// Monotonic time since an arbitrary origin.
+    fn now(&self) -> Duration;
 }
 
 /// Timing knobs, pulled out so tests can zero them for speed.
@@ -69,7 +89,146 @@ impl Timing {
     }
 }
 
-/// Drives the shell over any [`Transport`].
+async fn sleep_nonzero<T: AsyncTransport>(t: &mut T, d: Duration) {
+    if !d.is_zero() {
+        t.sleep(d).await;
+    }
+}
+
+/// Wait for the `dsh>` prompt, poking CR periodically so an already-printed
+/// silent prompt answers. `timeout` caps the wait. Returns true if seen.
+pub async fn wait_prompt<T: AsyncTransport>(
+    t: &mut T,
+    timing: &Timing,
+    timeout: Duration,
+) -> io::Result<bool> {
+    let t0 = t.now();
+    let mut last_poke: Option<Duration> = None;
+    let mut buf = String::new();
+    while t.now() - t0 < timeout {
+        let chunk = t.read_available().await?;
+        if !chunk.is_empty() {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            if has_prompt(&buf, false) {
+                return Ok(true);
+            }
+        } else {
+            sleep_nonzero(t, timing.poll).await;
+            if last_poke.is_none_or(|p| t.now() - p > timing.poke_every) {
+                t.write_all(b"\r").await?;
+                last_poke = Some(t.now());
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Send `cmd` and read the reply using the silence-cutoff heuristic
+/// (equivalent to `dsh.py`'s `run_cmd`).
+pub async fn run_cmd<T: AsyncTransport>(
+    t: &mut T,
+    timing: &Timing,
+    cmd: &str,
+    timeout: Duration,
+) -> io::Result<String> {
+    send(t, timing, cmd).await?;
+    let t0 = t.now();
+    let mut last = t.now();
+    let mut buf = String::new();
+    while t.now() - t0 < timeout {
+        let chunk = t.read_available().await?;
+        if !chunk.is_empty() {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            last = t.now();
+            if has_prompt(&buf, true) {
+                break;
+            }
+            continue;
+        }
+        // Judge silence only right after a read came back empty. A sleep can
+        // overrun badly (a background browser tab clamps timers to ~1 s); data
+        // that arrived during it must be read before the line counts as quiet.
+        let quiet = t.now() - last;
+        if !buf.is_empty() && quiet > timing.quiet_cutoff {
+            break;
+        }
+        if buf.is_empty() && quiet > timing.no_output_cutoff {
+            break;
+        }
+        sleep_nonzero(t, timing.poll).await;
+    }
+    Ok(buf)
+}
+
+/// Send `cmd` and read until the prompt only - no silence cutoff
+/// (equivalent to `dsh.py`'s `run_cmd_prompt`, the `-w` mode).
+pub async fn run_cmd_prompt<T: AsyncTransport>(
+    t: &mut T,
+    timing: &Timing,
+    cmd: &str,
+    timeout: Duration,
+) -> io::Result<String> {
+    send(t, timing, cmd).await?;
+    let t0 = t.now();
+    let mut buf = String::new();
+    while t.now() - t0 < timeout {
+        let chunk = t.read_available().await?;
+        if !chunk.is_empty() {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            if has_prompt(&buf, true) {
+                break;
+            }
+        } else {
+            sleep_nonzero(t, timing.poll).await;
+        }
+    }
+    Ok(buf)
+}
+
+async fn send<T: AsyncTransport>(t: &mut T, timing: &Timing, cmd: &str) -> io::Result<()> {
+    t.clear_input().await?;
+    sleep_nonzero(t, timing.settle).await;
+    let mut line = cmd.as_bytes().to_vec();
+    line.push(b'\r');
+    t.write_all(&line).await
+}
+
+/// Gives a sync [`Transport`] the [`AsyncTransport`] interface, using the real
+/// clock and blocking sleeps. Its futures never pend, so `pollster::block_on`
+/// drives them.
+pub struct Blocking<T> {
+    pub inner: T,
+    origin: std::time::Instant,
+}
+
+impl<T> Blocking<T> {
+    pub fn new(inner: T) -> Self {
+        Blocking {
+            inner,
+            origin: std::time::Instant::now(),
+        }
+    }
+}
+
+impl<T: Transport> AsyncTransport for Blocking<T> {
+    async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        self.inner.write_all(data)
+    }
+    async fn read_available(&mut self) -> io::Result<Vec<u8>> {
+        self.inner.read_available()
+    }
+    async fn clear_input(&mut self) -> io::Result<()> {
+        self.inner.clear_input()
+    }
+    async fn sleep(&mut self, d: Duration) {
+        std::thread::sleep(d);
+    }
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
+}
+
+/// Synchronous driver over any [`Transport`].
 pub struct DshDriver<T: Transport> {
     pub transport: T,
     pub timing: Timing,
@@ -87,102 +246,47 @@ impl<T: Transport> DshDriver<T> {
         DshDriver { transport, timing }
     }
 
-    fn sleep_poll(&self) {
-        if !self.timing.poll.is_zero() {
-            std::thread::sleep(self.timing.poll);
-        }
+    fn with_async<R>(&mut self, f: impl AsyncFnOnce(&mut Blocking<&mut T>, &Timing) -> R) -> R {
+        let timing = self.timing;
+        let mut b = Blocking::new(&mut self.transport);
+        pollster::block_on(f(&mut b, &timing))
     }
 
-    /// Wait for the `dsh>` prompt, poking CR periodically so an already-printed
-    /// silent prompt answers. `timeout` caps the wait. Returns true if seen.
+    /// See [`wait_prompt`].
     pub fn wait_prompt(&mut self, timeout: Duration) -> io::Result<bool> {
-        let t0 = Instant::now();
-        let mut last_poke = Instant::now()
-            .checked_sub(Duration::from_secs(3600))
-            .unwrap_or_else(Instant::now);
-        let mut buf = String::new();
-        while t0.elapsed() < timeout {
-            let chunk = self.transport.read_available()?;
-            if !chunk.is_empty() {
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                if has_prompt(&buf, false) {
-                    return Ok(true);
-                }
-            } else {
-                self.sleep_poll();
-                if last_poke.elapsed() > self.timing.poke_every {
-                    self.transport.write_all(b"\r")?;
-                    last_poke = Instant::now();
-                }
-            }
-        }
-        Ok(false)
+        self.with_async(async |t, timing| wait_prompt(t, timing, timeout).await)
     }
 
-    /// Send `cmd` and read the reply using the silence-cutoff heuristic
-    /// (equivalent to `dsh.py`'s `run_cmd`).
+    /// See [`run_cmd`].
     pub fn run_cmd(&mut self, cmd: &str, timeout: Duration) -> io::Result<String> {
-        self.send(cmd)?;
-        let t0 = Instant::now();
-        let mut last = Instant::now();
-        let mut buf = String::new();
-        while t0.elapsed() < timeout {
-            let chunk = self.transport.read_available()?;
-            if !chunk.is_empty() {
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                last = Instant::now();
-                if has_prompt(&buf, true) {
-                    break;
-                }
-            } else {
-                self.sleep_poll();
-                if !buf.is_empty() && last.elapsed() > self.timing.quiet_cutoff {
-                    break;
-                }
-                if buf.is_empty() && last.elapsed() > self.timing.no_output_cutoff {
-                    break;
-                }
-            }
-        }
-        Ok(buf)
+        self.with_async(async |t, timing| run_cmd(t, timing, cmd, timeout).await)
     }
 
-    /// Send `cmd` and read until the prompt only - no silence cutoff
-    /// (equivalent to `dsh.py`'s `run_cmd_prompt`, the `-w` mode).
+    /// See [`run_cmd_prompt`].
     pub fn run_cmd_prompt(&mut self, cmd: &str, timeout: Duration) -> io::Result<String> {
-        self.send(cmd)?;
-        let t0 = Instant::now();
-        let mut buf = String::new();
-        while t0.elapsed() < timeout {
-            let chunk = self.transport.read_available()?;
-            if !chunk.is_empty() {
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-                if has_prompt(&buf, true) {
-                    break;
-                }
-            } else {
-                self.sleep_poll();
-            }
-        }
-        Ok(buf)
+        self.with_async(async |t, timing| run_cmd_prompt(t, timing, cmd, timeout).await)
     }
+}
 
-    fn send(&mut self, cmd: &str) -> io::Result<()> {
-        self.transport.clear_input()?;
-        if !self.timing.settle.is_zero() {
-            std::thread::sleep(self.timing.settle);
-        }
-        let mut line = cmd.as_bytes().to_vec();
-        line.push(b'\r');
-        self.transport.write_all(&line)
+impl<T: Transport> Transport for &mut T {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        (**self).write_all(data)
+    }
+    fn read_available(&mut self) -> io::Result<Vec<u8>> {
+        (**self).read_available()
+    }
+    fn clear_input(&mut self) -> io::Result<()> {
+        (**self).clear_input()
     }
 }
 
 /// Real serial-port transport, backed by the `serialport` crate.
+#[cfg(feature = "serial")]
 pub struct SerialTransport {
     port: Box<dyn serialport::SerialPort>,
 }
 
+#[cfg(feature = "serial")]
 impl SerialTransport {
     /// Open `port` at 115200 8N1, no flow control, with a short read timeout so
     /// `read_available` returns promptly when the line is quiet.
@@ -199,13 +303,16 @@ impl SerialTransport {
     }
 }
 
+#[cfg(feature = "serial")]
 impl Transport for SerialTransport {
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        use std::io::Write;
         Write::write_all(&mut self.port, data)?;
         self.port.flush()
     }
 
     fn read_available(&mut self) -> io::Result<Vec<u8>> {
+        use std::io::Read;
         let n = self.port.bytes_to_read().unwrap_or(0) as usize;
         if n == 0 {
             return Ok(Vec::new());
@@ -321,8 +428,52 @@ mod tests {
     fn run_cmd_prompt_waits_for_prompt_only() {
         let t = MockTransport::new(vec!["working...\n", "", "", "done\n(0%/0%) dsh>"]);
         let mut d = DshDriver::with_timing(t, Timing::instant());
-        let out = d.run_cmd_prompt("nand zlib", Duration::from_secs(5)).unwrap();
+        let out = d
+            .run_cmd_prompt("nand zlib", Duration::from_secs(5))
+            .unwrap();
         assert!(out.contains("done"));
+        assert!(out.trim_end().ends_with("dsh>"));
+    }
+
+    /// Sleeps overrun to 1 s (a background browser tab clamps timers) while the
+    /// rest of the reply arrives 5 ms after the first chunk.
+    struct ThrottledTab {
+        t: Duration,
+        chunks: Vec<(Duration, &'static str)>,
+    }
+
+    impl AsyncTransport for ThrottledTab {
+        async fn write_all(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        async fn read_available(&mut self) -> io::Result<Vec<u8>> {
+            let now = self.t;
+            let (ready, later): (Vec<_>, Vec<_>) = self.chunks.drain(..).partition(|(at, _)| *at <= now);
+            self.chunks = later;
+            Ok(ready.into_iter().flat_map(|(_, c)| c.bytes()).collect())
+        }
+        async fn clear_input(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        async fn sleep(&mut self, _: Duration) {
+            self.t += Duration::from_secs(1);
+        }
+        fn now(&self) -> Duration {
+            self.t
+        }
+    }
+
+    #[test]
+    fn run_cmd_reads_data_that_arrived_during_an_overlong_sleep() {
+        let mut t = ThrottledTab {
+            t: Duration::ZERO,
+            chunks: vec![
+                (Duration::ZERO, "Checking - IOB\n"),
+                (Duration::from_millis(5), "  Vcc  1.0  = 1.006\nDone\n(97%/97%) dsh>"),
+            ],
+        };
+        let out = pollster::block_on(run_cmd(&mut t, &Timing::default(), "test voltage all", Duration::from_secs(15))).unwrap();
+        assert!(out.contains("1.006"), "reply cut off: {out:?}");
         assert!(out.trim_end().ends_with("dsh>"));
     }
 }

@@ -758,7 +758,7 @@ fn cmd_db(args: &[String]) -> Result<(), String> {
             let sql = format!("SELECT * FROM \"{t}\"");
             let mut st = conn.prepare(&sql).map_err(|e| format!("{t}: {e}"))?;
             let ncol = st.column_count();
-            let cols: Vec<String> = st.column_names().iter().map(|c| c.to_string()).collect();
+            let cols: Vec<String> = st.column_names().map(|c| c.to_string()).collect();
             println!("# {}", cols.join("\t"));
             let rows = st
                 .query_map([], |r| {

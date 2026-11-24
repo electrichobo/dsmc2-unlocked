@@ -67,9 +67,12 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-fn load_key(path: &Path) -> Result<RsaPrivateKey, Error> {
-    let der = std::fs::read(path).map_err(|e| Error::Key(e.to_string()))?;
-    RsaPrivateKey::from_pkcs1_der(&der).map_err(|e| Error::Key(e.to_string()))
+fn read_key(path: &Path) -> Result<Vec<u8>, Error> {
+    std::fs::read(path).map_err(|e| Error::Key(e.to_string()))
+}
+
+fn load_key_der(der: &[u8]) -> Result<RsaPrivateKey, Error> {
+    RsaPrivateKey::from_pkcs1_der(der).map_err(|e| Error::Key(e.to_string()))
 }
 
 /// RSA-OAEP(SHA1, label="dsmc") unwrap of a 256-byte block -> the RC4 key.
@@ -103,16 +106,32 @@ pub fn is_v3(buf: &[u8]) -> bool {
 
 /// Parse a v3 combo TOC. `v3_key_path` = fw_v3_privkey.der.
 pub fn parse_v3(buf: &[u8], v3_key_path: &Path) -> Result<Vec<TocEntry>, Error> {
+    parse_v3_with(buf, || read_key(v3_key_path))
+}
+
+/// [`parse_v3`] with the PKCS#1 DER key bytes instead of a path.
+pub fn parse_v3_der(buf: &[u8], v3_key_der: &[u8]) -> Result<Vec<TocEntry>, Error> {
+    parse_v3_with(buf, || Ok(v3_key_der.to_vec()))
+}
+
+// The key is loaded only after the cheap magic/length checks pass.
+fn parse_v3_with(
+    buf: &[u8],
+    v3_key_der: impl FnOnce() -> Result<Vec<u8>, Error>,
+) -> Result<Vec<TocEntry>, Error> {
     if !is_v3(buf) {
         return Err(Error::NotV3);
     }
     if buf.len() < 521 + 0x400 {
         return Err(Error::Truncated);
     }
-    let key = load_key(v3_key_path)?;
+    let key = load_key_der(&v3_key_der()?)?;
     let rc4key = oaep_key(&key, &buf[265..521])?;
     let toc = rc4(&rc4key, &buf[521..521 + 0x400]);
     let n = u32::from_le_bytes(toc[0..4].try_into().unwrap()) as usize;
+    if n.checked_mul(10).and_then(|x| x.checked_add(4)).is_none_or(|end| end > toc.len()) {
+        return Err(Error::Truncated);
+    }
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let b = &toc[4 + i * 10..14 + i * 10];
@@ -135,17 +154,32 @@ pub struct V2Header {
 /// Parse a v2 package header. `v2_key_path` = fw_v2_privkey.der. `sl` is the whole
 /// v2 package (a combo slice, or a standalone v2 file).
 pub fn parse_v2(sl: &[u8], v2_key_path: &Path) -> Result<V2Header, Error> {
+    parse_v2_with(sl, || read_key(v2_key_path))
+}
+
+/// [`parse_v2`] with the PKCS#1 DER key bytes instead of a path.
+pub fn parse_v2_der(sl: &[u8], v2_key_der: &[u8]) -> Result<V2Header, Error> {
+    parse_v2_with(sl, || Ok(v2_key_der.to_vec()))
+}
+
+fn parse_v2_with(
+    sl: &[u8],
+    v2_key_der: impl FnOnce() -> Result<Vec<u8>, Error>,
+) -> Result<V2Header, Error> {
     if !is_v2(sl) {
         return Err(Error::NotV2);
     }
     if sl.len() < 521 + 0x1200 {
         return Err(Error::Truncated);
     }
-    let key = load_key(v2_key_path)?;
+    let key = load_key_der(&v2_key_der()?)?;
     let rc4key = oaep_key(&key, &sl[265..521])?;
     let h = rc4(&rc4key, &sl[521..521 + 0x1200]);
     let camera_type = u16::from_le_bytes(h[2..4].try_into().unwrap());
     let n = h[0x24] as usize;
+    if 0x25 + n * 0x109 > h.len() {
+        return Err(Error::Truncated);
+    }
     let mut sections = Vec::with_capacity(n);
     for i in 0..n {
         let e = &h[0x25 + i * 0x109..0x25 + (i + 1) * 0x109];
@@ -172,6 +206,9 @@ pub struct PackFile {
 
 /// Iterate the files in a decrypted type-4 pack section (fs type 0).
 pub fn read_pack(section: &[u8]) -> Result<Vec<PackFile>, Error> {
+    if section.len() < 3 {
+        return Err(Error::Truncated);
+    }
     if section[0] != 0 {
         return Err(Error::UnsupportedFsType(section[0]));
     }
@@ -179,14 +216,16 @@ pub fn read_pack(section: &[u8]) -> Result<Vec<PackFile>, Error> {
     let mut pos = 3usize;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        let e = &section[pos..pos + 264];
+        let hdr_end = pos.checked_add(264).ok_or(Error::Truncated)?;
+        let e = section.get(pos..hdr_end).ok_or(Error::Truncated)?;
         let clen = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
         let ulen = u32::from_le_bytes(e[4..8].try_into().unwrap());
         let name_bytes = &e[8..];
         let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(name_bytes.len());
         // latin1 decode (every byte maps to the same codepoint)
         let name: String = name_bytes[..end].iter().map(|&b| b as char).collect();
-        let blob = section[pos + 264..pos + 264 + clen].to_vec();
+        let blob_end = hdr_end.checked_add(clen).ok_or(Error::Truncated)?;
+        let blob = section.get(hdr_end..blob_end).ok_or(Error::Truncated)?.to_vec();
         pos += 264 + clen;
         out.push(PackFile { name, ulen, blob });
     }
@@ -227,19 +266,28 @@ fn inflate(blob: &[u8]) -> Result<Vec<u8>, Error> {
 /// type 3 -> bootloader (RC4, strip 8-byte REDZLIB0-style prefix, inflate);
 /// type 4 -> file pack (RC4, per-file inflate with fallback to raw).
 pub fn extract_v2(sl: &[u8], v2_key_path: &Path) -> Result<ExtractV2, Error> {
-    let hdr = parse_v2(sl, v2_key_path)?;
+    extract_from_header(sl, parse_v2(sl, v2_key_path)?)
+}
+
+/// [`extract_v2`] with the PKCS#1 DER key bytes instead of a path.
+pub fn extract_v2_der(sl: &[u8], v2_key_der: &[u8]) -> Result<ExtractV2, Error> {
+    extract_from_header(sl, parse_v2_der(sl, v2_key_der)?)
+}
+
+fn extract_from_header(sl: &[u8], hdr: V2Header) -> Result<ExtractV2, Error> {
     let key = &hdr.rc4_key;
     let mut bootloader = None;
     let mut files = Vec::new();
     for s in &hdr.sections {
         let start = s.off as usize;
-        let end = start + s.len as usize;
+        let end = start.checked_add(s.len as usize).ok_or(Error::Truncated)?;
+        let body = sl.get(start..end).ok_or(Error::Truncated)?;
         if s.kind == 3 {
-            let dec = rc4(key, &sl[start..end]);
-            let d = inflate(&dec[8..])?;
+            let dec = rc4(key, body);
+            let d = inflate(dec.get(8..).ok_or(Error::Truncated)?)?;
             bootloader = Some(d);
         } else if s.kind == 4 {
-            let pack = rc4(key, &sl[start..end]);
+            let pack = rc4(key, body);
             for pf in read_pack(&pack)? {
                 let (data, size_ok_raw) = match inflate(&pf.blob) {
                     Ok(d) => (d, true),
@@ -301,6 +349,18 @@ mod tests {
         buf.resize(100, 0); // far too short for the 521+0x400 minimum
         let r = parse_v3(&buf, Path::new("/nonexistent.der"));
         assert!(matches!(r, Err(Error::Truncated)));
+    }
+
+    #[test]
+    fn read_pack_rejects_truncated_entries() {
+        // fstype 0, one entry, but the section ends inside the 264-byte header
+        assert!(matches!(read_pack(&[0, 1, 0, 0, 0]), Err(Error::Truncated)));
+        // a header claiming a blob far past the end of the section
+        let mut s = vec![0u8, 1, 0];
+        let mut hdr = vec![0u8; 264];
+        hdr[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        s.extend_from_slice(&hdr);
+        assert!(matches!(read_pack(&s), Err(Error::Truncated)));
     }
 
     #[test]

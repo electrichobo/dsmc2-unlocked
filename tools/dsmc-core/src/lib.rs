@@ -8,9 +8,12 @@
 //!
 //! Layers:
 //!   * [`serial`] — the `dsh>` serial transport (prompt wait, silence-cutoff
-//!     read), behind a [`serial::Transport`] trait so control logic unit-tests
-//!     with a mock. [`SerialTransport`] is the real `serialport`-backed impl.
-//!   * [`runner`] — [`Shell`]: open a port, run a command, capture the reply.
+//!     read), written once async over [`serial::AsyncTransport`] so it runs
+//!     natively and over WebSerial; the sync [`serial::Transport`] API sits on
+//!     top. `SerialTransport` (feature `serial`) is the `serialport` backend.
+//!   * [`runner`] — [`AsyncShell`] (any transport) and the blocking `Shell`
+//!     (feature `serial`): open a port, run a command, capture the reply.
+//!   * [`capture`] — the full per-board signal capture behind selftest/baseline.
 //!   * [`reply`] — prompt detection + `read reg` extraction (pure).
 //!   * [`parse`] — parsers for every shell output a diagnostic reads
 //!     (system_state, voltages, temps, X12/X4 lanes, versions, heartbeat,
@@ -21,6 +24,7 @@
 //!     [`baseline::Golden`] reference, and `assert`/`diff` with tolerances.
 
 pub mod baseline;
+pub mod capture;
 pub mod error_dict;
 pub mod i2c;
 pub mod log;
@@ -30,8 +34,12 @@ pub mod runner;
 pub mod serial;
 pub mod ucd;
 
+pub use runner::AsyncShell;
+#[cfg(feature = "serial")]
 pub use runner::Shell;
-pub use serial::{DshDriver, SerialTransport, Transport, DEFAULT_PORT};
+#[cfg(feature = "serial")]
+pub use serial::SerialTransport;
+pub use serial::{AsyncTransport, Blocking, DshDriver, Transport, DEFAULT_PORT};
 
 /// Embedded data files (copied from the FW-extracted RED tree), so a built
 /// binary needs no external files.
