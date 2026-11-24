@@ -222,13 +222,6 @@ pub async fn capture_ucd<T: AsyncTransport>(sh: &mut AsyncShell<T>) -> Vec<UcdV>
                 }
             }
         }
-        // Health signal selection:
-        //  - If the paged STATUS_VOUT reads landed cleanly, that's authoritative.
-        //  - PMBus PAGE-write over the dsh shell is KNOWN-FLAKY (baseline doc: use
-        //    ucd_dump for the reliable paged dump). When the paged reads didn't land
-        //    (`any_read` false), DON'T false-FAIL — fall back to STATUS_WORD with the
-        //    known-benign bits masked (CML 0x02 on ISP, and the sensor UCD90160's
-        //    idle STATUS_WORD), and report the limitation as INFO.
         // Decide health. Trust the paged STATUS_VOUT ONLY if it read cleanly AND is
         // all-zero. PMBus PAGE-write over dsh is known-flaky (baseline: use ucd_dump
         // for the authoritative paged dump), so a non-zero paged STATUS_VOUT here is

@@ -33,7 +33,7 @@ Heavy file work (a 140 MB combo, a large log) runs in a Web Worker
 
 ## Develop
 
-Needs Rust with the `wasm32-unknown-unknown` target, `wasm-pack`, Node 22+ and
+Needs Rust with the `wasm32-unknown-unknown` target, `wasm-pack`, Node 26+ and
 pnpm. The bundled SQLite (presets) is C, so the wasm build needs a clang that
 targets wasm32. Apple's clang does not; use Homebrew LLVM:
 

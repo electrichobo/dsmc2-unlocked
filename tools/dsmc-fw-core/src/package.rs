@@ -129,7 +129,7 @@ fn parse_v3_with(
     let rc4key = oaep_key(&key, &buf[265..521])?;
     let toc = rc4(&rc4key, &buf[521..521 + 0x400]);
     let n = u32::from_le_bytes(toc[0..4].try_into().unwrap()) as usize;
-    if 4 + n * 10 > toc.len() {
+    if n.checked_mul(10).and_then(|x| x.checked_add(4)).is_none_or(|end| end > toc.len()) {
         return Err(Error::Truncated);
     }
     let mut out = Vec::with_capacity(n);
@@ -216,17 +216,16 @@ pub fn read_pack(section: &[u8]) -> Result<Vec<PackFile>, Error> {
     let mut pos = 3usize;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        let e = section.get(pos..pos + 264).ok_or(Error::Truncated)?;
+        let hdr_end = pos.checked_add(264).ok_or(Error::Truncated)?;
+        let e = section.get(pos..hdr_end).ok_or(Error::Truncated)?;
         let clen = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
         let ulen = u32::from_le_bytes(e[4..8].try_into().unwrap());
         let name_bytes = &e[8..];
         let end = name_bytes.iter().position(|&c| c == 0).unwrap_or(name_bytes.len());
         // latin1 decode (every byte maps to the same codepoint)
         let name: String = name_bytes[..end].iter().map(|&b| b as char).collect();
-        let blob = section
-            .get(pos + 264..pos + 264 + clen)
-            .ok_or(Error::Truncated)?
-            .to_vec();
+        let blob_end = hdr_end.checked_add(clen).ok_or(Error::Truncated)?;
+        let blob = section.get(hdr_end..blob_end).ok_or(Error::Truncated)?.to_vec();
         pos += 264 + clen;
         out.push(PackFile { name, ulen, blob });
     }
@@ -281,7 +280,7 @@ fn extract_from_header(sl: &[u8], hdr: V2Header) -> Result<ExtractV2, Error> {
     let mut files = Vec::new();
     for s in &hdr.sections {
         let start = s.off as usize;
-        let end = start + s.len as usize;
+        let end = start.checked_add(s.len as usize).ok_or(Error::Truncated)?;
         let body = sl.get(start..end).ok_or(Error::Truncated)?;
         if s.kind == 3 {
             let dec = rc4(key, body);
@@ -350,6 +349,18 @@ mod tests {
         buf.resize(100, 0); // far too short for the 521+0x400 minimum
         let r = parse_v3(&buf, Path::new("/nonexistent.der"));
         assert!(matches!(r, Err(Error::Truncated)));
+    }
+
+    #[test]
+    fn read_pack_rejects_truncated_entries() {
+        // fstype 0, one entry, but the section ends inside the 264-byte header
+        assert!(matches!(read_pack(&[0, 1, 0, 0, 0]), Err(Error::Truncated)));
+        // a header claiming a blob far past the end of the section
+        let mut s = vec![0u8, 1, 0];
+        let mut hdr = vec![0u8; 264];
+        hdr[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        s.extend_from_slice(&hdr);
+        assert!(matches!(read_pack(&s), Err(Error::Truncated)));
     }
 
     #[test]

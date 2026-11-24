@@ -21,7 +21,7 @@ async function connect(setError: (e: string | null) => void) {
     return;
   }
   setConn({ state: "opening" });
-  link.onClose = (reason) => setConn({ state: "lost", reason });
+  link.onClose = (reason) => void lost(link, reason);
   try {
     const camera = await openCamera(link);
     setConn({ state: "live", link, camera });
@@ -30,6 +30,16 @@ async function connect(setError: (e: string | null) => void) {
     setConn({ state: "idle" });
     setError(e instanceof Error ? e.message : String(e));
   }
+}
+
+/** The port died: close it so it can be reopened, free the session, unlock the UI. */
+async function lost(link: SerialLink, reason: string) {
+  const c = conn();
+  link.onClose = null;
+  await link.close();
+  if (c.state === "live" && c.link === link) c.camera.free();
+  setCamBusy(null);
+  setConn({ state: "lost", reason });
 }
 
 async function disconnect() {
@@ -361,7 +371,10 @@ function SavedCapture() {
           file={ref()}
           onFile={async (f) => {
             setRef(f);
-            const r = await t.run("Comparing", async () => wasm.diff_captures(await text(f), json()!) as Deviation[]);
+            const r = await t.run("Comparing", async () => {
+              await loadWasm();
+              return wasm.diff_captures(await text(f), json()!) as Deviation[];
+            });
             if (r) setDiff(r);
           }}
         />
@@ -587,6 +600,7 @@ function Terminal() {
   const [text, setText] = createSignal("");
   const [line, setLine] = createSignal("");
   const [history, setHistory] = createSignal<string[]>([]);
+  const [sendErr, setSendErr] = createSignal<string | null>(null);
   let hi = -1;
   let pane!: HTMLPreElement;
   const dec = new TextDecoder();
@@ -608,7 +622,12 @@ function Terminal() {
     setLine("");
     hi = -1;
     if (cmd.trim()) setHistory((h) => [cmd, ...h.filter((x) => x !== cmd)].slice(0, 50));
-    await c.link.write(new TextEncoder().encode(cmd + "\r"));
+    setSendErr(null);
+    try {
+      await c.link.write(new TextEncoder().encode(cmd + "\r"));
+    } catch (err) {
+      setSendErr(`Not sent: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   function key(e: KeyboardEvent) {
@@ -630,6 +649,9 @@ function Terminal() {
         Commands go straight to the camera. <code>write</code> and <code>nand</code> commands change it, and reading
         unmapped addresses can power it off. <a href={doc("docs/access/serial-shell.md")}>Shell reference</a>.
       </Notice>
+      <Show when={sendErr()}>
+        <Notice>{sendErr()}</Notice>
+      </Show>
       <pre class="term" ref={pane} aria-live="off">
         {text()}
       </pre>

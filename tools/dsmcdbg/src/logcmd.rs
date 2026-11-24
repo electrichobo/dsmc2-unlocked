@@ -543,6 +543,9 @@ fn cmd_triage(args: &[String]) -> Result<ExitCode, String> {
         return Err("No valid log sessions found in file".to_string());
     }
 
+    if let Some(n) = session_filter.filter(|&n| n >= sessions.len()) {
+        return Err(format!("no session {n}: this log has sessions 0..{}", sessions.len() - 1));
+    }
     let dict = ErrorDictionary::new();
     let t = log::triage(&sessions, &p, &dict, session_filter);
     let has_fatal = !t.healthy;

@@ -636,7 +636,8 @@ pub fn triage(
             || s.iter().any(|ln| ln.contains("SYSTEM_ERROR"));
         out.push(SessionTriage { index: i, meta, furthest, passed: reaches_ready && !has_sys_err });
     }
-    Triage { healthy: out.iter().all(|s| s.passed), sessions: out, stats }
+    // An empty selection (`only` names no session) is not a pass.
+    Triage { healthy: !out.is_empty() && out.iter().all(|s| s.passed), sessions: out, stats }
 }
 
 /// Strip timestamps `[d:dd:dd:ddd]` and memory pool stats `(nn%/nn%)` for bloat clustering.

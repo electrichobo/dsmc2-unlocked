@@ -7,6 +7,13 @@ import type { JsTransport } from "./wasm/dsmc_web.js";
 
 export const BAUD = 115200;
 
+// What the camera sent while no command was reading it. Every command clears
+// input before it starts, so only the newest bytes ever matter.
+const MAX_PENDING = 1 << 20;
+
+// WebSerial errors after which `port.readable` is replaced and reading goes on.
+const RECOVERABLE = new Set(["BreakError", "FramingError", "ParityError", "BufferOverrunError"]);
+
 export const serialSupported = () => typeof navigator !== "undefined" && "serial" in navigator;
 
 let wasmReady: Promise<unknown> | null = null;
@@ -14,6 +21,7 @@ const loadWasm = () => (wasmReady ??= init());
 
 export class SerialLink implements JsTransport {
   private pending: Uint8Array[] = [];
+  private pendingBytes = 0;
   private listeners = new Set<(chunk: Uint8Array) => void>();
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private loop: Promise<void> | null = null;
@@ -40,11 +48,15 @@ export class SerialLink implements JsTransport {
           if (done) break;
           if (value?.length) {
             this.pending.push(value);
+            this.pendingBytes += value.length;
+            while (this.pendingBytes > MAX_PENDING && this.pending.length > 1)
+              this.pendingBytes -= this.pending.shift()!.length;
             for (const l of this.listeners) l(value);
           }
         }
       } catch (e) {
-        if (!this.closing) {
+        if (this.closing) return;
+        if (!(e instanceof DOMException && RECOVERABLE.has(e.name))) {
           this.onClose?.(e instanceof Error ? e.message : String(e));
           return;
         }
@@ -61,9 +73,19 @@ export class SerialLink implements JsTransport {
     return () => this.listeners.delete(fn);
   }
 
-  async write(data: Uint8Array): Promise<void> {
+  private writes: Promise<void> = Promise.resolve();
+
+  /** Writes are queued, so two callers never fight over the stream's lock. */
+  write(data: Uint8Array): Promise<void> {
     const copy = data.slice();
-    const w = this.port.writable!.getWriter();
+    const next = this.writes.then(() => this.writeNow(copy));
+    this.writes = next.catch(() => {});
+    return next;
+  }
+
+  private async writeNow(copy: Uint8Array) {
+    if (!this.port.writable) throw new Error("The serial port is closed.");
+    const w = this.port.writable.getWriter();
     try {
       await w.write(copy);
     } finally {
@@ -81,11 +103,13 @@ export class SerialLink implements JsTransport {
       o += c.length;
     }
     this.pending = [];
+    this.pendingBytes = 0;
     return out;
   }
 
   async clear(): Promise<void> {
     this.pending = [];
+    this.pendingBytes = 0;
   }
 
   sleep(ms: number): Promise<void> {

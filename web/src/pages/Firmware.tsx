@@ -23,14 +23,17 @@ export default function Firmware() {
   };
   const [out, setOut] = createSignal<FwExtract | null>(null);
   const [filter, setFilter] = createSignal("");
+  // Bumped on every open; results from an older open are dropped.
+  let generation = 0;
 
   async function open(f: File) {
+    const gen = ++generation;
     setFile(f);
     setOpened(null);
     setOut(null);
     const data = await readFile(f);
     const p = await t.run("Reading the firmware", () => tools.fwOpen(f.name, data));
-    if (p) {
+    if (p && gen === generation) {
       setOpened(p);
       if (p.kind === "dsmc" && p.info.format === "v2") extract();
     }
@@ -39,10 +42,11 @@ export default function Firmware() {
   async function extract(cameraType?: number) {
     const p = pkg();
     if (!p) return;
+    const gen = generation;
     setOut(null);
     const label = cameraType === undefined ? "Decrypting and extracting" : `Decrypting and extracting ${cameraName(cameraType)}`;
     const x = await t.run(label, () => tools.fwExtract(p.data, cameraType));
-    if (x) setOut(x);
+    if (x && gen === generation) setOut(x);
   }
 
   const types = createMemo(() => {

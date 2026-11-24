@@ -143,16 +143,19 @@ pub async fn run_cmd<T: AsyncTransport>(
             if has_prompt(&buf, true) {
                 break;
             }
-        } else {
-            sleep_nonzero(t, timing.poll).await;
-            let quiet = t.now() - last;
-            if !buf.is_empty() && quiet > timing.quiet_cutoff {
-                break;
-            }
-            if buf.is_empty() && quiet > timing.no_output_cutoff {
-                break;
-            }
+            continue;
         }
+        // Judge silence only right after a read came back empty. A sleep can
+        // overrun badly (a background browser tab clamps timers to ~1 s); data
+        // that arrived during it must be read before the line counts as quiet.
+        let quiet = t.now() - last;
+        if !buf.is_empty() && quiet > timing.quiet_cutoff {
+            break;
+        }
+        if buf.is_empty() && quiet > timing.no_output_cutoff {
+            break;
+        }
+        sleep_nonzero(t, timing.poll).await;
     }
     Ok(buf)
 }
@@ -429,6 +432,48 @@ mod tests {
             .run_cmd_prompt("nand zlib", Duration::from_secs(5))
             .unwrap();
         assert!(out.contains("done"));
+        assert!(out.trim_end().ends_with("dsh>"));
+    }
+
+    /// Sleeps overrun to 1 s (a background browser tab clamps timers) while the
+    /// rest of the reply arrives 5 ms after the first chunk.
+    struct ThrottledTab {
+        t: Duration,
+        chunks: Vec<(Duration, &'static str)>,
+    }
+
+    impl AsyncTransport for ThrottledTab {
+        async fn write_all(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        async fn read_available(&mut self) -> io::Result<Vec<u8>> {
+            let now = self.t;
+            let (ready, later): (Vec<_>, Vec<_>) = self.chunks.drain(..).partition(|(at, _)| *at <= now);
+            self.chunks = later;
+            Ok(ready.into_iter().flat_map(|(_, c)| c.bytes()).collect())
+        }
+        async fn clear_input(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        async fn sleep(&mut self, _: Duration) {
+            self.t += Duration::from_secs(1);
+        }
+        fn now(&self) -> Duration {
+            self.t
+        }
+    }
+
+    #[test]
+    fn run_cmd_reads_data_that_arrived_during_an_overlong_sleep() {
+        let mut t = ThrottledTab {
+            t: Duration::ZERO,
+            chunks: vec![
+                (Duration::ZERO, "Checking - IOB\n"),
+                (Duration::from_millis(5), "  Vcc  1.0  = 1.006\nDone\n(97%/97%) dsh>"),
+            ],
+        };
+        let out = pollster::block_on(run_cmd(&mut t, &Timing::default(), "test voltage all", Duration::from_secs(15))).unwrap();
+        assert!(out.contains("1.006"), "reply cut off: {out:?}");
         assert!(out.trim_end().ends_with("dsh>"));
     }
 }
