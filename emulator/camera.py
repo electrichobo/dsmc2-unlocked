@@ -5,6 +5,7 @@ Integrates ARM CPU, system bus, peripheral models, storage, display, and control
 
 import os
 import unicorn
+from unicorn import arm_const
 import struct
 import threading
 import time
@@ -14,6 +15,8 @@ from emulator.core.cpu import ArmCpu
 from emulator.core.addrmap import AddrMap
 from emulator.core.firmware import FirmwareManager
 from emulator.core.bus import SystemBus
+from emulator.core.trace_probe import TraceProbe
+from emulator.devices.sidekick import SidekickMcu
 from emulator.devices.intc import OmapIntc
 from emulator.devices.prcm import OmapPrcm
 from emulator.devices.gptimer import OmapGPTimer, TIMER_MAP
@@ -169,6 +172,24 @@ class Dsmc2Camera:
     APP_SEMAPHORE_ADDR = 0x814C6D1C
     SEMAPHORE_MAGIC = 0x53454D41  # 'SEMA'
 
+    # CDB2 parameter store addresses (stock 7.4.1)
+    CDB2_INIT_ADDR = 0x8007FB58
+    CDB2_GET_VALUE_ADDR = 0x80080C34
+    CDB2_SET_VALUE_ADDR = 0x80082050
+    CDB2_SET_UINT32_ADDR = 0x800820E8
+    CDB2_READY_FLAG_ADDR = 0x814CD39C
+    CDB2_ATTACH_STMT_ADDR = 0x814CD3A0
+    CDB2_SET_STMT_ADDR = 0x814CD3D4
+    CDB2_GET_STMT_ADDR = 0x814CD3D8
+
+    # Real-FW ASIC Xtensa binary upload functions (stock 7.4.1)
+    ISP_LOAD_EMBEDDED_ADDR = 0x80664D18
+    ISP_MEM_UPLOAD_ADDR = 0x80762798
+    ISP_REG_WRITE_ADDR = 0x80762E3C
+    IOB_LOAD_EMBEDDED_ADDR = 0x80664ECC
+    IOB_WORD_WRITE_ADDR = 0x80726E7C
+    IOB_RESET_CTL_ADDR = 0x80728678
+
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
         self.addr_map = addr_map if addr_map is not None else AddrMap()
@@ -203,6 +224,12 @@ class Dsmc2Camera:
 
         # 6. Physical Rig & Modular Connector Slot Manager
         self.rig = RigManager(camera=self)
+
+        # 7. Sidekick MCU + 220x176 Monochrome OLED & Rotary Controls
+        self.sidekick = SidekickMcu()
+        self._active_iob_upload_core: Optional[int] = None
+        self._asic_hook_handles: List[int] = []
+        self.trace_probe: Optional[TraceProbe] = None
 
         # Execution & Power Control
         self.is_running = False
@@ -647,18 +674,24 @@ class Dsmc2Camera:
         # Seed default CAMERA_TYPE fallback (-> 0x0016 Scarlet-W)
         self.bus.write(self.fw(self.CAMERA_TYPE_FALLBACK), 2, 0x0016)
 
-        # Stage a minimal, generic YAFFS2 ``/env`` into the emulated GPMC NAND. Intent: have the
-        # firmware's own init_filesystem mount (@0x80008310) read a shipped-version (6)
-        # PARTITION_TABLE and skip the unbounded v0->v6 partition-table upgrade/reformat loop that
-        # a blank chip triggers (fallback table @0x8140898c is version 0). Empty filesystem
-        # otherwise: no serials, no cal, no env vars (public repo). The chunk tags / object-header
-        # layout match the firmware's readers (packed_tags2, OH name@0x12C) but the YAFFS2
-        # block-sequence structure is not yet complete enough for the scan to register the file,
-        # so the firmware currently still falls back to the v0 table -- see nand_image.py. Kept
-        # staged (verified harmless to the 158-test suite and to #67 late-init depth) as the
-        # continuation point for the next NAND-mount depth increment.
-        from emulator.devices.nand_image import write_env_image, PARTITIONS
+        # Stage synthesized YAFFS2 ``/env`` (/env/PARTITION_TABLE v6) and ``/image2``
+        # (cdb2/factory.db plus isp/iob0/iob1 iram/dram.bin) into the emulated GPMC NAND
+        # with sub-sector OOB tags (+4/+20/+36/+52) and per-block seqNumber tags, so the
+        # firmware's init_filesystem mount (@0x80008310) registers real file objects and
+        # compiles all SQLite CDB2 prepared statements cleanly without triggering the v0->v6
+        # partition-table upgrade/reformat loop.
+        from emulator.devices.nand_image import (
+            PARTITIONS,
+            write_env_image,
+            write_image_partition,
+        )
         write_env_image(self.gpmc, env_start_block=PARTITIONS[0][1])
+        write_image_partition(
+            self.gpmc,
+            image_start_block=PARTITIONS[2][1],
+            include_xtensa_blobs=True,
+        )
+        self._install_asic_upload_hooks()
 
         # Pre-stage authentic firmware splash screen into DDR LCD framebuffer (0x87400000)
         splash_file = os.path.join(self.firmware_slot_dir, "res", "splash_screen.bin")
@@ -792,10 +825,9 @@ class Dsmc2Camera:
         unmasked IRQ, delivers it, so the timer tick stream is continuous and the scheduler advances
         normally. That carries boot from the bare idle park (``SystemInitThread`` blocked, 4 threads)
         to: ``SystemInitThread`` COMPLETED, the ``Driver thread`` (thread_DRIVER_entry @0x8066C92C)
-        and ``Starter Thread`` spawned, and the CRYPT/RTC/FileX ``init_parallel`` children run with
-        their event-flag bits set (0x1|0x2|0x4). The Driver thread then blocks in
-        ``wait_for_init_flags`` on the NAND-FS barrier (bit 0x8) -- the next depth milestone
-        (YAFFS2/NAND media mount), which this method deliberately stops short of.
+        and ``Starter Thread`` spawned, and the CRYPT/RTC/FileX/NAND-FS children run with
+        ``init_filesystem`` (@0x80008310) and ``cdb2_init`` (@0x8007FB58) complete (bit 0x8 set),
+        stopping at ``LATE_INIT_FLAGS_TARGET`` (``0x001003BF``).
 
         Deterministic: progress is bounded purely by the instruction budget, with no wall-clock
         dependence, so stock and relinked (``--addr-map``) images advance identically.
@@ -1344,24 +1376,41 @@ class Dsmc2Camera:
     ) -> int:
         """Call a firmware function directly (AAPCS) and return r0.
 
-        Sets r0..r3 from ``args`` (first four, AAPCS register args), the stack pointer to
-        ``scratch_sp`` (a scratch DDR region above the live app region), and ``lr`` to the
-        ThreadX idle-loop entry (``IDLE_LOOP_ENTRY`` 0x80E9C368) as a return sentinel, then
-        executes until the function returns to that sentinel. Addresses are stock 7.4.1
-        (translated through the address map). Intended for probing an already-reached boot
-        state (e.g. after ``boot_to_application``) by invoking a leaf/short firmware routine
-        in place; not safe for routines that block on a ThreadX primitive (mutex/semaphore
-        get), which the single-threaded direct call cannot resume.
+        Sets r0..r3 from ``args`` (first four, AAPCS register args), sets ``sp`` and ``r12`` to
+        ``scratch_sp`` (scratch DDR above the live app region), switches to IRQ/FIQ-masked
+        Supervisor mode (``CPSR = 0xD3``), sets ``lr`` to the scratch DDR NOP sentinel
+        ``0x881FF000``, executes until return, and restores ``(pc, sp, lr, cpsr, r12)``.
+        Addresses are stock 7.4.1 (translated through the address map). Intended for synchronous
+        leaf/short routines after boot; not safe for routines that block on a ThreadX primitive
+        (mutex/semaphore get).
         """
         args = args or []
+        saved = (
+            self.cpu.pc,
+            self.cpu.sp,
+            self.cpu.lr,
+            self.cpu.cpsr,
+            self.cpu.get_r(12),
+        )
         for i, a in enumerate(args[:4]):
             self.cpu.set_r(i, a & 0xFFFFFFFF)
-        sentinel = self.fw(self.IDLE_LOOP_ENTRY)
+        sentinel = 0x881FF000
+        self.bus.write_u32(sentinel, 0xE1A00000)  # nop return landing pad in scratch DDR
+        self.cpu.cpsr = 0xD3  # SVC mode with IRQ & FIQ masked for synchronous leaf call
         self.cpu.sp = scratch_sp
         self.cpu.lr = sentinel
+        self.cpu.set_r(12, scratch_sp)  # APCS +4 entry relies on ip == sp for ldm sp epilogue
         self.cpu.pc = self.fw(int(entry_pc))
-        self.boot_until(sentinel, max_instructions=max_instructions, step_size=step_size)
-        return self.cpu.get_r(0)
+        try:
+            self.cpu.run(self.cpu.pc, sentinel, count=max_instructions)
+            return self.cpu.get_r(0)
+        finally:
+            pc, sp, lr, cpsr, r12 = saved
+            self.cpu.pc = pc
+            self.cpu.sp = sp
+            self.cpu.lr = lr
+            self.cpu.cpsr = cpsr
+            self.cpu.set_r(12, r12)
 
     def add_pc_hook(
         self,
@@ -1854,3 +1903,129 @@ class Dsmc2Camera:
             wf.setframerate(48000)
             wf.writeframes(b"")
         return out.getvalue()
+
+    def fw_cdb2_get_uint32(
+        self,
+        param_name: str,
+        param_type: str = "UINT32",
+        max_instructions: int = 1_500_000,
+    ) -> Tuple[int, int]:
+        """Invoke stock ``_cdb2_parameter_get_value`` (@0x80080C34) on booted firmware."""
+        arg_name = 0x881C0000
+        arg_type = 0x881C0100
+        out_buf = 0x881C0200
+        self.bus.write_mem(self.fw(arg_name), param_name.encode("ascii") + b"\x00")
+        self.bus.write_mem(self.fw(arg_type), param_type.encode("ascii") + b"\x00")
+        self.bus.write_u32(self.fw(out_buf), 0xDEADBEEF)
+        rc = self.call_function(
+            self.CDB2_GET_VALUE_ADDR,
+            [arg_name, arg_type, out_buf],
+            max_instructions=max_instructions,
+        )
+        val = self.bus.read_u32(self.fw(out_buf))
+        return rc, val
+
+    def fw_cdb2_set_uint32(
+        self,
+        param_name: str,
+        value: int,
+        param_type: str = "UINT32",
+        max_instructions: int = 2_000_000,
+    ) -> int:
+        """Invoke stock ``cdb2_parameter_set_uint32`` / ``_cdb2_parameter_set_value``."""
+        arg_name = 0x881C0000
+        self.bus.write_mem(self.fw(arg_name), param_name.encode("ascii") + b"\x00")
+        if param_type == "UINT32":
+            return self.call_function(
+                self.CDB2_SET_UINT32_ADDR,
+                [arg_name, value & 0xFFFFFFFF],
+                max_instructions=max_instructions,
+            )
+        arg_type = 0x881C0100
+        val_buf = 0x881C0210
+        self.bus.write_mem(self.fw(arg_type), param_type.encode("ascii") + b"\x00")
+        self.bus.write_u32(self.fw(val_buf), value & 0xFFFFFFFF)
+        return self.call_function(
+            self.CDB2_SET_VALUE_ADDR,
+            [arg_name, arg_type, val_buf],
+            max_instructions=max_instructions,
+        )
+
+    def install_trace_probe(
+        self,
+        points: Optional[Tuple[Tuple[int, str, str], ...]] = None,
+        max_events: int = 4096,
+    ) -> TraceProbe:
+        """Attach a zero-overhead per-PC/IRQ ``TraceProbe`` to this camera's ARM CPU."""
+        if self.trace_probe is not None:
+            self.trace_probe.detach()
+        probe = TraceProbe(points=points, max_events=max_events)
+        probe.attach(self)
+        self.trace_probe = probe
+        return probe
+
+    def _install_asic_upload_hooks(self) -> None:
+        """Observe real-FW ISP/IOB binary download routines and feed ``XtensaCore`` IRAM/DRAM."""
+        for h in getattr(self, "_asic_hook_handles", []):
+            self.remove_hook(h)
+        self._asic_hook_handles = []
+
+        def _on_isp_upload(cam: "Dsmc2Camera", _pc: int):
+            length = cam.cpu.get_r(1)
+            dest_addr = cam.cpu.get_r(2)
+            src_ptr = cam.cpu.get_r(3)
+            if 0 < length <= 0x20000 and src_ptr != 0:
+                blob = bytes(cam.bus.read_mem(src_ptr, length))
+                for isp in (getattr(cam, "isp1", None), getattr(cam, "isp2", None)):
+                    if isp is not None and hasattr(isp, "upload_segment"):
+                        isp.upload_segment(dest_addr, blob)
+
+        def _on_isp_reg_write(cam: "Dsmc2Camera", _pc: int):
+            reg_addr = cam.cpu.get_r(1)
+            val = cam.cpu.get_r(2)
+            if reg_addr == 0x88900004 and val == 0x00029321:
+                for isp in (getattr(cam, "isp1", None), getattr(cam, "isp2", None)):
+                    if isp is not None and hasattr(isp, "release_reset"):
+                        isp.release_reset()
+
+        def _on_iob_load_entry(cam: "Dsmc2Camera", _pc: int):
+            core_id = cam.cpu.get_r(0)
+            cam._active_iob_upload_core = core_id if core_id in (0, 1) else None
+
+        def _on_iob_word_write(cam: "Dsmc2Camera", _pc: int):
+            core_id = cam._active_iob_upload_core
+            if core_id not in (0, 1):
+                return
+            dest_addr = cam.cpu.get_r(0)
+            word = cam.cpu.get_r(1)
+            # Core 0 uses 0x3FFE0000 (DRAM) / 0x40000000 (IRAM);
+            # Core 1 uses AHB aperture 0x4FFE0000 (DRAM) / 0x4FFF0000 (IRAM).
+            norm_addr = dest_addr
+            if 0x4FFE0000 <= dest_addr < 0x4FFF0000:
+                norm_addr = 0x3FFE0000 + (dest_addr - 0x4FFE0000)
+            elif 0x4FFF0000 <= dest_addr < 0x50000000:
+                norm_addr = 0x40000000 + (dest_addr - 0x4FFF0000)
+            target = getattr(cam, f"iob{core_id}", None)
+            if target is not None and hasattr(target, "upload_segment"):
+                target.upload_segment(norm_addr, struct.pack("<I", word & 0xFFFFFFFF))
+
+        def _on_iob_reset_ctl(cam: "Dsmc2Camera", _pc: int):
+            core_id = cam._active_iob_upload_core
+            if core_id not in (0, 1):
+                return
+            reg = cam.cpu.get_r(0)
+            val = cam.cpu.get_r(1)
+            expected_release = 4 if core_id == 0 else 8
+            if reg == 0x800A0008 and val == expected_release:
+                target = getattr(cam, f"iob{core_id}", None)
+                if target is not None and hasattr(target, "release_reset"):
+                    target.release_reset()
+                cam._active_iob_upload_core = None
+
+        self._asic_hook_handles = [
+            self.add_pc_hook(self.ISP_MEM_UPLOAD_ADDR, _on_isp_upload),
+            self.add_pc_hook(self.ISP_REG_WRITE_ADDR, _on_isp_reg_write),
+            self.add_pc_hook(self.IOB_LOAD_EMBEDDED_ADDR, _on_iob_load_entry),
+            self.add_pc_hook(self.IOB_WORD_WRITE_ADDR, _on_iob_word_write),
+            self.add_pc_hook(self.IOB_RESET_CTL_ADDR, _on_iob_reset_ctl),
+        ]

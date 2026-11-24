@@ -1,20 +1,21 @@
 """
-Synthesized YAFFS2 NAND image builder for the DSMC2 ``/env`` partition.
+Synthesized YAFFS2 NAND image builders for the DSMC2 ``/env`` and ``/image2`` partitions.
 
-The firmware's ``init_filesystem`` (@0x80008310) mounts ``/env`` and reads
+The firmware's ``init_filesystem`` (@0x80008310) mounts ``/env`` (block 1) and reads
 ``/env/PARTITION_TABLE`` via ``env_get_partition_table`` (@0x80706b84). If that file is
 absent, the firmware falls back to a built-in **version-0** partition table
 (``&DAT_8140898c``) and then ``env_upgrade_partition_table`` (@0x80707470) runs the
 v0->v1->...->v6 upgrade path, which reformats/relocates partitions in an unbounded NAND
 read/write loop that never completes under emulation.
 
-To let the mount complete cleanly, this module synthesizes a minimal, generic ``/env``
-containing a single ``PARTITION_TABLE`` file whose version is the shipped **6**, so every
-``env_upgrade_partition_table(1..6)`` call sees ``current >= requested`` and returns
-immediately (no upgrade, no reformat). The filesystem is otherwise empty — no serials, no
-calibration, no environment variables (which the firmware re-derives / signature-checks
-non-fatally; see ``env_verify_signature`` @0x80706300 and ``raise_startup_error`` which only
-sets a logged flag).
+To let mount and CDB2/Xtensa file loads complete cleanly, this module provides:
+
+* ``write_env_image()``: Stages ``/env/PARTITION_TABLE`` (version 6) at block 1 with no serials,
+  calibration, or unit-specific environment variables.
+* ``write_image_partition()`` / ``build_yaffs_tree_chunks()``: Stages ``/image2`` (block 605)
+  with ``cdb2/factory.db`` (from ``build_minimal_factory_db_blob()``) and compact Xtensa IRAM/DRAM
+  images for ``isp``, ``iob0``, and ``iob1`` (``build_default_xtensa_blobs()``) using
+  block-incrementing ``seqNumber`` tags so multi-block files register cleanly during ``yaffs_Scan``.
 
 Formats are matched to the firmware's own readers (verified against the Ghidra decompile and
 sdk ``clean/nand_utils.c`` / ``env_var.c``):
@@ -33,8 +34,11 @@ The image is written into ``OmapGpmc`` via ``program_page`` at the absolute page
 ``/env`` partition, so the firmware's real GPMC NAND read path (on-die ECC enabled) serves it.
 """
 
+import os
+import sqlite3
 import struct
-from typing import Dict, List, Tuple
+import tempfile
+from typing import Dict, List, Optional, Tuple
 
 PAGE_SIZE = 2048
 SPARE_SIZE = 64
@@ -219,3 +223,196 @@ def write_env_image(gpmc, env_start_block: int = 1):
     base_page = env_start_block * PAGES_PER_BLOCK
     for rel_page, data, spare in build_env_chunks():
         gpmc.program_page(base_page + rel_page, data, spare)
+
+
+_CACHED_FACTORY_DB_BLOB: Optional[bytes] = None
+
+# Minimal subset of shipped factory.db rows required by firmware CSM / RCP CDB2 queries.
+_DEFAULT_FACTORY_PARAMS: Tuple[Tuple[str, str, object, Optional[str]], ...] = (
+    ("DEBUG_ENABLE_SHELL", "UINT32", 0, None),
+    ("DEBUG_LOG_TO_SHELL", "BOOL", 0, None),
+    ("DEBUG_LOAD_ASIC_BINS_FROM_HOST", "BOOL", 0, None),
+    ("COMM_IP_ADDRESS", "UINT32", 168430090, "GEIPADDR"),
+    ("COMM_NETMASK_ADDRESS", "UINT32", 4294967040, "GENETMSK"),
+    ("COMM_GATEWAY_ADDRESS", "UINT32", 168430081, "GEGWADDR"),
+    ("COMM_DHCP_ENABLE", "BOOL", 1, "GEDHCP"),
+    ("CAMERA_ID", "STRING", "RED_SCARLET_W", "CAMID"),
+    ("SENSOR_FRAME_RATE", "INT32", 24000, "FPS"),
+    ("EXPOSURE_TIME", "INT32", 20833, "EXP"),
+    ("ISO_SPEED", "UINT32", 800, "ISO"),
+    ("COLOR_TEMPERATURE", "UINT32", 5600, "COLTEMP"),
+)
+
+
+def build_minimal_factory_db_blob() -> bytes:
+    """Build a compact SQLite 3 database matching stock 7.4.1 ``cdb2/factory.db`` schemas.
+
+    Uses legacy SQLite file format and 1024-byte pages so the firmware's embedded SQLite
+    library executes ``cdb2_init`` prepared-statement compilation (ATTACH, GET, SET, etc.)
+    with minimal NAND page reads during boot.
+    """
+    global _CACHED_FACTORY_DB_BLOB
+    if _CACHED_FACTORY_DB_BLOB is not None:
+        return _CACHED_FACTORY_DB_BLOB
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(tmp_path)
+    try:
+        db = sqlite3.connect(tmp_path)
+        db.execute("PRAGMA legacy_file_format = ON;")
+        db.execute("PRAGMA page_size = 1024;")
+        db.execute("PRAGMA journal_mode = OFF;")
+        db.execute(
+            """CREATE TABLE parameters(
+                name UNIQUE DEFAULT NULL,
+                type DEFAULT NULL,
+                msg_type DEFAULT NULL,
+                default_value DEFAULT NULL,
+                preset_group DEFAULT NULL,
+                set_message UNIQUE DEFAULT NULL,
+                get_message UNIQUE DEFAULT NULL,
+                current_message UNIQUE DEFAULT NULL,
+                set_list_message UNIQUE DEFAULT NULL,
+                get_list_message UNIQUE DEFAULT NULL,
+                current_list_message UNIQUE DEFAULT NULL,
+                set_relative_message UNIQUE DEFAULT NULL,
+                set_list_relative_message UNIQUE DEFAULT NULL,
+                apply_order DEFAULT -1,
+                rcp_name UNIQUE DEFAULT NULL,
+                rcp_filter DEFAULT NULL,
+                preset_name DEFAULT NULL,
+                description DEFAULT NULL,
+                multiplier DEFAULT 1,
+                visibility DEFAULT 1,
+                rcp_api_region DEFAULT NULL
+            )"""
+        )
+        db.execute(
+            "CREATE TABLE key_sources(val UNIQUE DEFAULT NULL, "
+            "key_source DEFAULT NULL, hw_cap DEFAULT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE key_events(key_code UNIQUE DEFAULT NULL, "
+            "key_event DEFAULT NULL, hw_cap DEFAULT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE key_actions(id UNIQUE DEFAULT NULL, key_action DEFAULT NULL, "
+            "msg DEFAULT NULL, param DEFAULT NULL, msg_type DEFAULT NULL, "
+            "hw_cap DEFAULT NULL, user_mappable DEFAULT 1)"
+        )
+        for name, ptype, val, rcp_name in _DEFAULT_FACTORY_PARAMS:
+            db.execute(
+                "INSERT INTO parameters(name, type, default_value, rcp_name) VALUES (?,?,?,?)",
+                (name, ptype, val, rcp_name),
+            )
+        db.commit()
+        db.close()
+        with open(tmp_path, "rb") as f:
+            _CACHED_FACTORY_DB_BLOB = f.read()
+        return _CACHED_FACTORY_DB_BLOB
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def build_default_xtensa_blobs() -> Dict[str, Dict[str, bytes]]:
+    """Build compact synthetic Xtensa IRAM/DRAM binary images for ``/image2/{isp,iob0,iob1}``.
+
+    Provides clean, recognizable 64-byte payloads (nop-padded reset vectors and segment tags)
+    so the real firmware's ``isp_load_from_embedded`` and ``iob_load_from_embedded`` routines
+    open real YAFFS2 files from ``/image2`` and push bytes into the emulated Xtensa cores.
+    """
+    def _make_blob(tag: bytes) -> bytes:
+        hdr = bytearray(64)
+        hdr[:len(tag)] = tag[:16]
+        struct.pack_into("<II", hdr, 16, 0x0000F020, 0x0000F020)  # Xtensa NOP/ret vector placeholder
+        return bytes(hdr)
+
+    return {
+        "isp": {"dram.bin": _make_blob(b"ISP_DRAM_741"), "iram.bin": _make_blob(b"ISP_IRAM_741")},
+        "iob0": {"dram.bin": _make_blob(b"IOB0_DRAM_741"), "iram.bin": _make_blob(b"IOB0_IRAM_741")},
+        "iob1": {"dram.bin": _make_blob(b"IOB1_DRAM_741"), "iram.bin": _make_blob(b"IOB1_IRAM_741")},
+    }
+
+
+def build_yaffs_tree_chunks(
+    tree: Dict[str, Dict[str, bytes]],
+    seq_base: int = 0x00001000,
+    first_obj_id: int = YAFFS_FIRST_FREE_OBJECTID + 1,
+) -> List[Tuple[int, bytes, bytes]]:
+    """Serialize a two-level directory/file tree into YAFFS2 ``(rel_page, data, spare)`` chunks.
+
+    Each block advances ``seq = seq_base + (rel_page // PAGES_PER_BLOCK)`` so multi-block
+    files pass ``queryNANDBlock`` and scan into full-length YAFFS2 file objects.
+    """
+    chunks: List[Tuple[int, bytes, bytes]] = []
+    rel_page = 0
+    next_obj_id = first_obj_id
+
+    for dir_name, files in tree.items():
+        dir_id = next_obj_id
+        next_obj_id += 1
+        seq = seq_base + (rel_page // PAGES_PER_BLOCK)
+        hdr_d = _build_obj_header(YAFFS_OBJECT_TYPE_DIRECTORY, YAFFS_OBJECTID_ROOT, dir_name, 0)
+        tags_d = _pack_tags2(
+            seq,
+            (dir_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_DIRECTORY << 28),
+            0x80000000 | (YAFFS_OBJECTID_ROOT & 0x0FFFFFFF),
+            0,
+        )
+        chunks.append((rel_page, hdr_d, _make_spare(tags_d)))
+        rel_page += 1
+
+        for fname, blob in files.items():
+            file_id = next_obj_id
+            next_obj_id += 1
+            seq = seq_base + (rel_page // PAGES_PER_BLOCK)
+            hdr_f = _build_obj_header(YAFFS_OBJECT_TYPE_FILE, dir_id, fname, len(blob))
+            tags_f = _pack_tags2(
+                seq,
+                (file_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_FILE << 28),
+                0x80000000 | (dir_id & 0x0FFFFFFF),
+                len(blob),
+            )
+            chunks.append((rel_page, hdr_f, _make_spare(tags_f)))
+            rel_page += 1
+
+            offset = 0
+            chunk_id = 1
+            while offset < len(blob):
+                piece = blob[offset : offset + PAGE_SIZE]
+                data = piece + b"\xFF" * (PAGE_SIZE - len(piece))
+                seq = seq_base + (rel_page // PAGES_PER_BLOCK)
+                tags = _pack_tags2(seq, file_id, chunk_id, len(piece))
+                chunks.append((rel_page, data, _make_spare(tags)))
+                rel_page += 1
+                chunk_id += 1
+                offset += PAGE_SIZE
+
+    return chunks
+
+
+def write_image_partition(
+    gpmc,
+    image_start_block: int = 605,
+    factory_db_bytes: Optional[bytes] = None,
+    include_xtensa_blobs: bool = False,
+) -> Dict[str, int]:
+    """Program ``/image2`` (active slot 0) with ``cdb2/factory.db`` and optional Xtensa blobs."""
+    tree: Dict[str, Dict[str, bytes]] = {
+        "cdb2": {
+            "factory.db": (
+                factory_db_bytes if factory_db_bytes is not None else build_minimal_factory_db_blob()
+            )
+        }
+    }
+    if include_xtensa_blobs:
+        tree.update(build_default_xtensa_blobs())
+
+    chunks = build_yaffs_tree_chunks(tree)
+    base_page = image_start_block * PAGES_PER_BLOCK
+    for rel_page, data, spare in chunks:
+        gpmc.program_page(base_page + rel_page, data, spare)
+
+    return {"blocks_written": (len(chunks) + PAGES_PER_BLOCK - 1) // PAGES_PER_BLOCK, "pages": len(chunks)}

@@ -16,20 +16,25 @@ The emulator boots the real DSMC2 7.4.1 app image end-to-end in emulation:
 Fidelity is tracked honestly in `MODEL_FIDELITY_AUDIT.md` / `FIDELITY_MATRIX.md`
 (faithful vs ASSERTED vs synthetic; every assertion flagged).
 
-## The next blocker (pinned, concrete)
-**The synthesized YAFFS2 image mounts but does not register FILE OBJECTS from its block scan.**
-Consequence: files like `/env/PARTITION_TABLE`, and the SQLite CDB2 param DBs (`cdb2/factory.db`,
-`/data/cdb2/user.db`), open as handles but their first statement fails to prepare — so:
-- real RCP param GET/SET returns the firmware's prepare-fail code (rc=0xC) instead of real values
-  (the FW's own `_cdb2_parameter_get_value` @0x80080C34 runs >100x during CSM bring-up and hits this),
-- any path that reads a real on-disk file stops here.
-
-`cdb2_init` @0x8007FB58 (from init_filesystem @0x80008310) IS reached and `sqlite3_open` succeeds;
-the gap is purely the YAFFS2 scan not populating file objects (`devices/nand_image.py`). Closing it
-unblocks RCP params, presets, and the record/playback data path in one shot — it is NOT RCP-specific.
-
-A reusable `Dsmc2Camera.call_function` (AAPCS direct-call primitive) exists to invoke FW routines
-from a reached boot state — useful for driving/verifying the above.
+## Next blocker (resolved for `/image2` CDB2 & Xtensa boot images; remaining: full ASIC data path)
+* **Priority 1 — YAFFS2 `/image2` staging (`emulator/devices/nand_image.py`, `emulator/camera.py`) — CLEARED:**
+  `write_image_partition()` (backed by `build_yaffs_tree_chunks()`, `build_minimal_factory_db_blob()`, and
+  `build_default_xtensa_blobs()`) stages directory + multi-block file objects onto `/image2` (block 605)
+  with block-incrementing `seqNumber` tags, so the real firmware's `yaffs_Scan` registers `/image2/cdb2/factory.db`,
+  `/image2/isp/{dram,iram}.bin`, `/image2/iob0/{dram,iram}.bin`, and `/image2/iob1/{dram,iram}.bin`.
+* **Priority 2 — Real-FW CDB2 SQLite GET/SET (`emulator/tests/test_rcp_realfw.py`, `emulator/camera.py`) — CLEARED:**
+  With `/image2/cdb2/factory.db` mounted, `cdb2_init` (`@0x8007FB58`) compiles all prepared SQLite statements
+  (`DAT_814CD3A0` ATTACH, `DAT_814CD3D8` GET, `DAT_814CD3D4` SET != 0), `_cdb2_parameter_get_value` (`@0x80080C34`)
+  executes real SQLite lookups (`rc=0`), and `cdb2_parameter_set_uint32` / `_cdb2_parameter_set_value` persists
+  overrides into `/data/cdb2/user.db` (`fw_cdb2_get_uint32` / `fw_cdb2_set_uint32` round-trip verified).
+* **Priority 3 / Collaborator Tips (`trace_probe.py`, `xtensa.py`, `sidekick.py`) — CLEARED (substrate):**
+  - **Tip 1 (`emulator/core/trace_probe.py`)**: Zero-overhead per-PC/IRQ `TraceProbe` captures milestone and IRQ
+    events during emulation and generates `HwPatchDescriptor` records (displaced 32-bit ARM instruction + `B` hook
+    + 6-word stolen-instruction trampoline) for real-HW deployment.
+  - **Tip 2 (`emulator/coprocessors/xtensa.py`, `emulator/devices/sidekick.py`)**: `Dsmc2Camera._install_asic_upload_hooks()`
+    observes the real firmware reading `/image2/{isp,iob0,iob1}/{dram,iram}.bin` and writing segments to
+    `0x3FFE0000`/`0x40000000` (and IOB1's `0x4FFE0000`/`0x4FFF0000` aperture) + reset release into `XtensaCore`;
+    `SidekickMcu` models the self-contained Sidekick MCU core + rotary/button peripherals + 220x176 OLED status display.
 
 ## The hard frontier (the real difficulty, per collaborator Daniel)
 Getting raw image data INTO and BETWEEN the ASICs: compression + SATA medium via IOB/FPGA. DSMC has

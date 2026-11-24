@@ -47,6 +47,46 @@ class XtensaCore:
         self.cycles_executed = 0
         self.instructions_executed = 0
 
+        # Real-FW ASIC upload telemetry (Priority 3, Tip #2)
+        self.fw_upload_count = 0
+        self.iram_uploaded_bytes = 0
+        self.dram_uploaded_bytes = 0
+        self.launched_by_fw = False
+        self.upload_log: List[Tuple[int, int]] = []
+
+    def upload_segment(self, dest_addr: int, data: bytes) -> int:
+        """Accept a firmware-uploaded binary segment into IRAM (@0x40000000) or DRAM (@0x3FFE0000)."""
+        if not data:
+            return 0
+        if self.IRAM_BASE <= dest_addr < self.IRAM_BASE + self.IRAM_SIZE:
+            off = dest_addr - self.IRAM_BASE
+            n = min(len(data), self.IRAM_SIZE - off)
+            self.iram[off : off + n] = data[:n]
+            self.iram_uploaded_bytes += n
+            self.state = self.STATE_READY
+            self.pc = self.IRAM_BASE
+        elif self.DRAM_BASE <= dest_addr < self.DRAM_BASE + self.DRAM_SIZE:
+            off = dest_addr - self.DRAM_BASE
+            n = min(len(data), self.DRAM_SIZE - off)
+            self.dram[off : off + n] = data[:n]
+            self.dram_uploaded_bytes += n
+            n_written = n
+            self.fw_upload_count += 1
+            self.upload_log.append((dest_addr, n_written))
+            return n_written
+        else:
+            return 0
+
+        self.fw_upload_count += 1
+        self.upload_log.append((dest_addr, n))
+        return n
+
+    def release_reset(self) -> None:
+        """Transition core to RUNNING when the ARM firmware releases its reset line."""
+        self.launched_by_fw = True
+        self.state = self.STATE_RUNNING
+        self.step(1)
+
     def load_binaries(self, iram_path: str, dram_path: Optional[str] = None) -> bool:
         """Load firmware binaries into IRAM and DRAM."""
         if os.path.exists(iram_path):
@@ -91,7 +131,11 @@ class XtensaCore:
             "instructions": self.instructions_executed,
             "cycles": self.cycles_executed,
             "iram_loaded": any(self.iram),
-            "dram_loaded": any(self.dram)
+            "dram_loaded": any(self.dram),
+            "fw_upload_count": self.fw_upload_count,
+            "iram_uploaded_bytes": self.iram_uploaded_bytes,
+            "dram_uploaded_bytes": self.dram_uploaded_bytes,
+            "launched_by_fw": self.launched_by_fw,
         }
 
 
