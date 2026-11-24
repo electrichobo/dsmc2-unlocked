@@ -72,12 +72,21 @@ def test_iob_isp_download_completes(runapp):
     assert res["init_event_flags"] & 0x1000 == 0x1000
 
 
-def test_dss_display_batch_is_next_blocker(runapp):
-    """The new blocker is the DSS/display + DSP/audio init batch (0x000CE000) not dispatching;
-    run_application's Starter Thread stays semaphore-blocked behind the Driver's final wait."""
+def test_display_batch_monitor_hdmi_hdsdi_now_set(runapp):
+    """The Monitor Pipeline (0x2000) | HDMI (0x4000) | HDSDI (0x8000) display bits (0xE000) now set:
+    the Monitor-Pipeline init child's IOB black-frame command (0x26) completes because the IOB
+    cmd-response done bit (0x20000 @0x800B0018, IobXauiWindow) is modelled, so its tick-spin
+    (FUN_807B3044) passes on the first poll instead of hanging. Boot advances 0xCF301FFF -> 0xCF30FFFF."""
     res = runapp
-    # Boot stalls at 0xCF301FFF: storage + IOB/ISP done, display/DSP batch still missing.
-    assert res["display_bits_missing"] == 0x000CE000
+    assert res["init_event_flags"] & 0xE000 == 0xE000
+    # Only the DSP (0x40000) + Audio (0x80000) half of the batch remains.
+    assert res["display_bits_missing"] == 0x000C0000
+
+
+def test_dsp_audio_batch_is_next_blocker(runapp):
+    """The new blocker is the DSP (0x40000 @0x80670FFC) + Audio (0x80000) init batch; the display
+    bits are in, run_application's Starter Thread stays semaphore-blocked behind the Driver's wait."""
+    res = runapp
     assert res["run_application_released"] is False
     names = {t["name"]: t for t in res["threads"]}
     starter = names.get("Starter Thread")
@@ -86,8 +95,8 @@ def test_dss_display_batch_is_next_blocker(runapp):
     assert "Camera State Manager" not in names
 
 
-def test_next_blocker_pins_dss_batch(runapp):
-    """The reported next blocker names the DSS/display init batch with its firmware addresses."""
+def test_next_blocker_pins_dsp_audio_batch(runapp):
+    """The reported next blocker names the display batch addresses and the remaining DSP/Audio bits."""
     res = runapp
     nb = res["next_blocker"]
     assert nb is not None
