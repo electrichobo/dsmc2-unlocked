@@ -77,6 +77,23 @@ def cmd_boot(args):
     cam = make_camera(args)
     reset_pc = cam.cpu.pc
 
+    # --cov-out: record every executed basic-block start PC (stock-mapped) during this boot.
+    # Used by the source-build `proven-by-swap` coverage path: a function the swap+movetest boot
+    # actually EXECUTES is proven correct in real firmware context. Only executed fns count; a fn
+    # that merely rode along as compiled bytes (never called) is NOT in this set.
+    cov_pcs = set()
+    cov_handle = None
+    if getattr(args, "cov_out", None):
+        import unicorn
+
+        def _cov_block(uc, address, size, user_data):
+            cov_pcs.add(cam.to_stock(address))
+
+        # app text window (stock 0x80000000..0x817FFFFF); the hook sees shifted PCs, mapped to stock.
+        cov_handle = cam.cpu.mu.hook_add(
+            unicorn.UC_HOOK_BLOCK, _cov_block, None, 0x80000000, 0x81FFFFFF
+        )
+
     t0 = time.time()
     late = None
     if getattr(args, "late_init", False):
@@ -84,6 +101,15 @@ def cmd_boot(args):
     else:
         cam.boot(initial_instructions=args.instructions)
     duration = time.time() - t0
+
+    if cov_handle is not None:
+        try:
+            cam.cpu.mu.hook_del(cov_handle)
+        except Exception:
+            pass
+        with open(args.cov_out, "w") as f:
+            for pc in sorted(cov_pcs):
+                f.write(f"0x{pc:08x}\n")
 
     threads = cam.get_threads()
     success = cam.is_idle_pc(cam.cpu.pc) or (cam.instruction_count >= args.instructions)
@@ -328,6 +354,9 @@ def main():
                         help="After the kernel budget, drive the scheduler past the idle park into "
                              "late driver init (Driver/Starter threads spawned, CRYPT/RTC/FileX init run)")
     p_boot.add_argument("--addr-map", type=str, default=None, help=ADDR_MAP_HELP)
+    p_boot.add_argument("--cov-out", type=str, default=None,
+                        help="Write every executed basic-block start PC (stock-mapped, one hex per "
+                             "line) to this file — the source-build 'proven-by-swap' coverage trace")
     p_boot.add_argument("--expect", type=str, default=None,
                         help="Reference boot --json result; exit 1 unless status, stock-mapped pc/sp and every thread "
                              "(name, state, priority, run count, TCB/entry/stack in stock addresses) match")
