@@ -15,7 +15,9 @@ Legend for **Source**:
 - **SYNTHETIC (intentional)** — deliberately fake placeholder data (e.g. redacted serials),
   correct by design for a public clean-room emulator.
 
-Counts: **24 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
+Counts: **25 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
+(The `MaxFanController` is firmware-derived for its bus/address/register map but carries an
+ASSERTED tuning note for the raw tach word and the exact part number — see its row.)
 
 ---
 
@@ -59,6 +61,7 @@ Counts: **24 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 | `i2c_ucd.*` | TI UCD9090/UCD90160 PMBus rail monitors, MFR_GPO. | **FINDING** — `reference/UCD_REGISTER_MAP.md`, `clean/ucd90160.c`; `reference/POWER_RAIL_MAP.md`. | Rail sample tables are representative, not a live power model. |
 | `i2c_pmic.*` (TWL4030) | TWL4030 PMIC protect-key unlock. | **TRM/DATASHEET** (TWL4030 TRM). | — |
 | `i2c_thermal.*` | Thermal sensor(s) on I2C. | **DATASHEET** + `reference/I2C_DEVICE_MAP.md`. | Temperature values representative. |
+| `i2c_fan_controller.MaxFanController` | BRAIN fan controller (MAX6639-class dual-channel PWM/tach) on **I2C1 @ 0x4D** — the address the firmware's fan HAL drives (observed in a full boot). Answers the tachometer-count registers (channel tach at 0x24/0x25, 0x26/0x27; probe/config at 0x20/0x2B) so `HAL_Temp_SpeedTest` (@0x809B061C) measures a plausible spun-up RPM and `detect_fan_type` (@0x809B08C4) returns a valid fan type → Fan init bit 0x800 sets. | **FINDING (firmware-derived)** — fan HAL `temp_hal_weapon.c` reverse-engineered from `RED_FW_COMPLETE.bin`: `fan_init`@0x8067049C, `HAL_Temp_Fan_Control_Init`@0x809B09A8, `detect_fan_type`@0x809B08C4, `HAL_Temp_SpeedTest`@0x809B061C, `fan_tach_read`@0x809B18B0, `fan_tach_regread`@0x809B750C (reads tach MSB `*(desc+8)`/LSB, `count=((MSB<<8)|LSB)>>3`), `fan_bus_regread`@0x809B693C → `i2c_read`@0x806874B0; RPM ratio consts @0x81474130; speed-test bands 7000/14000 (0x1B58/0x36B0). The I2C1/0x4D placement is confirmed by observing the running firmware's bus traffic, not assumed. | **ASSERTED (tuning)**: the exact MAX6639 part # is a class guess (register-map behaviour matches), and the raw tach word (`DEFAULT_TACH_WORD=0x2800`) is tuned so the firmware's own `count>>3`+ratio formula lands in the valid band — the resulting RPM value is not independently datasheet-grounded (the firmware computes it, the Python asserts nothing about it). |
 | `i2c_maxtouch.MaxTouch` | Atmel maXTouch (`0x4B`), T5..T40 objects, 1024×576. | **DATASHEET** (Atmel maXTouch obj protocol). | Touch stream synthetic. |
 | `i2c_eeprom.*` (EDID) | 24C02 EDID @`0x50`, VESA EDID 1.3 for RED Touch 7.0. | **DATASHEET** (VESA EDID). | — |
 | `i2c_olpf.*` | OLPF / lens-related I2C device. | **DATASHEET** + `reference/I2C_DEVICE_MAP.md`. | Representative. |
@@ -113,13 +116,31 @@ source of truth.
    The IOB DDR/SCL init (`iob_ddr_set_speed`) uses the IOB AHB window (direct MMIO, `IobXauiWindow`)
    with bounded register polls, so it does NOT require the IOB Xtensa core to run.
 
-   **Next blocker (this PR's measured depth): Fan 0x800.** `fan_init` (@0x8067049C) →
-   `HAL_Temp_Fan_Control_Init` (@0x809B09A8) runs but strands in the fan TACHOMETER speed test
-   (`detect_fan_type` → `HAL_Temp_SpeedTest`), a timed fan-RPM measurement no peripheral model
-   drives. The next milestone is a **fan / tach-capture register model** (not the SPI transport,
-   now modelled, and not the IOB Xtensa core). Everything downstream — `run_application` → Camera
-   State Manager → DSS framebuffer and the firmware RCP server — is released only after the Driver
-   thread finishes this cascade.
+   **Fan 0x800 landed in this PR.** `fan_init` (@0x8067049C) → `HAL_Temp_Fan_Control_Init`
+   (@0x809B09A8) → `detect_fan_type` (@0x809B08C4) → `HAL_Temp_SpeedTest` (@0x809B061C) spins the
+   BRAIN fan up at full PWM, sleeps for spin-up, then samples the tachometer over I2C1 @ 0x4D
+   (`fan_tach_read` @0x809B18B0 → `fan_tach_regread` @0x809B750C → `i2c_read` @0x806874B0). Two
+   models make it complete: (a) `MaxFanController` answers the tach-count registers with a
+   plausible spun-up count so the measured RPM lands in the firmware's valid band; (b) the fan-tach
+   spin-up sleep compression (`camera._install_fan_spinup_hook`) clamps the 6000-tick
+   `tx_thread_sleep` (@0x80E9E32C) **only when issued from inside `HAL_Temp_SpeedTest`** to a few
+   ticks, so the worker reaches the tach read within a practical boot (6000 ThreadX ticks never
+   accrue under the one-OVF-per-slice tick cadence). The firmware still runs the full
+   start/sleep/read/classify sequence; only the spin-up *duration* is time-compressed, which is the
+   same modeling decision the tick cadence already makes for every timed wait. **Fan 0x800 now sets
+   and the whole board-bring-up barrier passes; boot reaches `0xC3300FFF`.** Verified in
+   `test_fan_tach.py` + `test_ui_bringup.py`.
+
+   **Next blocker (this PR's measured depth): SATA/Media storage init (0x0C000000).** Past the
+   board barrier the Driver thread (@0x8066C92C) dispatches two more `init_parallel` stages —
+   "SATA" (worker @0x80670504, completion bit 0x04000000) and "Media" (worker @0x8067060C,
+   completion bit 0x08000000) — then blocks at `wait_for_init_flags(0x0C000000)` (@0x8066D000 →
+   `wait_for_init_flags` @0x8066C7D8 → `red_event_flags_get` @0x8070E748) for both. Those storage-
+   init workers don't post their bits under the current models, so 0x04000000 / 0x08000000 stay
+   clear and `run_application` (Starter Thread @0x80008E24 → Camera State Manager → DSS framebuffer
+   + firmware RCP server) stays semaphore-blocked. The next milestone is the **SATA/AHCI + media
+   storage bring-up** (see `boot_to_run_application` / `test_run_application.py`). (The requested
+   0x0C000000 and its caller 0x8066D000 were captured from the running firmware.)
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),
