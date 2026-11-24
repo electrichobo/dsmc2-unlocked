@@ -119,6 +119,34 @@ source of truth.
    **Milestone 4 (In-Camera Clip Playback, Persistent Look/Presets & Redpine Wi-Fi / RFTP) — CLEARED** (verified by `test_milestones_3_and_4.py`):
    implemented in-camera clip playback transport (`PLAYING`/`PAUSED`/`SHUTTLE_2X`/`SHUTTLE_4X`, frame stepping, In/Out markers, metadata inspector) in `RedUiEngine`, persistent user presets (`/data/presets/` and MINI-MAG export), `.cube` 3D LUT import, ASC-CDL import/export, reticle/overlay/key-profile persistence, `RedpineRs9113Wifi` SPI host commands, and `RftpServer` TCP/local file transfers (`LIST`/`GET`/`PUT`/`STAT`/`DELETE`).
 
+   **Real-firmware RCP parameter path (CDB2 store) — PARTIAL, blocker pinned** (verified by `test_rcp_realfw.py`):
+   The milestone-3/4 RCP GET/SET tests drive `rcp.protocol.RcpProtocol`, a clean-room Python
+   model. `test_rcp_realfw.py` instead drives the **firmware's own** param code on the booted
+   app (past Camera State Manager), via the new `Dsmc2Camera.call_function` AAPCS direct-call
+   primitive. Findings (all fw-cited; the unmet dependency is flagged **ASSERTED-not-yet-modeled**):
+   * Every `RCP_PARAM_*` maps to a **CDB2** key; CDB2 is a **SQLite**-backed param store
+     (`cdb2.cpp`). `cdb2_init` (@0x8007FB58) is dispatched by `init_filesystem` (@0x80008310)
+     during app FS bring-up — and it **does run** (exactly once) in `boot_to_application`. The
+     shipped **factory** param DB (`<dir>/cdb2/factory.db`, ~2062 rows, cols
+     `name,type,default_value,...,rcp_name`) opens into the "cdb2 ready" handle `DAT_814CD39C`
+     (non-null after init), with the writable **user** DB (`/data/cdb2/user.db`) ATTACHed as
+     `user` (overrides).
+   * The firmware's own code calls `_cdb2_parameter_get_value` (@0x80080C34) **>100 times**
+     during CSM bring-up — the real RCP param-GET path runs end-to-end to the SQLite layer.
+   * **Blocker:** `cdb2_init`'s `sqlite3_prepare_v2` (FUN_80DA9688) cascade fails — the ATTACH
+     stmt (`DAT_814CD3A0`), GET stmt (`DAT_814CD3D8`) and SET stmt (`DAT_814CD3D4`) are all
+     null — because the shipped `factory.db`/`user.db` are **not readable through the emulated
+     NAND**: the synthesized YAFFS2 image mounts but the block-scan does not yet register file
+     objects (documented limit in `devices/nand_image.py` / `camera.load_firmware`), so
+     `sqlite3_open` returns a handle but the first statement over the empty DB file fails to
+     prepare. Consequently `_cdb2_parameter_get_value` returns its defined prepare-fail code
+     **rc=0xC** for every param (deterministic). **NEXT depth increment:** the YAFFS2 file-object
+     scan (serve the owner-staged, gitignored `factory.db`/`user.db` through the FW NAND read
+     path) — once files register, the real `cdb2_init` prepares its statements and the genuine
+     `_cdb2_parameter_get_value`/`_set_value` resolve params with no further model. This is the
+     same `/data`/`/env` YAFFS scan gap already called out for the NAND mount; it is **not** an
+     RCP-specific invention and nothing in the param path is faked.
+
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),
    mini-mag SM2246EN, Redpine RS9113 Wi-Fi SPI host interface, the C64x+ DSPLink protocol,
