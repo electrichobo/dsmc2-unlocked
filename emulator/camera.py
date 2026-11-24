@@ -150,14 +150,31 @@ class Dsmc2Camera:
     # @0x80670504, completion bit 0x04000000) and "Media" (worker @0x8067060C, completion bit
     # 0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)`` (@0x8066D000 ->
     # ``wait_for_init_flags`` @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) waiting for both.
-    # The UI ``Starter Thread`` (thread_0_entry @0x80008E24 -> run_application -> Camera State
-    # Manager / DSS framebuffer / RCP server) stays semaphore-blocked until the Driver cascade
-    # completes. The SATA/Media storage init workers do not complete under the current models, so
-    # bits 0x04000000 / 0x08000000 never set -- that storage (SATA/AHCI + media) bring-up is the
-    # next depth milestone. ``boot_to_run_application`` drives past the fan barrier and reports it.
+    #
+    # These now COMPLETE from the firmware's own code: the IOB-AHB SATA3 shadow-register block
+    # (``IobXauiWindow``, devices/iob_xaui.py) presents an up FPGA/HBA link so ``sata_init`` posts
+    # 0x04000000, and models the main media bay EMPTY (PxSSTS DET=0) so ``media_init`` takes its
+    # "No media is present" branch (@0x8067060C log 0xa18) -- which RETURNS SUCCESS and posts
+    # 0x08000000. The storage barrier 0x0C000000 is crossed without emulating the AHCI
+    # IDENTIFY/command engine.
+    #
+    # Past the storage barrier the Driver dispatches the IOB/ISP binary download (0x1000; deps
+    # Mailbox|XAUI, met) which also completes, then the DSS/display + DSP/audio init batch:
+    # Monitor Pipeline (0x2000, @0x8074C9E4) -> HDMI (0x4000) / HDSDI (0x8000), and DSP (0x40000,
+    # @0x80670FFC) -> Audio (0x80000). The run_application Starter Thread (thread_0_entry
+    # @0x80008E24 -> run_application @0x80008CB4 -> "Camera State Manager" thread) is released only
+    # when the Driver's final ``wait_for_init_flags(0xCF3CF7FF)`` is satisfied. Under the current
+    # thread-scheduler model those display-batch init_parallel children are not resumed after the
+    # IOB/ISP-download bit sets, so boot stalls at 0xCF301FFF (missing 0x000CE000) with the Driver
+    # parked in the ThreadX scheduler (_tx_thread_schedule region ~0x80EA4A94) -- that DSS/DSP
+    # display-init batch dispatch is the next depth milestone. ``boot_to_run_application`` drives to
+    # the storage barrier (now passed) and reports the stall + the pinned next blocker.
     RUN_APP_FLAGS_BARRIER = 0x0C000000        # SATA 0x04000000 | Media 0x08000000
     RUN_APP_SATA_BIT = 0x04000000
     RUN_APP_MEDIA_BIT = 0x08000000
+    # Post-storage DSS/display + DSP/audio init batch (the new blocker past run_application).
+    DSS_DISPLAY_FLAGS = 0x000CE000            # MonitorPipeline|HDMI|HDSDI|DSP|Audio
+    DSS_IOB_ISP_DOWNLOAD_BIT = 0x00001000     # IOB/ISP binary download (deps met, completes)
 
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -509,7 +526,16 @@ class Dsmc2Camera:
         # weapon_left_side_board_init XAUI bring-up completes. The window is below the bus
         # device-hook range (0x40000000+), so this is a dedicated Unicorn MEM_READ hook; writes
         # (PHY config / latch clears) fall through to RAM. See devices/iob_xaui.py.
-        self.iob_xaui = IobXauiWindow(link_up=True)
+        #
+        # The same window carries the SATA3 shadow-register block (base 0x800B0000). With
+        # ``media_present=False`` the main media bay is modelled EMPTY: the SATA3 FPGA link / HBA
+        # come up (so sata_init @0x80670504 posts bit 0x04000000) while PxSSTS reports DET=0, so
+        # media_init @0x8067060C takes its own "No media is present in %s" branch (log @0xa18) --
+        # which RETURNS SUCCESS and posts bit 0x08000000. Both storage-init bits set from the
+        # firmware's own code paths (a card-less camera is a fully valid boot); this releases the
+        # run_application Starter Thread WITHOUT emulating the AHCI IDENTIFY/command engine that an
+        # attached SSD's SATA_DevAttach (@0x806985E4) would require. See devices/iob_xaui.py.
+        self.iob_xaui = IobXauiWindow(link_up=True, media_present=False)
         self._install_iob_xaui_hook()
 
         # Fan tach spin-up sleep compression (HAL_Temp_SpeedTest). The one-element list tracks
@@ -962,22 +988,28 @@ class Dsmc2Camera:
         max_instructions: int = 220_000_000,
         slice_size: int = 200_000,
     ) -> Dict[str, Any]:
-        """Drive boot past the board barrier toward ``run_application`` and report the next blocker.
+        """Drive boot across the storage-init barrier toward ``run_application`` and pin the blocker.
 
-        ``boot_to_ui_bringup`` now crosses the board-bring-up barrier (init event flags
-        ``0xC3300FFF``; the Fan 0x800 bit sets via the ``MaxFanController`` tach model + spin-up
-        sleep compression). This method continues from there: the Driver thread (@0x8066C92C)
-        dispatches two further ``init_parallel`` stages -- "SATA" (worker @0x80670504, completion
-        bit ``RUN_APP_SATA_BIT`` 0x04000000) and "Media" (worker @0x8067060C, completion bit
-        ``RUN_APP_MEDIA_BIT`` 0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)``
-        (@0x8066D000 -> @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) for both.
+        ``boot_to_ui_bringup`` crosses the board-bring-up barrier (init event flags ``0xC3300FFF``;
+        the Fan 0x800 bit sets via the ``MaxFanController`` tach model + spin-up sleep compression).
+        This method continues from there: the Driver thread (@0x8066C92C) dispatches two further
+        ``init_parallel`` stages -- "SATA" (worker @0x80670504, completion bit ``RUN_APP_SATA_BIT``
+        0x04000000) and "Media" (worker @0x8067060C, completion bit ``RUN_APP_MEDIA_BIT``
+        0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)`` (@0x8066D000 ->
+        @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) for both.
 
-        The UI ``Starter Thread`` (thread_0_entry @0x80008E24 -> ``run_application`` -> Camera State
-        Manager / DSS framebuffer / RCP server) stays semaphore-blocked until that Driver cascade
-        completes. Under the current models the SATA/Media storage init workers do not post their
-        completion bits, so 0x04000000 / 0x08000000 stay clear -- the next depth milestone is the
-        SATA/AHCI + media storage bring-up. This is a deterministic probe: it reports the reached
-        flags, the unmet SATA/Media bits, and the identified blocker without faking anything.
+        Both now complete from the firmware's own code (the IOB-AHB SATA3 shadow-register block in
+        ``IobXauiWindow`` presents an up FPGA/HBA link so ``sata_init`` posts 0x04000000, and the
+        main media bay is modelled empty so ``media_init`` takes its "No media is present" success
+        branch and posts 0x08000000), so the storage barrier 0x0C000000 is crossed. The method then
+        keeps driving: the IOB/ISP binary-download stage (0x1000) also completes, but the DSS/
+        display + DSP/audio init batch (``DSS_DISPLAY_FLAGS`` 0x000CE000 -- Monitor Pipeline 0x2000
+        @0x8074C9E4, HDMI 0x4000, HDSDI 0x8000, DSP 0x40000 @0x80670FFC, Audio 0x80000) is not
+        dispatched: those init_parallel children are not resumed by the current thread scheduler,
+        so boot stalls at 0xCF301FFF and the run_application ``Starter Thread`` (thread_0_entry
+        @0x80008E24 -> run_application @0x80008CB4 -> "Camera State Manager") stays semaphore-blocked
+        in the ThreadX scheduler. This is a deterministic probe: it reports the reached flags, the
+        unmet display/DSP bits, and the pinned blocker without faking anything.
         """
         # Reach the board barrier first (Fan included) via the existing depth probe.
         self.boot_to_ui_bringup()
@@ -996,14 +1028,41 @@ class Dsmc2Camera:
             self._tick_timers()
             flags = self.init_event_flags()
 
+        # Storage barrier crossed: keep driving so the IOB/ISP-download + DSS/display batch can
+        # dispatch, and detect where it stalls. The loop stops once no new init bit has set for a
+        # stall window (the display-batch dispatch gap) or the display batch is fully up.
+        barrier_passed = (flags & barrier) == barrier
+        post_target = self.DSS_DISPLAY_FLAGS | self.DSS_IOB_ISP_DOWNLOAD_BIT
+        if barrier_passed:
+            last_flags = flags
+            stall = 0
+            post_done = 0
+            post_budget = min(60_000_000, max_instructions)
+            while post_done < post_budget and (flags & post_target) != post_target and stall < 120:
+                self._deliver_idle_irq()
+                try:
+                    self.cpu.run(self.cpu.pc, 0, count=slice_size)
+                except Exception:
+                    pass
+                post_done += slice_size
+                self.instruction_count += slice_size
+                self._tick_timers()
+                flags = self.init_event_flags()
+                if flags != last_flags:
+                    last_flags = flags
+                    stall = 0
+                else:
+                    stall += 1
+
         self.is_booted = True
         self.power_state = self.POWER_ON
         flags = self.init_event_flags()
-        barrier_passed = (flags & barrier) == barrier
         missing = barrier & ~flags
         threads = self.get_threads()
         names = {t["name"]: t for t in threads}
         starter = names.get("Starter Thread")
+        iob_isp_set = bool(flags & self.DSS_IOB_ISP_DOWNLOAD_BIT)
+        display_missing = self.DSS_DISPLAY_FLAGS & ~flags
         return {
             "milestone": "run_application" if barrier_passed else "storage_init_barrier",
             "barrier_passed": barrier_passed,
@@ -1014,22 +1073,32 @@ class Dsmc2Camera:
             "run_app_instructions": done,
             "total_instructions": self.instruction_count,
             "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
-            # The post-barrier SATA/Media init bits still clear. Non-zero here identifies the blocker.
+            # Storage bits now set; this stays 0 once the barrier passes.
             "missing_flags": missing,
             "sata_bit_set": bool(flags & self.RUN_APP_SATA_BIT),
             "media_bit_set": bool(flags & self.RUN_APP_MEDIA_BIT),
-            # The UI app (run_application) is released only when the Driver cascade finishes.
+            # The IOB/ISP binary download (post-storage, deps Mailbox|XAUI) also completes.
+            "iob_isp_download_bit_set": iob_isp_set,
+            # The DSS/display + DSP/audio init batch that gates the final 0xCF3CF7FF wait.
+            "display_bits_missing": display_missing,
+            # run_application (the Starter Thread) releases only when the Driver's final wait passes.
             "run_application_released": bool(starter is not None and starter["state"] != "SEMAPHORE"),
             "next_blocker": (
-                None if barrier_passed else
-                "board bring-up complete (0xC3300FFF, Fan 0x800 set). The Driver thread "
-                "(@0x8066C92C) now blocks at wait_for_init_flags(0x0C000000) (@0x8066D000 -> "
-                "wait_for_init_flags @0x8066C7D8 -> red_event_flags_get @0x8070E748) for the SATA "
-                "(0x04000000) and Media (0x08000000) init_parallel completion bits. The SATA "
-                "(worker @0x80670504) and Media (worker @0x8067060C) storage-init stages do not "
-                "complete under the current models, so those bits never set and run_application "
-                "(Starter Thread @0x80008E24) stays semaphore-blocked. Next milestone: SATA/AHCI + "
-                "media storage bring-up."
+                "storage-init barrier crossed (SATA 0x04000000 + Media 0x08000000 set from the "
+                "firmware's own sata_init @0x80670504 / media_init @0x8067060C code paths via the "
+                "IOB-AHB SATA3 shadow-register model). The IOB/ISP binary download (0x1000) also "
+                "completes. The Driver thread (@0x8066C92C) then dispatches the DSS/display + DSP/"
+                "audio init_parallel batch -- Monitor Pipeline (0x2000 @0x8074C9E4), HDMI (0x4000), "
+                "HDSDI (0x8000), DSP (0x40000 @0x80670FFC), Audio (0x80000) -- and blocks on its "
+                "final wait_for_init_flags(0xCF3CF7FF). Under the current thread scheduler those "
+                "display-batch init_parallel children are not resumed after the IOB/ISP-download "
+                "bit sets, so boot stalls at 0x%08X (missing 0x%08X) with the Driver parked in the "
+                "ThreadX scheduler (~0x80EA4A94) and run_application (Starter Thread @0x80008E24) "
+                "still semaphore-blocked. Next milestone: DSS/DSP display-init batch dispatch."
+                % (flags, display_missing)
+                if barrier_passed else
+                "board bring-up complete (0xC3300FFF, Fan 0x800 set) but the SATA/Media storage "
+                "barrier 0x0C000000 did not cross (missing 0x%08X)." % missing
             ),
             "threads": threads,
         }
