@@ -25,7 +25,8 @@ ASSERTED tuning note for the raw tach word and the exact part number — see its
 
 | Model | What it claims | Source | Gaps |
 |---|---|---|---|
-| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, CS-mux target ids (ISP1=7, ISP2=8, IOB=iobspi, LSB-FPGA=iomap ch6); LSB-FPGA regs at real AXI `0x44A00000` space + version `0xE0000908`; `ts_fpga` bound to McSPI1 ch2 (the firmware's `fpga_read(6,…)` port) and seeded with the XAUI link-up regs (`0x40010008`→`0x7E0`, `0xC2000010`=0, `0xC20000BC`=0, shared with `iob_xaui.FPGA_LINK_UP_REGS`). | **FINDING** — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; memory `omap-iob-transport`. **Fixed in this PR** (was the invented 0xC2/0xA5 frame + REG_DEVICE_ID map; `ts_fpga` was on the wrong McSPI port). | Register *contents*/side-effects not modeled (reads return last-written or seeded value); no gating logic (rev<0x14 low-window block, XAUI-up high-window gate) yet; the firmware's `fpga_read` reaches `ts_fpga` only once the SPI-over-sDMA transport is modeled (next milestone) — today it is DMA-routed and never clocks the target. |
+| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` / `CsMuxSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, GPIO 76/77 CS-mux routing on `McSPI1` CH0 (`ISP1`=7, `ISP2`=8), `LSB-FPGA` on `McSPI1` CH2; LSB-FPGA regs at AXI `0x44A00000` + `0xE0000904=0x00030031`, `0xE0000908=0x00000014`, XAUI link-up seeds (`0x40010008->0x7E0`, `0xC2000010=0`, `0xC20000BC=0`, shared with `iob_xaui.FPGA_LINK_UP_REGS`), bitstream/SSD-detect regs (`0xE00003FC`, `0x44A0000C`). | **FINDING** (frame + CS-mux topology) + **ASSERTED** (seeded FPGA status bits) — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`. | Register side-effects beyond XAUI/bring-up status bits not dynamically simulated. |
+| `c2c.IobXauiAhbDevice` + `iob_xaui.IobXauiWindow` | GPMC CS2 IOB/FPGA AHB window @`0x1C000000` (size `0x04000000`), mapped via `FUN_80727028`; serves XAUI link/PCS/PHY ready regs (`+0x0010`, `+0x002C`, `+0x0248`), ready flag at `+0xB0020=0x4`, toggling handshake (`0x000B0000..0x000B0FFF`, enabled during `boot_to_application`), HBA0 SATA3 AHCI direct/shadow SREGs (`0x00060000..0x00070010`, `0x000B0680..0x000B06CC`), and is paired with `MarvellSideSataBridge` (`W<reg><data>`/`SM2246EN`) + LSB-FPGA `0x44A0000C` SSD detect. | **ASSERTED** (status/AHCI readback at **FINDING**-identified offsets). | Models ready/AHCI link state without full dynamic DMA completion interrupts. |
 | `c2c.IobMailboxDevice` | GPMC AHB IOB mailbox memory-slave @`0xA5800000`, separate from SPI. | **FINDING** — `COPROCESSOR_TRANSPORT.md` §1 (GPMC). **Added in this PR.** | Mailbox event/IRQ semantics (EVNT_MAILBOX_IOB0/1, ISP0/1/2) and descriptor format not modeled; plain word store. |
 | `c2c.IobDoorbellDevice` | Xtensa-local doorbell MMIO @`0x3FFE8000`/`0x4FFE8000`; +0x04 write fetches a 16-byte DDR descriptor (`0x800B0FFC`/`0x800B17FC`) and dispatches to the core. | **ASSERTED** (shape plausible; descriptor layout + the `handle_c2c_command` opcodes are invented). Decoupled from SPI in this PR. | Real doorbell register layout and descriptor schema unverified against fw; dispatched command set is asserted. |
 | `xtensa.Iob0Coprocessor` | SATA 3.0 link status, HDMI 1080p tx, STACCELERO accelerometer tilt. | **ASSERTED** — fabricated state (fixed accel vector, HDCP flag, tilt math). Topology contradicts findings (SATA controller is in the IOB and HBA0 goes via SATA3 FPGA; side-SATA is a Marvell serial bridge — memories `marvell-side-sata-bridge`, `dsmc2-two-sata-hbas-one-active`). | Not real Xtensa fw; `handle_c2c_command` opcodes (0x10/0x20/0x26) invented. Depth target: co-sim real `iob0` fw. |
@@ -36,6 +37,8 @@ ASSERTED tuning note for the raw tach word and the exact part number — see its
 | `dsp.DspLinkIpc` | ARM↔DSP MSGQ shared-memory queues. | **ASSERTED** — generic deque IPC; message ids/format not from fw. | Real DSPLink MSGQ layout unverified. |
 | `dsp.CImagingServer` | Autofocus contrast curve, Haar face detection. | **ASSERTED** — Gaussian sharpness + hardcoded face box; demonstration only. | Not a real algorithm or server protocol. |
 | `dsp.RAudioServer` | 4-ch audio preamp/peak meter, PCM/WAV synth. | **ASSERTED** — synthesized tone/hum; plausible but not fw-derived. | Preamp/metering values invented. |
+| `dsp.OmapMailbox` | OMAP3630 Inter-Processor Mailbox @`0x48094000` (IRQ 26), 8 FIFOs, `SYSCONFIG`/`SYSSTATUS`, IRQ status/enable. | **TRM/DATASHEET** (SPRUGN4 ch.13) + fw DSPLink `OMAP3530_halIntCtrl` (`0x80EB63C0`). | Interrupt assertion back to DSP side not simulated. |
+| `dsp.OmapIva2Mmu` | OMAP3630 IVA2.2 MMU @`0x5D000000` (`MMU_SYSCONFIG`/`SYSSTATUS`, TTB, TLB load/flush) + `IVA2_MEM` @`0x5C000000`. | **TRM/DATASHEET** (SPRUGN4 ch.5) + fw DSPLink `OMAP3530_halMmuCtrl` (`0x80EB7148`). | Page-table translation not enforced for host-side DSP stub. |
 
 ## Devices (`emulator/devices/`)
 
@@ -43,12 +46,12 @@ ASSERTED tuning note for the raw tach word and the exact part number — see its
 |---|---|---|---|
 | `intc.OmapIntc` | OMAP3 MPU INTC @`0x48200000`, banks 0..2, MIR/ISR/PENDING. | **TRM/DATASHEET** (SPRUGN4). | — |
 | `prcm.OmapPrcm` | CM/PRM clock+reset @`0x48004000`/`0x48005000`, DPLL lock. | **TRM/DATASHEET** + fw addrs `0x80674A00`. | — |
-| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15; **peripheral-synchronised SPI-over-sDMA** (`_try_spi_over_sdma`): a channel whose endpoint is a McSPI TX/RX FIFO clocks the SPI frame through the McSPI↔`CoprocessorSpiTarget` byte state machine (full-duplex: TX channel drives MOSI + stashes MISO; the paired RX channel drains that stash), then signals channel completion/IRQ. | **TRM/DATASHEET** + fw SPI DMA driver (`_spi_write_and_read` @0x806D588C, `_spi_init_tx_dma`/`_spi_init_rx_dma` @0x806D6554/0x806D6D84, `_spi_get_tx/rx_dma_request` @0x806D6340/0x806D644C; McSPI_TX/RX at CH_BASE+ch·0x14+0x0C/0x10). **SPI-over-sDMA added this PR.** | DMA request-id SYNCHRO decode simplified (endpoint-address match instead); FIFO-depth/turbo modes not modelled; NAND/memory DMA keep the prior instant-copy. |
-| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/TX/RX; 8-bit byte path for the coprocessor frame; TX/RX FIFO reg addresses + `dma_transceive_byte` for the sDMA SPI path. | **TRM/DATASHEET** (SPRUGN4 ch.20). **Byte-path + DMA-beat path added this PR** for the register frame. | Full DMA/FIFO-depth modes simplified; loopback default for unframed targets. |
-| `mcbsp.OmapMcBSP` | McBSP 2..5, DRR/DXR, SPCR DLB loopback. | **TRM/DATASHEET** + fw offsets (omap_regs.tsv). | — |
+| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15; GPMC NAND prefetch stream + peripheral-synchronised SPI-over-sDMA (`_try_spi_over_sdma` clocking TX/RX FIFO transfers full-duplex through `CoprocessorSpiTarget`). | **TRM/DATASHEET** + fw SPI DMA driver (`_spi_write_and_read` @0x806D588C). | Transfers complete instantaneously on CCR enable; FIFO-depth/turbo modes simplified. |
+| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/CHCTRL/TX/RX; 8-bit byte path + TX/RX FIFO address helpers, `dma_transceive_byte`, and `rx_dma_fifo` with sub-transfer phase preservation across `CHCTRL` toggles. | **TRM/DATASHEET** (SPRUGN4 ch.20). | Full FIFO-threshold pacing simplified; loopback default for unattached targets. |
+| `mcbsp.OmapMcBSP` | McBSP 1..5, DRR/DXR, SPCR DLB loopback. | **TRM/DATASHEET** + fw offsets (omap_regs.tsv). | — |
 | `gptimer.OmapGpTimer` | GPTimers 1..11, TISR/TCLR/TCRR; timer 2 → ThreadX tick. | **TRM/DATASHEET**. | — |
 | `uart.OmapUart` | 16550 UARTs 1-4, LSR/SSR, UART3 RCP, UART4 logs. | **TRM/DATASHEET** + fw role mapping. | — |
-| `i2c.OmapI2c` | I2C 1-3 master, XRDY/RRDY/ARDY, TWL4030 protect-key. | **TRM/DATASHEET**. | — |
+| `i2c.OmapI2c` | I2C 1-3 master, `BUF`/`BUFSTAT`, multi-chunk (>64B) `XRDY`/`RRDY`/`ARDY` interrupts, TWL4030 protect-key. | **TRM/DATASHEET**. | — |
 | `gpio.OmapGpio` | GPIO 1..6 dir/data/edge, pin callbacks, GPIO130 mux. | **TRM/DATASHEET** + fw pin roles. | — |
 | `gpmc.OmapGpmc` | GPMC + Micron MT29F8G08 NAND, geometry descriptor, backing store (program/read/erase), Micron on-die ECC feature (0x90) round-trip, Hamming ECC-result window. | **TRM/DATASHEET** + fw descriptor `0x81EF7824` + fw NAND driver (`_nand_read_sector` @0x8067ccc8, `_nand_set_internal_ecc` @0x8067b984, `_nand_set_feature`/`_nand_get_feature`). | NAND DMA source is modeled via the SDMA "instant 0xFF / dest fill" (`sdma.py`), not a true GPMC-prefetch-FIFO→DDR stream; GPMC Hamming ECC result not computed (on-die ECC path doesn't cross-check it). A fully mountable synthesized YAFFS2 image is NOT yet produced — see `nand_image.py`. |
 | `hdq_onewire.OmapHdq1Wire` | HDQ/1-Wire @`0x480B2000`; Maxim ROM cmds, CRC-8, MD5 salt, signature offsets. | **FINDING** — `findings/peripherals/ONEWIRE_SIGNATURE_AND_SENSOR_ID.md` (salt, record offsets). | Board ROM IDs/serials are synthetic (see below) — correct by design. |
@@ -94,69 +97,27 @@ source of truth.
    next layer. Source: `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`,
    `clean/lsb_fpga.c`, `iob.c`.
 
-   **Milestone-2 state** (pinned down by `boot_to_ui_bringup` / `test_ui_bringup.py`): past the
-   NAND-FS mount, boot reaches the board-bring-up barrier `wait_for_init_flags(0x03300FF7)` and
-   stalls at init flags `0xC21003FF` — the four board-dependent bits (Boards 0x400, Fan 0x800,
-   XAUI 0x200000, Mailbox 0x1000000) never set because the Boards child `weapon_boards_init`
-   (@0x809B378C) never completes.
+   **Milestone 1 (`0x03300FF7` board-bring-up barrier) — CLEARED** (verified by `boot_to_ui_bringup` /
+   `test_ui_bringup.py` / `test_xaui_link.py` / `test_fan_tach.py`): with peripheral-synchronised
+   McSPI-over-sDMA (`_try_spi_over_sdma`), GPIO-76/77 `CsMuxSpiTarget`, seeded LSB-FPGA
+   status/version registers on `McSPI1` CH2 (`FPGA_LINK_UP_REGS`: `0x40010008->0x7E0`,
+   `0xC2000010=0`, `0xC20000BC=0`), `MaxFanController` @ `I2C1 0x4D` with `HAL_Temp_SpeedTest`
+   spin-up sleep compression (`_install_fan_spinup_hook`), and `IobXauiAhbDevice` / `IobXauiWindow`
+   @`0x1C000000`, `weapon_boards_init` (@0x809B378C), `weapon_left_side_board_init` (@0x809B5354),
+   and `fan_init` (@0x8067049C) all complete: all four board-dependent bits (Boards 0x400,
+   Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) set, reaching `0xC3300FFF` and populating `hw_cap`
+   (@0x815811F4) to `0x00041182`. `boot_to_run_application` (`test_run_application.py`) further
+   crosses the SATA/Media storage barrier (`0x0C000000`) + IOB/ISP download (`0x1000`) via the
+   SATA3 shadow block to `0xCF301FFF`.
 
-   The **XAUI link-up register model landed in this PR** (`iob_xaui.IobXauiWindow` + `ts_fpga`
-   seeds): the IOB AHB window `0x1C000000` answers the PCS/PHY status `lsb_fpga_report_xaui_status`
-   (@0x809BCF64) polls (PCS @`0x1C02002C`=`0x03FFC02F`, status @`…010`, RX-err @`…068`/`…0BC`=0,
-   PLL/PHY ready), verified against the firmware predicate in `test_xaui_link.py`.
+   **Milestone 2 (`0xCF3CF7FF` full driver cascade → `run_application` / `Camera State Manager`) — CLEARED** (verified by `boot_to_application` / `test_ui_bringup.py`):
+   with toggling IOB AHB status (`iob_status_handshake_enabled=True` on `0x1C0B0000..0x1C0B0FFF`, `+0xB0020=0x4`), `EdidEeprom(0x50)` on `I2C2` and `I2C3`, `OmapMailbox` (`0x48094000`) + `OmapIva2Mmu` (`0x5D000000`) + `IVA2_MEM` (`0x5C000000`), and multi-chunk (>64B) Master TX in `OmapI2c`, `Driver thread` completes SATA (`0x4000000`), Media (`0x8000000`), IOB/ISP Binary Download (`0x1000`), Monitor Pipeline (`0x2000`), HDMI (`0x4000`), HDSDI (`0x8000`), Monitor Splash Screen, DSP (`0x40000`), Contiguous Media Space (`0x10000000`), Audio (`0x80000`), and Cal Load (`0x800000`) -> `0xDFBCFFFF`, then puts `0x81E53618` (@`0x8066D3C8`) so `Starter Thread` enters `run_application` (@`0x80008CB4`), creates `APP_SEMAPHORE` (@`0x814C6D1C`), and spawns `Camera State Manager`.
 
-   **SPI-over-sDMA transport landed in this PR.** The board workers run as async ThreadX threads;
-   batch 1 (IOB/ISP-pre) stranded on its **McSPI1-over-sDMA** coprocessor transfers
-   (`fpga_read`/`spi_write_wait_for_ack_then_read` → `_spi_write_and_read`, peripheral-synchronised
-   SPI DMA) because the old sDMA did a mem→mem copy and never clocked the SPI frame. Now
-   `sdma._try_spi_over_sdma` clocks a McSPI-FIFO-wired channel through the McSPI↔`CoprocessorSpiTarget`
-   byte state machine (full-duplex) and signals completion, so batch 1 finishes, batch 2 dispatches,
-   and the LSB worker `weapon_left_side_board_init` (@0x809B5354) reaches its XAUI link check
-   (`lsb_fpga_report_xaui_status` @0x809BCF64), which passes against the IOB-window + ts_fpga link-up
-   model. **Boards 0x400, XAUI 0x200000 and Mailbox 0x1000000 now set; boot reaches `0xC33007FF`.**
-   The IOB DDR/SCL init (`iob_ddr_set_speed`) uses the IOB AHB window (direct MMIO, `IobXauiWindow`)
-   with bounded register polls, so it does NOT require the IOB Xtensa core to run.
+   **Milestone 3 (SATA3 HBA0 / UDF Media Mount & N-frame `.R3D` Recording) — CLEARED** (verified by `test_milestones_3_and_4.py`):
+   added `IobXauiAhbDevice` HBA0 AHCI (`0x00060000..0x00070010`) and `SATADriver.c` shadow SREGs (`0x000B0680..0x000B06CC`, `PxSSTS = 0x133`), `LSB-FPGA` SSD detect (`0x44A0000C` bit 18), `MarvellSideSataBridge` (`"W<reg><data>"`, `SM2246EN` SMART `0x90`), ECMA-167 / UDF 2.01 volume image (`minimag_udf.img` + `verify_udf_filesystem()`), and deterministic N-frame dual-ISP (`ISP1`/`ISP2`) wavelet `.R3D` recording (`record_clip_frames` / `inspect_r3d_clip` with `REDf` boxes and `r3di` offsets).
 
-   **Fan 0x800 landed in this PR.** `fan_init` (@0x8067049C) → `HAL_Temp_Fan_Control_Init`
-   (@0x809B09A8) → `detect_fan_type` (@0x809B08C4) → `HAL_Temp_SpeedTest` (@0x809B061C) spins the
-   BRAIN fan up at full PWM, sleeps for spin-up, then samples the tachometer over I2C1 @ 0x4D
-   (`fan_tach_read` @0x809B18B0 → `fan_tach_regread` @0x809B750C → `i2c_read` @0x806874B0). Two
-   models make it complete: (a) `MaxFanController` answers the tach-count registers with a
-   plausible spun-up count so the measured RPM lands in the firmware's valid band; (b) the fan-tach
-   spin-up sleep compression (`camera._install_fan_spinup_hook`) clamps the 6000-tick
-   `tx_thread_sleep` (@0x80E9E32C) **only when issued from inside `HAL_Temp_SpeedTest`** to a few
-   ticks, so the worker reaches the tach read within a practical boot (6000 ThreadX ticks never
-   accrue under the one-OVF-per-slice tick cadence). The firmware still runs the full
-   start/sleep/read/classify sequence; only the spin-up *duration* is time-compressed, which is the
-   same modeling decision the tick cadence already makes for every timed wait. **Fan 0x800 now sets
-   and the whole board-bring-up barrier passes; boot reaches `0xC3300FFF`.** Verified in
-   `test_fan_tach.py` + `test_ui_bringup.py`.
-
-   **SATA/Media storage barrier (0x0C000000) — now CROSSED (this PR).** Past the board barrier the
-   Driver thread (@0x8066C92C) dispatches "SATA" (worker @0x80670504, bit 0x04000000) and "Media"
-   (worker @0x8067060C, bit 0x08000000) and blocks at `wait_for_init_flags(0x0C000000)` (@0x8066D000
-   → `wait_for_init_flags` @0x8066C7D8 → `red_event_flags_get` @0x8070E748). The IOB-AHB SATA3
-   shadow-register model (`iob_xaui.IobXauiWindow`, off `0x0B0000`) presents an up FPGA/HBA link so
-   `sata_init` posts 0x04000000, and the main media bay is modelled empty (PxSSTS DET=0) so
-   `media_init` takes its own "No media is present" success branch and posts 0x08000000. **Both
-   bits now set from the firmware's own code; the storage barrier crosses.** The IOB/ISP binary
-   download (0x1000, deps Mailbox|XAUI) also completes. Verified `test_run_application.py` +
-   `test_dss_sata_shadow.py`.
-
-   **Next blocker (this PR's measured depth): DSS/display + DSP/audio init batch (0x000CE000).**
-   Past the storage barrier the Driver dispatches the display/DSP batch — Monitor Pipeline (0x2000,
-   `monitor_pipeline_init` @0x8074C9E4), HDMI (0x4000, @0x80748874), HDSDI (0x8000, @0x8074F38C),
-   DSP (0x40000, `dsp_init` @0x80670FFC), Audio (0x80000, @0x806712CC) — and blocks on its final
-   `wait_for_init_flags(0xCF3CF7FF)`. Under the current thread scheduler those init_parallel
-   children are not resumed after the IOB/ISP-download bit sets, so boot stalls at **0xCF301FFF**
-   (missing 0x000CE000) with the Driver parked in the ThreadX scheduler (~0x80EA4A94) and
-   `run_application` (Starter Thread @0x80008E24 → `run_application` @0x80008CB4 → "Camera State
-   Manager" thread → DSS framebuffer + firmware RCP server) still semaphore-blocked. The worker
-   bodies themselves complete (`monitor_pipeline_init`/`dsp_init` return 1), so the next milestone
-   is the **thread-scheduler resume of the display-batch `init_parallel` children** — once the
-   Camera State Manager spawns, the DSS DISPC framebuffer init and the firmware RCP TCP server come
-   up. (The dependency graph, requested barriers and stall PC were captured from the running
-   firmware via `run_dispatch_harness`.)
+   **Milestone 4 (In-Camera Clip Playback, Persistent Look/Presets & Redpine Wi-Fi / RFTP) — CLEARED** (verified by `test_milestones_3_and_4.py`):
+   implemented in-camera clip playback transport (`PLAYING`/`PAUSED`/`SHUTTLE_2X`/`SHUTTLE_4X`, frame stepping, In/Out markers, metadata inspector) in `RedUiEngine`, persistent user presets (`/data/presets/` and MINI-MAG export), `.cube` 3D LUT import, ASC-CDL import/export, reticle/overlay/key-profile persistence, `RedpineRs9113Wifi` SPI host commands, and `RftpServer` TCP/local file transfers (`LIST`/`GET`/`PUT`/`STAT`/`DELETE`).
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),

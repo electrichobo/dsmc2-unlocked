@@ -3,6 +3,7 @@ OMAP3630 / DM3725 Multi-Channel Buffered Serial Port (McBSP 2..5) Model.
 
 TRM Reference: SPRUGN4 Table 2-3 / Table 2-4 / Chapter 21 (McBSP), plus
 verified firmware offsets from dsmc2-sdk/ghidra/scripts/omap_regs.tsv:
+  - McBSP1 (L4-Core): 0x48074000 (IRQ 16) -- MCBSP1_SYSCONFIG (0x8C)
   - McBSP2 (L4-Per):  0x49022000 (IRQ 17) -- MCBSP2_DXR_REG (0x08)
   - McBSP3 (L4-Per):  0x49024000 (IRQ 22) -- MCBSP3_DXR_REG (0x08), MCBSP3_XCERA_REG (0x40)
   - McBSP4 (L4-Per):  0x49026000 (IRQ 23)
@@ -15,6 +16,7 @@ from emulator.core.bus import Device
 
 
 MCBSP_MAP = {
+    1: (0x48074000, 16),
     2: (0x49022000, 17),
     3: (0x49024000, 22),
     4: (0x49026000, 23),

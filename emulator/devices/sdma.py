@@ -5,7 +5,7 @@ Supports OCP reset handshake, global configuration, interrupt enable/status,
 and channel configuration registers.
 """
 
-from typing import Dict
+from typing import Any, Dict, Optional, Tuple
 from emulator.core.bus import Device
 
 
@@ -37,15 +37,13 @@ class OmapSdma(Device):
     CHANNEL_STRIDE = 0x60
     CHANNEL_BASE = 0x80
 
-    def __init__(self, intc=None, cpu=None, gpmc=None, mcspi=None):
+    def __init__(self, intc=None, cpu=None, gpmc=None, mcspi: Optional[Dict[int, Any]] = None):
         self.intc = intc
         self.cpu = cpu
         self.gpmc = gpmc  # GPMC model: NAND reads stream through its prefetch FIFO (not 0xFF fill)
         # McSPI controllers (port_id -> OmapMcspi). When an sDMA channel's endpoint is a McSPI
         # TX/RX FIFO register (peripheral-synchronised SPI DMA), the bytes are clocked through the
-        # McSPI<->coprocessor-target byte state machine instead of a mem->mem copy. Without this,
-        # the firmware's `_spi_write_and_read` (@0x806D588C) DMA never clocks the coprocessor
-        # frame, the TX/RX completion is bogus, and the board-init workers strand.
+        # McSPI<->coprocessor-target byte state machine instead of a mem->mem copy.
         self.mcspi = mcspi if mcspi is not None else {}
         self.spi_dma_transfers = 0  # instrumentation: SPI frames clocked over sDMA
         # Per-McSPI-channel MISO stash: the TX channel captures the MISO bytes of each full-duplex
@@ -204,7 +202,7 @@ class OmapSdma(Device):
                 if reg_offset == 0x00: # DMA4_CCR (Channel Control)
                     self.channels[ch_num][reg_offset] = val
                     if val & 0x80: # Channel Enable
-                        # Complete transfer instantly for NAND / memory DMA
+                        # Complete transfer instantly for McSPI / NAND / memory DMA
                         if self.cpu and hasattr(self.cpu, "mu"):
                             cssa = self.channels[ch_num].get(0x1C, 0) # DMA4_CSSA (source)
                             cdsa = self.channels[ch_num].get(0x20, 0) # DMA4_CDSA (dest)
@@ -215,16 +213,8 @@ class OmapSdma(Device):
                             total_bytes = (cen if cen else 1) * (cfn if cfn else 1) * elem_size
                             # Peripheral-synchronised SPI DMA: if either endpoint is a McSPI TX/RX
                             # FIFO register, clock the SPI frame through the McSPI target's
-                            # transceive byte state machine (the real McSPI DMA-request handshake)
-                            # instead of a mem->mem copy. This posts the transfer the firmware's
-                            # `_spi_write_and_read` DMA actually waits on, so the coprocessor
-                            # (IOB/ISP/LSB-FPGA) board-init SPI reads return real data.
+                            # transceive byte state machine instead of a mem->mem copy.
                             handled_spi = self._try_spi_over_sdma(ch_num, cssa, cdsa, total_bytes)
-                            # The NAND read DMA sources from the GPMC CS0 window (0x10000000) with the
-                            # prefetch engine armed. Only THAT transfer drains the GPMC FIFO; every
-                            # other sDMA channel (FileX/media/memory) is left to the model's own
-                            # handling so it is not misrouted to the NAND FIFO -- gating on
-                            # prefetch_armed alone starved the FileX init DMA and dropped flag 0x2.
                             is_nand_read = (
                                 self.gpmc is not None
                                 and self.gpmc.prefetch_armed

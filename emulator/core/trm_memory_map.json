@@ -115,6 +115,13 @@
       "trm_section": "Table 2-3 / Chapter 18 (High-Speed I2C2 Controller, IRQ 57)"
     },
     {
+      "name": "MCBSP1",
+      "base": "0x48074000",
+      "size": "0x00001000",
+      "category": "L4_CORE",
+      "trm_section": "Table 2-3 / Chapter 21 (McBSP1 Controller, IRQ 16)"
+    },
+    {
       "name": "GPTIMER10",
       "base": "0x48086000",
       "size": "0x00001000",
@@ -127,6 +134,13 @@
       "size": "0x00001000",
       "category": "L4_CORE",
       "trm_section": "Table 2-3 / Chapter 16 (General-Purpose Timer 11, IRQ 47)"
+    },
+    {
+      "name": "MAILBOX",
+      "base": "0x48094000",
+      "size": "0x00001000",
+      "category": "L4_CORE",
+      "trm_section": "Table 2-3 / Chapter 13 (Inter-Processor Mailbox Controller, IRQ 26)"
     },
     {
       "name": "MCBSP5",
@@ -351,6 +365,20 @@
       "size": "0x00001000",
       "category": "COPROCESSOR_APERTURE",
       "trm_section": "DSMC2 IOB1 Shared Mailbox Doorbell Bridge"
+    },
+    {
+      "name": "IVA2_MEM",
+      "base": "0x5C000000",
+      "size": "0x01000000",
+      "category": "IVA2_SUBSYSTEM",
+      "trm_section": "Table 2-1 / Chapter 5 (IVA2.2 Subsystem L2/L1P/L1D Memory Space)"
+    },
+    {
+      "name": "IVA2_MMU",
+      "base": "0x5D000000",
+      "size": "0x00001000",
+      "category": "IVA2_SUBSYSTEM",
+      "trm_section": "Table 2-1 / Chapter 5 (IVA2.2 Subsystem MMU Controller)"
     },
     {
       "name": "SDRC",

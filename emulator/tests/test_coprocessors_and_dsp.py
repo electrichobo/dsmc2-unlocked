@@ -10,9 +10,16 @@ import threading
 import pytest
 
 from emulator.camera import Dsmc2Camera
-from emulator.coprocessors.c2c import CoprocessorTransport
+from emulator.coprocessors.c2c import CoprocessorTransport, IobXauiAhbDevice
 from emulator.coprocessors.xtensa import XtensaCore, Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
-from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
+from emulator.coprocessors.dsp import (
+    TiC64xDsp,
+    DspLinkIpc,
+    CImagingServer,
+    RAudioServer,
+    OmapMailbox,
+    OmapIva2Mmu,
+)
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
 from conftest import requires_firmware
@@ -166,6 +173,185 @@ def test_coprocessor_spi_register_frame():
 
     # GPMC IOB mailbox is a SEPARATE device at 0xA5800000, not SPI.
     assert c2c.mailbox.BASE_ADDR == 0xA5800000
+
+
+def test_mcspi_sdma_tx_rx_and_chctrl_subtransfers(camera):
+    """Verify OMAP sDMA McSPI TX/RX byte-frame transfers and CHCTRL sub-transfer phase preservation."""
+    mcspi1 = camera.mcspi[1]
+    ch2_base = mcspi1.base_addr + mcspi1.CH_BASE + (2 * mcspi1.CH_STRIDE)
+    ch0_dma = 0x48056000 + 0x80  # DMA4 channel 0 (TX)
+    ch1_dma = 0x48056000 + 0xE0  # DMA4 channel 1 (RX)
+
+    tx_cmd_buf = 0x40201000
+    tx_zero_buf = 0x40201100
+    rx_buf = 0x40201200
+    camera.bus.write_mem(tx_zero_buf, b"\x00")
+
+    # Configure McSPI1 CH2 for 8-bit TX+RX (WL=7, TRM=0).
+    camera.bus.write_u32(ch2_base + 0x00, 7 << 7)
+
+    for reg_addr, expected in (
+        (0xE0000904, 0x00030031),
+        (0xE0000908, 0x00000014),
+        (0x40010008, 0x000007E0),
+    ):
+        camera.c2c.spi_targets["ts_fpga"].reset_frame()
+        camera.bus.write_mem(tx_cmd_buf, bytes([0x01]) + reg_addr.to_bytes(4, "little"))
+
+        # Sub-transfer 1: TX 5-byte READ command (linear src_amode=1), leaving MISO 0x00s in RX FIFO.
+        camera.bus.write_u32(ch2_base + 0x08, 1)  # CHCTRL EN=1
+        camera.bus.write_u32(ch0_dma + 0x10, 0)  # CSDP: 8-bit element
+        camera.bus.write_u32(ch0_dma + 0x14, 5)  # CEN
+        camera.bus.write_u32(ch0_dma + 0x18, 1)  # CFN
+        camera.bus.write_u32(ch0_dma + 0x1C, tx_cmd_buf)
+        camera.bus.write_u32(ch0_dma + 0x20, ch2_base + 0x0C)  # MCSPI_TX2
+        camera.bus.write_u32(ch0_dma + 0x00, (0x01 << 12) | 0x80)  # CCR EN=1, src_amode=1
+
+        # Toggle CHCTRL EN (matches FUN_806D588C between sub-transfers): flushes RX FIFO, keeps frame state.
+        camera.bus.write_u32(ch2_base + 0x08, 0)
+        camera.bus.write_u32(ch2_base + 0x08, 1)
+
+        # Sub-transfer 2: poll ACK byte 0x1F (constant src_amode=0 zero TX + 1B RX DMA).
+        camera.bus.write_u32(ch0_dma + 0x14, 1)
+        camera.bus.write_u32(ch0_dma + 0x1C, tx_zero_buf)
+        camera.bus.write_u32(ch0_dma + 0x20, ch2_base + 0x0C)
+        camera.bus.write_u32(ch0_dma + 0x00, 0x80)  # constant src_amode=0
+
+        camera.bus.write_u32(ch1_dma + 0x10, 0)
+        camera.bus.write_u32(ch1_dma + 0x14, 1)
+        camera.bus.write_u32(ch1_dma + 0x18, 1)
+        camera.bus.write_u32(ch1_dma + 0x1C, ch2_base + 0x10)  # MCSPI_RX2
+        camera.bus.write_u32(ch1_dma + 0x20, rx_buf)
+        camera.bus.write_u32(ch1_dma + 0x00, 0x80)
+        assert camera.bus.read_mem(rx_buf, 1)[0] == 0x1F
+
+        camera.bus.write_u32(ch2_base + 0x08, 0)
+        camera.bus.write_u32(ch2_base + 0x08, 1)
+
+        # Sub-transfer 3: read 4-byte little-endian register value.
+        camera.bus.write_u32(ch0_dma + 0x14, 4)
+        camera.bus.write_u32(ch0_dma + 0x1C, tx_zero_buf)
+        camera.bus.write_u32(ch0_dma + 0x20, ch2_base + 0x0C)
+        camera.bus.write_u32(ch0_dma + 0x00, 0x80)
+
+        camera.bus.write_u32(ch1_dma + 0x14, 4)
+        camera.bus.write_u32(ch1_dma + 0x1C, ch2_base + 0x10)
+        camera.bus.write_u32(ch1_dma + 0x20, rx_buf + 4)
+        camera.bus.write_u32(ch1_dma + 0x00, 0x80)
+        assert int.from_bytes(camera.bus.read_mem(rx_buf + 4, 4), "little") == expected
+
+
+def test_cs_mux_spi_target_gpio_routing(camera):
+    """Verify GPIO 76/77 CS-mux routes McSPI1 CH0 frames between ts_isp1 and ts_isp2."""
+    mcspi1 = camera.mcspi[1]
+    ch0_base = mcspi1.base_addr + mcspi1.CH_BASE
+    gpio3_dataout = 0x49052000 + 0x3C
+
+    # 8-bit word length on McSPI1 CH0.
+    camera.bus.write_u32(ch0_base + 0x00, 7 << 7)
+
+    # GPIO 76=0, GPIO 77=1 (bank 3 pins 12, 13) -> ts_isp1 (target 7).
+    camera.bus.write_u32(gpio3_dataout, 1 << 13)
+    for b in bytes([0x81]) + (0x12340000).to_bytes(4, "little") + (0x11223344).to_bytes(4, "little"):
+        camera.bus.write_u32(ch0_base + 0x0C, b)
+    assert camera.c2c.spi_targets["ts_isp1"].reg_get(0x12340000) == 0x11223344
+    assert camera.c2c.spi_targets["ts_isp2"].reg_get(0x12340000) != 0x11223344
+
+    # GPIO 76=1, GPIO 77=0 -> ts_isp2 (target 8).
+    camera.bus.write_u32(gpio3_dataout, 1 << 12)
+    for b in bytes([0x81]) + (0x12340004).to_bytes(4, "little") + (0x55667788).to_bytes(4, "little"):
+        camera.bus.write_u32(ch0_base + 0x0C, b)
+    assert camera.c2c.spi_targets["ts_isp2"].reg_get(0x12340004) == 0x55667788
+    assert camera.c2c.spi_targets["ts_isp1"].reg_get(0x12340004) != 0x55667788
+
+
+def test_iob_xaui_ahb_device_window(camera):
+    """Verify IobXauiAhbDevice (0x1C000000..0x1FFFFFFF) serves XAUI link and IOB status handshake."""
+    assert camera.bus.read_u32(0x1C02002C) == 0x03FFC02F
+    assert camera.bus.read_u32(0x1C020010) == 0x20000000
+    assert (camera.bus.read_u32(0x1C020248) & (1 << 20)) != 0
+    assert camera.bus.read_u32(0x1C020068) == 0
+    assert camera.bus.read_u32(0x1C0200BC) == 0
+
+    # +0xB0020 returns ready status bit 2 (0x4)
+    assert camera.bus.read_u32(0x1C0B0020) == 0x00000004
+    # +0xB0000..+0xB0FFF toggles 0xFFFFFFFF / 0x00000000 for wait_for_iob_status_set/clear
+    assert camera.bus.read_u32(0x1C0B0018) == 0xFFFFFFFF
+    assert camera.bus.read_u32(0x1C0B0018) == 0x00000000
+    assert camera.bus.read_u32(0x1C0B001C) == 0xFFFFFFFF
+    assert camera.bus.read_u32(0x1C0B001C) == 0x00000000
+
+    # With XAUI link down, IOB status window reports 0
+    down_dev = IobXauiAhbDevice(xaui_link_up=False)
+    assert down_dev.read(0x000B0018, 4) == 0x00000000
+
+
+def test_omap_mailbox_and_iva2_mmu_soft_reset(camera):
+    """Verify OmapMailbox (0x48094000) and OmapIva2Mmu (0x5D000000) soft-reset & TLB/FIFO paths."""
+    # OMAP3630 Inter-Processor Mailbox (0x48094000)
+    mb_base = OmapMailbox.BASE_ADDR
+    assert camera.bus.read_u32(mb_base + OmapMailbox.REG_SYSSTATUS) & 0x1 == 0x1
+    camera.bus.write_u32(mb_base + OmapMailbox.REG_SYSCONFIG, 0x2)  # SOFTRESET
+    assert camera.bus.read_u32(mb_base + OmapMailbox.REG_SYSSTATUS) & 0x1 == 0x1
+    camera.bus.write_u32(mb_base + 0x40, 0xCAFEBABE)
+    assert camera.bus.read_u32(mb_base + 0xC0) == 1
+    assert camera.bus.read_u32(mb_base + 0x40) == 0xCAFEBABE
+
+    # IVA2.2 MMU (0x5D000000) + IVA2.2 SRAM/IRAM window (0x5C000000..0x5CFFFFFF)
+    mmu_base = OmapIva2Mmu.BASE_ADDR
+    camera.bus.write_u32(mmu_base + OmapIva2Mmu.REG_SYSCONFIG, 0x2)  # SOFTRESET
+    assert camera.bus.read_u32(mmu_base + OmapIva2Mmu.REG_SYSSTATUS) & 0x1 == 0x1
+    camera.bus.write_u32(mmu_base + OmapIva2Mmu.REG_TTB, 0x89E00000)
+    assert camera.bus.read_u32(mmu_base + OmapIva2Mmu.REG_TTB) == 0x89E00000
+    camera.bus.write_u32(0x5C7F8000, 0x12345678)
+    assert camera.bus.read_u32(0x5C7F8000) == 0x12345678
+
+
+def test_omap_i2c_multi_chunk_master_transmit(camera):
+    """Verify OmapI2c completes >64-byte Master Transmit via clamped BUF/BUFSTAT and XRDY chunks."""
+    i2c3 = camera.i2c[3]
+    captured = bytearray()
+
+    class BulkSink:
+        def __init__(self, address: int):
+            self.address = address
+
+        def read(self, reg_addr: int, length: int) -> bytes:
+            return b"\x00" * length
+
+        def write(self, reg_addr: int, data: bytes) -> bool:
+            captured.append(reg_addr)
+            captured.extend(data)
+            return True
+
+    i2c3.attach_slave(BulkSink(0x3B))
+    total_len = 130  # > 64B so tx_stat clamps to 0x3F initially
+    base = 0x48060000
+    camera.bus.write_u32(base + 0x2C, 0x3B)        # SA
+    camera.bus.write_u32(base + 0x18, total_len)   # CNT
+    camera.bus.write_u32(base + 0x14, 0x0404)      # BUF
+    camera.bus.write_u32(base + 0x04, 0x4017)      # IE: XDR|XRDY|ARDY|NACK|AL
+    camera.bus.write_u32(base + 0x24, 0x8603)      # CON: EN|MST|TRX|STP|STT
+
+    # Initially tx_remaining=130 -> tx_stat clamped to 0x3F (63)
+    assert (camera.bus.read_u32(base + 0x40) & 0x3F) == 0x3F
+    assert (camera.bus.read_u32(base + 0x08) & 0x10) != 0  # XRDY asserted
+
+    payload = bytes((i & 0xFF) for i in range(total_len))
+    idx = 0
+    while idx < total_len:
+        stat = camera.bus.read_u32(base + 0x08)
+        assert stat & 0x10
+        chunk = min(64, total_len - idx)
+        for _ in range(chunk):
+            camera.bus.write_u32(base + 0x1C, payload[idx])
+            idx += 1
+        camera.bus.write_u32(base + 0x08, 0x10)  # Clear XRDY; re-asserts until cnt reached
+
+    stat = camera.bus.read_u32(base + 0x08)
+    assert (stat & 0x04) != 0  # ARDY set on completion
+    assert (stat & 0x10) == 0  # XRDY cleared
+    assert bytes(captured) == payload
 
 
 def test_dsp_coff_parser_and_dsplink(workspace_root):

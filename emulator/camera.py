@@ -49,13 +49,21 @@ from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.devices.rig_manager import RigManager, ConnectorPosition
 from emulator.coprocessors.c2c import CoprocessorTransport, IobDoorbellDevice, IobMailboxDevice
 from emulator.coprocessors.xtensa import Iob0Coprocessor, Iob1Coprocessor, IspCoprocessor
-from emulator.coprocessors.dsp import TiC64xDsp, DspLinkIpc, CImagingServer, RAudioServer
+from emulator.coprocessors.dsp import (
+    TiC64xDsp,
+    DspLinkIpc,
+    CImagingServer,
+    RAudioServer,
+    OmapMailbox,
+    OmapIva2Mmu,
+)
 from emulator.devices.gpio import OmapGpio, GPIO_MAP
 from emulator.devices.dss import OmapDss
 from emulator.storage.vfs import VirtualFileSystem
 from emulator.storage.r3d_recorder import R3dClipRecorder
 from emulator.rcp.protocol import RcpProtocol
 from emulator.rcp.server import RcpServer
+from emulator.rcp.rftp import RedpineRs9113Wifi, RftpServer
 from emulator.rcp.automation import RcpScriptEngine, RcpScriptStep, MultiCameraNetwork
 from emulator.devices.lens_mount import LensMount
 from emulator.core.snapshot import SnapshotManager
@@ -123,58 +131,43 @@ class Dsmc2Camera:
     # milestone). 0x7 = 0x1 | 0x2 | 0x4.
     LATE_INIT_FLAGS_TARGET = 0x7
 
-    # Milestone 2 ("UI/driver bring-up"): after the NAND-FS mount (0x8) the Driver thread runs a
+    # Milestone 1 ("UI/driver bring-up"): after the NAND-FS mount (0x8) the Driver thread runs a
     # second init_parallel cascade and blocks on the board-bring-up barrier
     # ``wait_for_init_flags(0x03300FF7)``. Bits added past the FS mount (sdk
     # findings/boot/BOOT_FLOW_MAP.md): UART 0x40, Load System Config 0x80, HAL Power 0x100,
     # Power 0x200, Boards 0x400, Fan 0x800, ASIC Memory Map 0x100000, XAUI 0x200000,
     # Mailbox 0x1000000, HAL SYS_ID 0x2000000, HW Cap 0x40000000, Module Cap 0x80000000.
-    # With the McSPI1-over-sDMA coprocessor transport modelled (the peripheral-synchronised SPI
-    # DMA, sdma.py `_try_spi_over_sdma`), the async board workers that ``weapon_boards_init``
-    # (@0x809B378C) dispatches run to completion: batch 1 (IOB/ISP-pre) no longer strands on its
-    # SPI reads, so batch 2 dispatches, the LSB worker ``weapon_left_side_board_init`` (@0x809B5354)
-    # runs, its XAUI link check (``lsb_fpga_report_xaui_status`` @0x809BCF64 -> IOB AHB window +
-    # ``fpga_read`` over ts_fpga) passes against the #71 link-up model, and the Boards/XAUI/Mailbox
-    # bits all set. With the BRAIN fan controller (MaxFanController @ I2C1 0x4D) and the fan-tach
-    # spin-up sleep compression now modelled, the Fan worker ``fan_init`` (@0x8067049C) ->
-    # ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) -> ``detect_fan_type`` (@0x809B08C4) ->
-    # ``HAL_Temp_SpeedTest`` (@0x809B061C) measures a valid fan RPM and the Fan bit 0x800 sets too.
-    # Boot now crosses the whole board-bring-up barrier: init event flags reach **0xC3300FFF**.
-    # ``boot_to_ui_bringup`` drives to this barrier (now PASSED) and reports it.
+    # With peripheral-synchronised McSPI1-over-sDMA, GPIO-76/77 CS-mux routing, seeded LSB-FPGA
+    # status/version registers on McSPI1 CH2, ``MaxFanController`` @ I2C1 0x4D + fan-tach spin-up
+    # sleep compression, and the IOB/XAUI AHB window at 0x1C000000 (``IobXauiAhbDevice`` backed by
+    # ``IobXauiWindow``), ``weapon_boards_init`` (@0x809B378C), ``weapon_left_side_board_init``
+    # (@0x809B5354), and ``fan_init`` (@0x8067049C) all complete: all four UI_BRINGUP_BOARD_BITS
+    # (Boards 0x400 | Fan 0x800 | XAUI 0x200000 | Mailbox 0x1000000) set, satisfying
+    # ``UI_BRINGUP_FLAGS_BARRIER`` at 0xC3300FFF and populating ``hw_cap`` (@0x815811F4) to
+    # 0x00041182.
     UI_BRINGUP_FLAGS_BARRIER = 0x03300FF7
     UI_BRINGUP_FLAGS_REACHABLE = 0xC3300FFF   # board barrier now fully satisfied (Fan 0x800 set)
     UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (board-dependent bits)
 
-    # Milestone 3 ("run_application / storage bring-up"): once the board barrier passes, the Driver
-    # thread (@0x8066C92C) dispatches two more ``init_parallel`` stages -- "SATA" (worker
-    # @0x80670504, completion bit 0x04000000) and "Media" (worker @0x8067060C, completion bit
-    # 0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)`` (@0x8066D000 ->
-    # ``wait_for_init_flags`` @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) waiting for both.
-    #
-    # These now COMPLETE from the firmware's own code: the IOB-AHB SATA3 shadow-register block
-    # (``IobXauiWindow``, devices/iob_xaui.py) presents an up FPGA/HBA link so ``sata_init`` posts
-    # 0x04000000, and models the main media bay EMPTY (PxSSTS DET=0) so ``media_init`` takes its
-    # "No media is present" branch (@0x8067060C log 0xa18) -- which RETURNS SUCCESS and posts
-    # 0x08000000. The storage barrier 0x0C000000 is crossed without emulating the AHCI
-    # IDENTIFY/command engine.
-    #
-    # Past the storage barrier the Driver dispatches the IOB/ISP binary download (0x1000; deps
-    # Mailbox|XAUI, met) which also completes, then the DSS/display + DSP/audio init batch:
-    # Monitor Pipeline (0x2000, @0x8074C9E4) -> HDMI (0x4000) / HDSDI (0x8000), and DSP (0x40000,
-    # @0x80670FFC) -> Audio (0x80000). The run_application Starter Thread (thread_0_entry
-    # @0x80008E24 -> run_application @0x80008CB4 -> "Camera State Manager" thread) is released only
-    # when the Driver's final ``wait_for_init_flags(0xCF3CF7FF)`` is satisfied. Under the current
-    # thread-scheduler model those display-batch init_parallel children are not resumed after the
-    # IOB/ISP-download bit sets, so boot stalls at 0xCF301FFF (missing 0x000CE000) with the Driver
-    # parked in the ThreadX scheduler (_tx_thread_schedule region ~0x80EA4A94) -- that DSS/DSP
-    # display-init batch dispatch is the next depth milestone. ``boot_to_run_application`` drives to
-    # the storage barrier (now passed) and reports the stall + the pinned next blocker.
+    # Storage-init stage constants (``boot_to_run_application`` probe).
     RUN_APP_FLAGS_BARRIER = 0x0C000000        # SATA 0x04000000 | Media 0x08000000
     RUN_APP_SATA_BIT = 0x04000000
     RUN_APP_MEDIA_BIT = 0x08000000
-    # Post-storage DSS/display + DSP/audio init batch (the new blocker past run_application).
     DSS_DISPLAY_FLAGS = 0x000CE000            # MonitorPipeline|HDMI|HDSDI|DSP|Audio
     DSS_IOB_ISP_DOWNLOAD_BIT = 0x00001000     # IOB/ISP binary download (deps met, completes)
+
+    # Milestone 2 ("application running"): with ``iob_status_handshake_enabled=True`` and finer
+    # ThreadX timer cadence (``slice_size=12_000``), the Driver thread drives SATA (0x4000000),
+    # Media (0x8000000), IOB/ISP Binary Download (0x1000), Monitor Pipeline (0x2000), HDMI
+    # (0x4000), HDSDI (0x8000), Monitor Splash Screen, DSP (0x40000), Contiguous Media Space
+    # (0x10000000), and Audio (0x80000) to satisfy ``wait_for_init_flags(0xCF3CF7FF)`` (@0x8066D360),
+    # runs Cal Load (0x800000) -> 0xDFBCFFFF, and puts semaphore 0x81E53618 (@0x8066D3C8) to release
+    # Starter Thread (``thread_0_entry`` @0x80008E24 -> ``run_application`` @0x80008CB4), which
+    # creates ``APP_SEMAPHORE`` (@0x814C6D1C) and spawns ``Camera State Manager`` (@0x8048D534).
+    APPLICATION_FLAGS_BARRIER = 0xCF3CF7FF
+    APPLICATION_FLAGS_REACHABLE = 0xDFBCFFFF
+    APP_SEMAPHORE_ADDR = 0x814C6D1C
+    SEMAPHORE_MAGIC = 0x53454D41  # 'SEMA'
 
     def __init__(self, workspace_root: str, addr_map: Optional[AddrMap] = None):
         self.workspace_root = os.path.abspath(workspace_root)
@@ -193,9 +186,11 @@ class Dsmc2Camera:
         self.vfs = VirtualFileSystem(self.firmware_slot_dir, self.persistent_dir)
         self.env = self.vfs.env
 
-        # 3. RCP Protocol, Server, Scripting & Multi-Camera Network
+        # 3. RCP Protocol, Server, Scripting, Wi-Fi/RFTP & Multi-Camera Network
         self.rcp = RcpProtocol(camera=self)
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
+        self.wifi = RedpineRs9113Wifi()
+        self.rftp = RftpServer(self)
         self.rcp_script_engine = RcpScriptEngine()
         self.multicam_network = MultiCameraNetwork(self)
 
@@ -476,6 +471,7 @@ class Dsmc2Camera:
         self.i2c[2].attach_slave(self.focaltech)
         self.i2c[2].attach_slave(FixedIdI2cDevice(0x4C, "LSB_FPGA_TEMP", 0x55))
         self.i2c[2].attach_slave(FixedIdI2cDevice(0x67, "LSB_VID_CLK", 0xC0))
+        self.i2c[2].attach_slave(EdidEeprom(0x50))
 
         # I2C3: Atmel maXTouch touch controller (0x4B), EDID EEPROM (0x50), PMIC sub-bus,
         #       and live single-head bus-2 scan targets (0x70 IOB UCD9090, 0x65 UCD90160,
@@ -516,36 +512,17 @@ class Dsmc2Camera:
         self.gpmc = OmapGpmc(intc=self.intc)
         self.bus.register_device(OmapGpmc.BASE_ADDR, OmapGpmc.SIZE, self.gpmc)
 
-        # GPMC CS1 (FPGA Board Space @ 0x18000000) and CS2 (FPGA Aperture @ 0x1C000000)
+        # GPMC CS1 (FPGA Board Space @ 0x18000000) and CS2 (FPGA Aperture @ 0x1C000000..0x1FFFFFFF)
         self.cpu.uc.mem_map(0x18000000, 0x10000)
         self.bus.add_ram_region(0x18000000, 0x10000)
-        self.cpu.uc.mem_map(0x1C000000, 0x100000)
-        self.bus.add_ram_region(0x1C000000, 0x100000)
-        # IOB XAUI AHB aperture: present an UP IOB<->LSB-FPGA XAUI link on the status words the
-        # firmware polls via FUN_80727028 (`*((addr & 0x3FFFFFF) | 0x1C000000)`), so the real
-        # weapon_left_side_board_init XAUI bring-up completes. The window is below the bus
-        # device-hook range (0x40000000+), so this is a dedicated Unicorn MEM_READ hook; writes
-        # (PHY config / latch clears) fall through to RAM. See devices/iob_xaui.py.
-        #
-        # The same window carries the SATA3 shadow-register block (base 0x800B0000). With
-        # ``media_present=False`` the main media bay is modelled EMPTY: the SATA3 FPGA link / HBA
-        # come up (so sata_init @0x80670504 posts bit 0x04000000) while PxSSTS reports DET=0, so
-        # media_init @0x8067060C takes its own "No media is present in %s" branch (log @0xa18) --
-        # which RETURNS SUCCESS and posts bit 0x08000000. Both storage-init bits set from the
-        # firmware's own code paths (a card-less camera is a fully valid boot); this releases the
-        # run_application Starter Thread WITHOUT emulating the AHCI IDENTIFY/command engine that an
-        # attached SSD's SATA_DevAttach (@0x806985E4) would require. See devices/iob_xaui.py.
+        self.cpu.uc.mem_map(0x1C000000, 0x04000000)
+        # IobXauiWindow state tracker coupled to c2c.iob_ahb (0x1C000000..0x1FFFFFFF via SystemBus).
         self.iob_xaui = IobXauiWindow(link_up=True, media_present=False)
-        self._install_iob_xaui_hook()
 
         # Fan tach spin-up sleep compression (HAL_Temp_SpeedTest). The one-element list tracks
         # whether the CPU is inside HAL_Temp_SpeedTest; it must exist before the hook installs.
         self._fan_spinup_active = [False]
         self._install_fan_spinup_hook()
-
-        # 10b. System DMA (sDMA Controller @ 0x48056000)
-        self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc)
-        self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
 
         # 10c. Multichannel SPI Controllers (McSPI 1..4)
         self.mcspi: Dict[int, OmapMcspi] = {}
@@ -554,9 +531,9 @@ class Dsmc2Camera:
             self.mcspi[port_id] = spi
             self.bus.register_device(base, 0x1000, spi)
 
-        # Bind the McSPI controllers to the sDMA so a channel wired to a McSPI TX/RX FIFO
-        # (peripheral-synchronised SPI DMA) clocks the SPI frame through the coprocessor target
-        # (the firmware's `_spi_write_and_read` DMA transport), not a mem->mem copy.
+        # 10b. System DMA (sDMA Controller @ 0x48056000)
+        self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc, mcspi=self.mcspi)
+        self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
         self.sdma.bind_mcspi(self.mcspi)
 
         # 10d. Multi-Channel Buffered Serial Ports (McBSP 2..5), HDQ / 1-Wire & OMAP Camera ISP
@@ -575,9 +552,13 @@ class Dsmc2Camera:
         # 11. Coprocessor transport (FW-proven). Config registers move over SPI as a byte
         # frame [0x81/0x01][addr u32][data u32] + ACK 0x1F (see coprocessors/c2c.py), bound
         # to the McSPI controllers (ts_isp1/ts_isp2/ts_iob0/ts_iob1/ts_fpga). The GPMC IOB
-        # AHB mailbox @0xA5800000 is a SEPARATE device. Note: 0x49000000 is L4-PER AP.
-        self.c2c = CoprocessorTransport(intc=self.intc, mcspi=self.mcspi)
+        # AHB mailbox @0xA5800000 and GPMC CS2 XAUI window @0x1C000000 are separate devices.
+        # Note: 0x49000000 is L4-PER AP.
+        self.c2c = CoprocessorTransport(intc=self.intc, mcspi=self.mcspi, gpio=self.gpio)
+        self.c2c.iob_ahb.xaui_window = self.iob_xaui
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
         self.bus.register_device(IobMailboxDevice.BASE_ADDR, IobMailboxDevice.SIZE, self.c2c.mailbox)
+        self.bus.register_device(self.c2c.iob_ahb.BASE_ADDR, self.c2c.iob_ahb.SIZE, self.c2c.iob_ahb)
 
         # Xtensa coprocessor cores (asserted behavioural models; see FIDELITY_MATRIX).
         self.iob0 = Iob0Coprocessor()
@@ -609,11 +590,15 @@ class Dsmc2Camera:
                 self.iob0.hdmi_connected = high
         self.gpio[5].on_pin_changed = _on_gpio5_pin_changed
 
-        # 12. TI TMS320C64x+ DSP Subsystem & Servers
+        # 12. TI TMS320C64x+ DSP Subsystem, Mailbox, IVA2.2 MMU & Servers
         self.dsp = TiC64xDsp()
         self.dsplink = DspLinkIpc(self.dsp)
         self.imaging_server = CImagingServer(self.dsplink)
         self.audio_server = RAudioServer(self.dsplink)
+        self.omap_mailbox = OmapMailbox(intc=self.intc)
+        self.bus.register_device(OmapMailbox.BASE_ADDR, OmapMailbox.SIZE, self.omap_mailbox)
+        self.iva2_mmu = OmapIva2Mmu()
+        self.bus.register_device(OmapIva2Mmu.BASE_ADDR, OmapIva2Mmu.SIZE, self.iva2_mmu)
 
         # 13. Accessory Bus Subsystem
         self.accessory_bus = AccessoryBus(camera=self)
@@ -881,40 +866,21 @@ class Dsmc2Camera:
         slice_size: int = 200_000,
         _already_booted: bool = False,
     ) -> Dict[str, Any]:
-        """Drive boot past the NAND-FS mount toward UI/driver bring-up and report the next blocker.
+        """Drive boot past the NAND-FS mount and clear the board-bring-up barrier.
 
         After ``boot_to_late_init`` reaches the filesystem mount (init event flags
         ``0xC21000FF``: RTC|FileX|CRYPT|NAND + the HW/Module-cap cascade), the Driver thread runs a
         second ``init_parallel`` cascade and blocks on the board-bring-up barrier
         ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``).
 
-        With the peripheral-synchronised **McSPI1-over-sDMA** coprocessor transport modelled
-        (``sdma.py``: a channel wired to a McSPI TX/RX FIFO clocks the SPI frame through the
-        ``CoprocessorSpiTarget`` byte state machine, full-duplex, instead of a mem->mem copy), the
-        six async board workers ``weapon_boards_init`` (@0x809B378C) dispatches run to completion:
-        batch 1 (IOB/ISP-pre) no longer strands on its SPI reads, batch 2 dispatches, the LSB worker
-        ``weapon_left_side_board_init`` (@0x809B5354) runs, and its XAUI link check
-        (``lsb_fpga_report_xaui_status`` @0x809BCF64 -> IOB AHB window @0x1C000000 +
-        ``fpga_read``/ts_fpga) passes against the installed link-up model. The Boards 0x400,
-        XAUI 0x200000 and Mailbox 0x1000000 bits all set; boot reaches ``0xC33007FF``.
-
-        The last board-dependent bit, **Fan 0x800**, is now modelled too: ``fan_init``
-        (@0x8067049C) -> ``HAL_Temp_Fan_Control_Init`` (@0x809B09A8) -> ``detect_fan_type``
-        (@0x809B08C4) -> ``HAL_Temp_SpeedTest`` (@0x809B061C) spins the BRAIN fan up and samples
-        its tachometer over I2C1 @ 0x4D (``MaxFanController``); the fan-tach spin-up sleep is
-        compressed (``_install_fan_spinup_hook``) so the worker proceeds to the tach read, measures
-        a valid RPM, and sets Fan 0x800. The board-bring-up barrier therefore now PASSES and boot
-        reaches init event flags **0xC3300FFF**.
-
-        Past the barrier the Driver thread dispatches the "SATA" / "Media" ``init_parallel`` stages
-        and blocks on ``wait_for_init_flags(0x0C000000)`` (@0x8066D000); that storage bring-up is the
-        next depth milestone (see ``boot_to_run_application``). ``run_application`` (Camera State
-        Manager, UI, DSS framebuffer, firmware RCP server) is released only after the Driver cascade
-        completes.
-
-        This method is a deterministic depth probe: it boots to the barrier and returns the exact
-        reached flags, the blocked board bits, and the identified blocker, without faking anything.
+        With peripheral-synchronised McSPI1-over-sDMA, GPIO-76/77 CS-mux routing, seeded LSB-FPGA
+        status/version regs on McSPI1 CH2, ``MaxFanController`` @ I2C1 0x4D with fan spin-up
+        sleep compression, and the IOB/XAUI AHB window at 0x1C000000, all four board-dependent bits
+        (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) set, reaching ``0xC3300FFF``.
         """
+        self.c2c.iob_ahb.iob_status_handshake_enabled = False
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
         if not _already_booted:
             # boot_to_late_init already drives through the FS mount to ~0xC21000FF.
             self.boot_to_late_init()
@@ -988,31 +954,13 @@ class Dsmc2Camera:
         max_instructions: int = 220_000_000,
         slice_size: int = 200_000,
     ) -> Dict[str, Any]:
-        """Drive boot across the storage-init barrier toward ``run_application`` and pin the blocker.
-
-        ``boot_to_ui_bringup`` crosses the board-bring-up barrier (init event flags ``0xC3300FFF``;
-        the Fan 0x800 bit sets via the ``MaxFanController`` tach model + spin-up sleep compression).
-        This method continues from there: the Driver thread (@0x8066C92C) dispatches two further
-        ``init_parallel`` stages -- "SATA" (worker @0x80670504, completion bit ``RUN_APP_SATA_BIT``
-        0x04000000) and "Media" (worker @0x8067060C, completion bit ``RUN_APP_MEDIA_BIT``
-        0x08000000) -- then blocks at ``wait_for_init_flags(0x0C000000)`` (@0x8066D000 ->
-        @0x8066C7D8 -> ``red_event_flags_get`` @0x8070E748) for both.
-
-        Both now complete from the firmware's own code (the IOB-AHB SATA3 shadow-register block in
-        ``IobXauiWindow`` presents an up FPGA/HBA link so ``sata_init`` posts 0x04000000, and the
-        main media bay is modelled empty so ``media_init`` takes its "No media is present" success
-        branch and posts 0x08000000), so the storage barrier 0x0C000000 is crossed. The method then
-        keeps driving: the IOB/ISP binary-download stage (0x1000) also completes, but the DSS/
-        display + DSP/audio init batch (``DSS_DISPLAY_FLAGS`` 0x000CE000 -- Monitor Pipeline 0x2000
-        @0x8074C9E4, HDMI 0x4000, HDSDI 0x8000, DSP 0x40000 @0x80670FFC, Audio 0x80000) is not
-        dispatched: those init_parallel children are not resumed by the current thread scheduler,
-        so boot stalls at 0xCF301FFF and the run_application ``Starter Thread`` (thread_0_entry
-        @0x80008E24 -> run_application @0x80008CB4 -> "Camera State Manager") stays semaphore-blocked
-        in the ThreadX scheduler. This is a deterministic probe: it reports the reached flags, the
-        unmet display/DSP bits, and the pinned blocker without faking anything.
-        """
+        """Drive boot across the storage-init barrier toward ``run_application`` and pin the blocker."""
         # Reach the board barrier first (Fan included) via the existing depth probe.
         self.boot_to_ui_bringup()
+
+        self.c2c.iob_ahb.iob_status_handshake_enabled = False
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
 
         barrier = self.RUN_APP_FLAGS_BARRIER
         done = 0
@@ -1100,6 +1048,91 @@ class Dsmc2Camera:
                 "board bring-up complete (0xC3300FFF, Fan 0x800 set) but the SATA/Media storage "
                 "barrier 0x0C000000 did not cross (missing 0x%08X)." % missing
             ),
+            "threads": threads,
+        }
+
+    def boot_to_application(
+        self,
+        max_instructions: int = 40_000_000,
+        slice_size: int = 12_000,
+        _already_at_ui_bringup: bool = False,
+    ) -> Dict[str, Any]:
+        """Drive boot past the full driver cascade (`0xCF3CF7FF`) into ``run_application``.
+
+        With the IOB AHB status handshake (``0x1C0B0000..0x1C0B0FFF``), ``EdidEeprom(0x50)``
+        on ``I2C2``, ``OmapMailbox`` (``0x48094000``), ``OmapIva2Mmu`` (``0x5D000000``) +
+        ``IVA2_MEM`` (``0x5C000000``), and multi-chunk (>64B) Master TX in ``OmapI2c``,
+        ``Driver thread`` completes the post-barrier cascade (SATA, Media, IOB/ISP Binary
+        Download, Monitor Pipeline, HDMI, HDSDI, Monitor Splash Screen, DSP ``0x40000``,
+        Contiguous Media Space ``0x10000000``, Audio ``0x80000``, and Cal Load ``0x800000`` ->
+        ``0xDFBCFFFF``) and signals ``Starter Thread`` (``0x80008E24`` -> ``run_application``
+        ``0x80008CB4``), which creates ``APP_SEMAPHORE`` (``0x814C6D1C``) and spawns
+        ``Camera State Manager``.
+        """
+        if not _already_at_ui_bringup:
+            self.boot_to_ui_bringup()
+
+        self.c2c.iob_ahb.iob_status_handshake_enabled = True
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
+
+        barrier = self.APPLICATION_FLAGS_BARRIER
+        app_sema_addr = self.fw(self.APP_SEMAPHORE_ADDR)
+        done = 0
+
+        def _is_ready() -> Tuple[bool, int, int, List[Dict[str, Any]]]:
+            flags = self.init_event_flags()
+            try:
+                sema_magic = self.bus.read_u32(app_sema_addr)
+            except Exception:
+                sema_magic = 0
+            threads = self.get_threads()
+            csm = next((t for t in threads if t["name"] == "Camera State Manager"), None)
+            ready = (
+                (flags & barrier) == barrier
+                and sema_magic == self.SEMAPHORE_MAGIC
+                and csm is not None
+            )
+            return ready, flags, sema_magic, threads
+
+        ready, flags, sema_magic, threads = _is_ready()
+        while done < max_instructions and not ready:
+            self._deliver_idle_irq()
+            try:
+                self.cpu.run(self.cpu.pc, 0, count=slice_size)
+            except Exception:
+                pass
+            done += slice_size
+            self.instruction_count += slice_size
+            self._tick_timers()
+            if (done % (slice_size * 50) == 0) or (
+                (self.init_event_flags() & barrier) == barrier
+                and self.bus.read_u32(app_sema_addr) == self.SEMAPHORE_MAGIC
+            ):
+                ready, flags, sema_magic, threads = _is_ready()
+
+        if not ready:
+            ready, flags, sema_magic, threads = _is_ready()
+
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = True
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        driver = next((t for t in threads if t["name"] == "Driver thread"), None)
+        csm = next((t for t in threads if t["name"] == "Camera State Manager"), None)
+        driver_completed = driver is not None and driver["state"] == "COMPLETED"
+        app_sema_created = sema_magic == self.SEMAPHORE_MAGIC
+        csm_spawned = csm is not None
+        barrier_passed = (flags & barrier) == barrier and app_sema_created
+        return {
+            "milestone": "application_running" if barrier_passed else "driver_cascade_barrier",
+            "barrier_passed": barrier_passed,
+            "init_event_flags": flags,
+            "driver_thread_completed": driver_completed,
+            "app_semaphore_created": app_sema_created,
+            "camera_state_manager_spawned": csm_spawned,
+            "application_instructions": done,
+            "total_instructions": self.instruction_count,
+            "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
             "threads": threads,
         }
 
@@ -1495,7 +1528,37 @@ class Dsmc2Camera:
         if not self.is_booted:
             return threads
 
-        tcbs = [self.fw(a) for a in self.TCB_ADDRS]
+        tcbs: List[int] = []
+        seen_addrs: Set[int] = set()
+
+        def _add_tcb(addr: int):
+            if addr and addr not in seen_addrs:
+                seen_addrs.add(addr)
+                tcbs.append(addr)
+
+        for a in self.TCB_ADDRS:
+            _add_tcb(self.fw(a))
+
+        # Also walk ThreadX circular created-thread list via tx_thread_created_next (+0x8C)
+        # so dynamically created application threads (e.g., Camera State Manager) appear.
+        walk_starts = [self.fw(self.TCB_ADDRS[0])]
+        try:
+            walk_starts.append(self.bus.read_u32(self.fw(self.TX_THREAD_CREATED_PTR)))
+        except Exception:
+            pass
+        walk_seen: Set[int] = set()
+        for start in walk_starts:
+            cur = start
+            while cur and cur not in walk_seen and len(walk_seen) < 64:
+                walk_seen.add(cur)
+                try:
+                    if self.bus.read_u32(cur) != 0x54485244:  # 'THRD' magic
+                        break
+                    _add_tcb(cur)
+                    cur = self.bus.read_u32(cur + 0x8C)  # tx_thread_created_next
+                except Exception:
+                    break
+
         mapped = not self.addr_map.is_identity
         state_names = {
             0: "READY", 1: "COMPLETED", 2: "TERMINATED", 3: "SUSPENDED",

@@ -71,11 +71,13 @@ class OmapI2c(Device):
             return self.stat
         elif offset == 0x10: # SYSS
             return self.syss
-        elif offset == 0x14: # BUF
+        elif offset in (0x14, 0x40): # BUF / BUFSTAT
             rx_count = len(self.rx_fifo)
-            rx_stat = max(0, rx_count - 1) & 0x3F
+            rx_stat = min(0x3F, max(0, rx_count - 1))
             tx_remaining = max(0, self.cnt - len(self.tx_fifo))
-            tx_stat = max(0, tx_remaining - 1) & 0x3F
+            tx_stat = min(0x3F, max(0, tx_remaining - 1))
+            if offset == 0x40:
+                return (rx_stat << 8) | tx_stat
             return (self.buf & ~0x3F3F) | (rx_stat << 8) | tx_stat
         elif offset == 0x18: # CNT
             return self.cnt
@@ -113,8 +115,14 @@ class OmapI2c(Device):
             self.stat &= ~val
             if val & 0x04: # Clearing ARDY clears TX FIFO
                 self.tx_fifo.clear()
-            if not (self.stat & self.ie) and self.intc:
-                self.intc.deassert_irq(self.irq_num)
+            elif (self.con & 0x8200) == 0x8200 and 0 < len(self.tx_fifo) < self.cnt:
+                # Multi-chunk Master Transmit still needs remaining bytes
+                self.stat |= 0x10 # Re-assert XRDY
+            if self.intc:
+                if self.stat & self.ie:
+                    self.intc.assert_irq(self.irq_num)
+                else:
+                    self.intc.deassert_irq(self.irq_num)
         elif offset == 0x14: # BUF
             self.buf = val
         elif offset == 0x18: # CNT

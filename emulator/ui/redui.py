@@ -5,6 +5,7 @@ full system menu, exposure tools (False Color, Zebras, 1:1 Mag), and touch feedb
 """
 
 import os
+import json
 import time
 import math
 from typing import Optional, Tuple, Dict, Any, List
@@ -61,20 +62,8 @@ class RedUiEngine:
         "Set Focus In/Out Stops": "Feature unavailable on virtual brain: Requires physical mechanical lens motor with optical encoder feedback rather than software emulation.",
         "Set Aperture Motor Range": "Feature unavailable on virtual brain: Requires physical lens iris motor with potentiometer feedback rather than software emulation.",
         "Set Zoom Motor Range": "Feature unavailable on virtual brain: Requires physical zoom motor servo unit rather than software emulation.",
-        "Save Reticle": "Feature unavailable on virtual brain: Custom user reticle persistence requires external user calibration file staged on media rather than software emulation.",
-        "Load Reticle": "Feature unavailable on virtual brain: Custom user reticle loading requires external user reticle bitmap (.ret) staged on flash rather than software emulation.",
-        "Save Overlays to RED MINI-MAG": "Feature unavailable on virtual brain: Overlay profile export requires external user profile slot on media rather than software emulation.",
-        "Load Overlays from Media": "Feature unavailable on virtual brain: Overlay profile import requires custom .ovl profile present on media rather than software emulation.",
-        "Import CDL": "Feature unavailable on virtual brain: Requires external .cdl / .edl file placed on RED MINI-MAG media rather than software emulation.",
-        "Export CDL": "Feature unavailable on virtual brain: Requires writable RED MINI-MAG media partition with CDL folder rather than software emulation.",
-        "Import 3D LUT (.cube)": "Feature unavailable on virtual brain: Requires external 33x33x33 .cube LUT file staged on RED MINI-MAG rather than software emulation.",
         "Key Lockout Enabled": "Feature disabled on virtual brain: Physical tactile key lockout is disabled in emulation to allow web tactile button input.",
         "Key Lockout Disabled": "Feature disabled on virtual brain: Physical tactile key lockout is disabled in emulation to allow web tactile button input.",
-        "Save User Preset to Memory": "Feature unavailable on virtual brain: User preset saving to EEPROM requires formatted user preset partition rather than software emulation.",
-        "Load User Preset": "Feature unavailable on virtual brain: User preset loading requires saved user preset in internal EEPROM rather than software emulation.",
-        "Export Preset to MINI-MAG": "Feature unavailable on virtual brain: Exporting preset requires valid custom user preset in memory rather than software emulation.",
-        "Load Key Profile": "Feature unavailable on virtual brain: Key profile loading requires custom .key map file on media rather than software emulation.",
-        "Save Key Profile": "Feature unavailable on virtual brain: Key profile export requires custom key profile slot on media rather than software emulation.",
     }
 
     # Official DSMC2 Master Menu Hierarchy
@@ -387,6 +376,29 @@ class RedUiEngine:
 
         # Non-functional / Hardware Alert Modal State
         self.active_alert: Optional[Dict[str, str]] = None  # {"title": str, "message": str, "option": str}
+
+        # Milestone 4: In-Camera Clip Playback & Persistent Look/Preset State
+        self.is_playback_active: bool = False
+        self.playback_state: str = "STOPPED"
+        self.playback_clip_index: int = 0
+        self.playback_frame_index: int = 0
+        self.playback_in_frame: int = 0
+        self.playback_out_frame: int = 0
+        self.playback_inspector_open: bool = False
+        self.active_clip_info: Optional[Dict[str, Any]] = None
+        self.loaded_cube_lut: Optional[Dict[str, Any]] = None
+        self.cdl_params: Dict[str, Any] = {
+            "slope": [1.0, 1.0, 1.0],
+            "offset": [0.0, 0.0, 0.0],
+            "power": [1.0, 1.0, 1.0],
+            "saturation": 1.0,
+        }
+        self.user_presets: Dict[str, Dict[str, Any]] = {}
+        self.key_profile: Dict[str, str] = {
+            "USER 1": "False Color",
+            "USER 2": "Zebras",
+            "RECORD": "Toggle REC",
+        }
 
         # Touch and Feedback State
         self.last_touch_pos: Optional[Tuple[int, int]] = None
@@ -961,6 +973,217 @@ class RedUiEngine:
 
         return False
 
+    def _write_media_json(self, subdir: str, filename: str, payload: Dict[str, Any]) -> str:
+        rec = getattr(self.camera, "recorder", None)
+        base = rec.media_dir if rec else os.path.join(self.camera.workspace_root, "persistent_store", "media")
+        out_path = os.path.join(base, subdir, filename)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return out_path
+
+    def _read_media_json(self, subdir: str, filename: str) -> Optional[Dict[str, Any]]:
+        rec = getattr(self.camera, "recorder", None)
+        base = rec.media_dir if rec else os.path.join(self.camera.workspace_root, "persistent_store", "media")
+        in_path = os.path.join(base, subdir, filename)
+        if not os.path.isfile(in_path):
+            return None
+        with open(in_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_user_preset(self, name: str = "user_preset_1") -> Dict[str, Any]:
+        """Snapshot current camera RCP/look parameters into persistent `/data/presets`."""
+        rcp = self.camera.rcp
+        preset = {
+            "name": name,
+            "fps": rcp.state.get(RcpProtocol.PARAM_FPS, "23.98"),
+            "shutter": rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48"),
+            "iso": rcp.state.get(RcpProtocol.PARAM_ISO, "800"),
+            "format": rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9"),
+            "color_temperature": rcp.state.get("color_temperature", "5600"),
+            "active_lut": self.active_lut,
+            "cdl": self.cdl_params,
+        }
+        self.user_presets[name] = preset
+        vfs = getattr(self.camera, "vfs", None)
+        if vfs:
+            vfs.write_file(f"/data/presets/{name}.json", json.dumps(preset, indent=2).encode("utf-8"))
+        self.camera.log_system(f"[PRESETS] Saved user preset '{name}' to /data/presets/{name}.json")
+        return preset
+
+    def load_user_preset(self, name: str = "user_preset_1") -> Optional[Dict[str, Any]]:
+        """Load preset from memory or `/data/presets` and apply to camera RCP."""
+        preset = self.user_presets.get(name)
+        if preset is None:
+            vfs = getattr(self.camera, "vfs", None)
+            raw = vfs.read_file(f"/data/presets/{name}.json") if vfs else None
+            if raw:
+                preset = json.loads(raw.decode("utf-8"))
+        if preset is None:
+            preset = self._read_media_json("presets", f"{name}.json")
+        if preset is None:
+            return None
+        rcp = self.camera.rcp
+        rcp.state[RcpProtocol.PARAM_FPS] = preset.get("fps", rcp.state.get(RcpProtocol.PARAM_FPS, "23.98"))
+        rcp.state[RcpProtocol.PARAM_SHUTTER] = preset.get("shutter", rcp.state.get(RcpProtocol.PARAM_SHUTTER, "1/48"))
+        rcp.state[RcpProtocol.PARAM_ISO] = preset.get("iso", rcp.state.get(RcpProtocol.PARAM_ISO, "800"))
+        rcp.state[RcpProtocol.PARAM_FORMAT] = preset.get("format", rcp.state.get(RcpProtocol.PARAM_FORMAT, "5K 16:9"))
+        self.active_lut = preset.get("active_lut", self.active_lut)
+        if "cdl" in preset:
+            self.cdl_params = preset["cdl"]
+        self.camera.log_system(f"[PRESETS] Applied user preset '{name}'")
+        return preset
+
+    def export_preset_to_media(self, name: str = "user_preset_1") -> str:
+        """Export preset JSON to virtual RED MINI-MAG `presets/`."""
+        preset = self.user_presets.get(name) or self.save_user_preset(name)
+        path = self._write_media_json("presets", f"{name}.json", preset)
+        self.camera.log_system(f"[PRESETS] Exported preset '{name}' to MINI-MAG: {path}")
+        return path
+
+    def import_cube_lut(self, cube_text: Optional[str] = None, filename: str = "custom_look.cube") -> Dict[str, Any]:
+        """Parse and activate an Adobe `.cube` 3D LUT from MINI-MAG or `/data/luts`."""
+        rec = getattr(self.camera, "recorder", None)
+        base = rec.media_dir if rec else os.path.join(self.camera.workspace_root, "persistent_store", "media")
+        lut_path = os.path.join(base, "luts", filename)
+        os.makedirs(os.path.dirname(lut_path), exist_ok=True)
+        if cube_text is not None:
+            with open(lut_path, "w", encoding="utf-8") as f:
+                f.write(cube_text)
+        elif not os.path.isfile(lut_path):
+            vfs = getattr(self.camera, "vfs", None)
+            vfs_raw = vfs.read_file(f"/data/luts/{filename}") if vfs else None
+            if vfs_raw:
+                with open(lut_path, "wb") as f:
+                    f.write(vfs_raw)
+            else:
+                default_cube = (
+                    'TITLE "RED IPP2 Filmic Custom"\n'
+                    "LUT_3D_SIZE 2\n"
+                    "0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.0\n1.0 1.0 0.0\n"
+                    "0.0 0.0 1.0\n1.0 0.0 1.0\n0.0 1.0 1.0\n1.0 1.0 1.0\n"
+                )
+                with open(lut_path, "w", encoding="utf-8") as f:
+                    f.write(default_cube)
+
+        with open(lut_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+
+        title = os.path.splitext(filename)[0]
+        size = 0
+        entries: List[Tuple[float, float, float]] = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.upper().startswith("TITLE"):
+                title = line.split(None, 1)[1].strip('" ') if len(line.split(None, 1)) > 1 else title
+            elif line.upper().startswith("LUT_3D_SIZE"):
+                size = int(line.split()[1])
+            elif line[0].isdigit() or line[0] in "-.":
+                parts = line.split()
+                if len(parts) == 3:
+                    entries.append((float(parts[0]), float(parts[1]), float(parts[2])))
+
+        self.active_lut = title
+        self.loaded_cube_lut = {"title": title, "size": size, "entries_count": len(entries), "path": lut_path}
+        self.camera.log_system(f"[LOOK] Loaded 3D LUT (.cube): {title} (size={size}^3, {len(entries)} entries)")
+        return self.loaded_cube_lut
+
+    def export_cdl(self, filename: str = "grade.cdl") -> str:
+        path = self._write_media_json("cdls", filename, self.cdl_params)
+        self.camera.log_system(f"[LOOK] Exported ASC-CDL to MINI-MAG: {path}")
+        return path
+
+    def import_cdl(self, filename: str = "grade.cdl") -> Dict[str, Any]:
+        loaded = self._read_media_json("cdls", filename)
+        if loaded is None:
+            self.export_cdl(filename)
+            loaded = dict(self.cdl_params)
+        self.cdl_params.update(loaded)
+        self.camera.log_system(f"[LOOK] Imported ASC-CDL from MINI-MAG ({filename})")
+        return dict(self.cdl_params)
+
+    def save_reticle(self, name: str = "reticle_1") -> str:
+        payload = {"name": name, "focus_point": list(self.focus_point or (512, 288)), "guide_mode": self.guide_mode}
+        vfs = getattr(self.camera, "vfs", None)
+        if vfs:
+            vfs.write_file(f"/data/reticles/{name}.ret.json", json.dumps(payload).encode("utf-8"))
+        self.camera.log_system(f"[OVERLAYS] Saved custom reticle '{name}'")
+        return name
+
+    def load_reticle(self, name: str = "reticle_1") -> Dict[str, Any]:
+        vfs = getattr(self.camera, "vfs", None)
+        raw = vfs.read_file(f"/data/reticles/{name}.ret.json") if vfs else None
+        if raw:
+            data = json.loads(raw.decode("utf-8"))
+            if "focus_point" in data and len(data["focus_point"]) == 2:
+                self.focus_point = (int(data["focus_point"][0]), int(data["focus_point"][1]))
+            if "guide_mode" in data:
+                self.guide_mode = data["guide_mode"]
+            self.camera.log_system(f"[OVERLAYS] Loaded custom reticle '{name}'")
+            return data
+        return {"name": name}
+
+    def save_overlays_to_media(self, name: str = "overlays_1") -> str:
+        payload = {
+            "guide_mode": self.guide_mode,
+            "action_guide_on": self.action_guide_on,
+            "title_guide_on": self.title_guide_on,
+            "guide_color": list(self.guide_color),
+            "guide_shading_pct": self.guide_shading_pct,
+        }
+        path = self._write_media_json("overlays", f"{name}.ovl.json", payload)
+        self.camera.log_system(f"[OVERLAYS] Saved overlay profile to MINI-MAG: {path}")
+        return path
+
+    def load_overlays_from_media(self, name: str = "overlays_1") -> Dict[str, Any]:
+        loaded = self._read_media_json("overlays", f"{name}.ovl.json")
+        if loaded:
+            self.guide_mode = loaded.get("guide_mode", self.guide_mode)
+            self.action_guide_on = bool(loaded.get("action_guide_on", self.action_guide_on))
+            self.title_guide_on = bool(loaded.get("title_guide_on", self.title_guide_on))
+            if "guide_color" in loaded:
+                self.guide_color = tuple(int(c) for c in loaded["guide_color"][:3])
+            self.guide_shading_pct = int(loaded.get("guide_shading_pct", self.guide_shading_pct))
+            self.camera.log_system(f"[OVERLAYS] Loaded overlay profile '{name}' from MINI-MAG")
+            return loaded
+        return {}
+
+    def save_key_profile(self, name: str = "keys_1") -> str:
+        path = self._write_media_json("keys", f"{name}.key.json", self.key_profile)
+        self.camera.log_system(f"[SETUP] Saved key profile '{name}' to MINI-MAG: {path}")
+        return path
+
+    def load_key_profile(self, name: str = "keys_1") -> Dict[str, Any]:
+        loaded = self._read_media_json("keys", f"{name}.key.json")
+        if loaded:
+            self.key_profile.update(loaded)
+            self.camera.log_system(f"[SETUP] Loaded key profile '{name}' from MINI-MAG")
+            return loaded
+        return dict(self.key_profile)
+
+    def _enter_playback_clip(self, clip_index: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        rec = getattr(self.camera, "recorder", None)
+        clips = rec.list_clips() if rec else []
+        if not clips:
+            self.is_playback_active = True
+            self.playback_state = "STOPPED"
+            self.active_clip_info = None
+            return None
+        if clip_index is not None:
+            self.playback_clip_index = clip_index % len(clips)
+        else:
+            self.playback_clip_index = min(self.playback_clip_index, len(clips) - 1)
+        target = clips[self.playback_clip_index]
+        info = rec.inspect_r3d_clip(target["clip_name"])
+        self.active_clip_info = info
+        self.is_playback_active = True
+        total = info["frame_count"] if info else 0
+        self.playback_frame_index = min(self.playback_frame_index, max(0, total - 1))
+        self.playback_out_frame = max(0, total - 1)
+        return info
+
     def _handle_menu_item_selected(self, item: str):
         """Process item click: drill down into submenu or execute terminal option."""
         test_path = self.menu_path + [item]
@@ -1034,9 +1257,30 @@ class RedUiEngine:
             self.camera.log_system(f"[WHITE BALANCE] Color tint balance set to: {item}")
 
         # 5. Look Profiles, Tone Curves, Gain, LGG, CDL
+        elif item == "Import 3D LUT (.cube)":
+            self.import_cube_lut()
+
         elif last_cat in ("3D LUT", "Creative 3D LUT"):
             self.active_lut = item
             self.camera.log_system(f"[UI] 3D LUT changed to: {item}")
+
+        elif item == "Export CDL":
+            self.export_cdl()
+
+        elif item == "Import CDL":
+            self.import_cdl()
+
+        elif item in ("Save Current Reticle", "Save Reticle"):
+            self.save_reticle()
+
+        elif item in ("Load Reticle 1", "Load Reticle"):
+            self.load_reticle()
+
+        elif item == "Save Overlays to RED MINI-MAG":
+            self.save_overlays_to_media()
+
+        elif item == "Load Overlays from Media":
+            self.load_overlays_from_media()
 
         elif last_cat in ("GUIDES", "Frame Guide") or "Action Guide" in last_cat or "Title Guide" in last_cat or "General" in last_cat:
             if "16:9" in item:
@@ -1196,10 +1440,77 @@ class RedUiEngine:
         elif "Power" in last_cat or "Power" in item:
             self.camera.log_system(f"[POWER] Power management profile: {item}")
 
-        elif last_cat == "Playback Screen" or "Play" in item or "Pause" in item or "Fast Forward" in item:
-            self.camera.log_system(f"[PLAYBACK] Clip playback transport: {item}")
+        elif last_cat == "Playback Screen" or item in (
+            "Browse Recorded Clips",
+            "Play / Pause",
+            "Shuttle 2x / 4x",
+            "Frame Step Forward",
+            "Frame Step Backward",
+            "In/Out Marker",
+            "Clip Metadata Inspector",
+        ):
+            info = self._enter_playback_clip()
+            total = info["frame_count"] if info else 0
+            if item == "Play / Pause":
+                self.playback_state = "PAUSED" if self.playback_state == "PLAYING" else "PLAYING"
+            elif item == "Shuttle 2x / 4x":
+                self.playback_state = "SHUTTLE_4X" if self.playback_state == "SHUTTLE_2X" else "SHUTTLE_2X"
+            elif item == "Frame Step Forward" and total > 0:
+                self.playback_state = "PAUSED"
+                self.playback_frame_index = min(total - 1, self.playback_frame_index + 1)
+            elif item == "Frame Step Backward" and total > 0:
+                self.playback_state = "PAUSED"
+                self.playback_frame_index = max(0, self.playback_frame_index - 1)
+            elif item == "In/Out Marker":
+                self.playback_in_frame = self.playback_frame_index
+                self.playback_out_frame = max(self.playback_in_frame, total - 1)
+            elif item == "Clip Metadata Inspector":
+                self.playback_inspector_open = not self.playback_inspector_open
+            else:
+                self.playback_state = "PAUSED" if total > 0 else "STOPPED"
+            self.camera.log_system(f"[PLAYBACK] {item}: state={self.playback_state} frame={self.playback_frame_index}/{total}")
+
+        elif item == "Save User Preset to Memory":
+            self.save_user_preset()
+
+        elif item == "Load User Preset":
+            self.load_user_preset()
+
+        elif item == "Export Preset to MINI-MAG":
+            self.export_preset_to_media()
+
+        elif item == "Save Key Profile":
+            self.save_key_profile()
+
+        elif item == "Load Key Profile":
+            self.load_key_profile()
+
+        elif item in ("WiFi Infrastructure", "WiFi Ad-Hoc", "WiFi OFF"):
+            wifi = getattr(self.camera, "wifi", None)
+            if wifi:
+                wifi.set_mode(item)
+            self.camera.log_system(f"[WIFI] Interface set to: {item}")
+
+        elif "Verify File System" in item:
+            rec = getattr(self.camera, "recorder", None)
+            if rec:
+                rec.verify_udf_filesystem()
+
+        elif item == "Delete Last Recorded Clip":
+            rec = getattr(self.camera, "recorder", None)
+            if rec:
+                rec.delete_last_clip()
 
         elif last_cat in ("Camera Presets", "Looks", "Auto Presets") or "Preset" in item or "Look" in item:
+            if "Narrative 24fps 5K" in item:
+                rcp.state[RcpProtocol.PARAM_FPS] = "24.00"
+                rcp.state[RcpProtocol.PARAM_FORMAT] = "5K 16:9"
+            elif "Commercial 60fps 4K" in item:
+                rcp.state[RcpProtocol.PARAM_FPS] = "60.00"
+                rcp.state[RcpProtocol.PARAM_FORMAT] = "4K 16:9"
+            elif "High Speed Slow-Mo 120fps 3K" in item:
+                rcp.state[RcpProtocol.PARAM_FPS] = "120.00"
+                rcp.state[RcpProtocol.PARAM_FORMAT] = "3K 16:9"
             self.camera.log_system(f"[PRESETS] Preset configuration: {item}")
 
         # 12. Maintenance & Upgrades
@@ -1390,6 +1701,10 @@ class RedUiEngine:
 
         # 9. Active Tool Badges (Magnify / False Color / Zebras)
         self._draw_tool_badges(draw)
+
+        # 9b. In-Camera Clip Playback Transport Overlay
+        if self.is_playback_active and not self.is_menu_open and not self.active_dialog:
+            self._draw_playback_overlay(draw)
 
         # 10. Alert Popup Modal (if non-functional / hardware limit triggered)
         if self.active_alert:
@@ -1600,6 +1915,37 @@ class RedUiEngine:
         bx2, by2 = cx + 50, ay2 - 10
         draw.rectangle([(bx1, by1), (bx2, by2)], fill=(45, 45, 45), outline=(200, 200, 200), width=1)
         draw.text((cx - 10, by1 + 6), "OK", fill=(255, 255, 255), font=FONT_BOLD)
+
+    def _draw_playback_overlay(self, draw: ImageDraw.ImageDraw):
+        """Draw DSMC2 Playback Mode transport bar, frame scrubber, and clip inspector."""
+        clip = self.active_clip_info
+        clip_name = clip["clip_name"] if clip else "NO CLIPS"
+        total = clip["frame_count"] if clip else 0
+        # Top-right Playback Mode indicator badge
+        draw.rectangle([(self.WIDTH - 190, 48), (self.WIDTH - 16, 74)], fill=(0, 120, 190), outline=(140, 210, 255), width=1)
+        draw.text((self.WIDTH - 180, 54), f"PLAYBACK | {self.playback_state}", fill=(255, 255, 255), font=FONT_SM)
+
+        # Bottom scrubber bar above status strip (y: 472..524)
+        bx1, by1, bx2, by2 = 80, 476, self.WIDTH - 80, 520
+        draw.rectangle([(bx1, by1), (bx2, by2)], fill=(18, 22, 28), outline=(70, 140, 200), width=1)
+        draw.text(
+            (bx1 + 14, by1 + 6),
+            f"{clip_name}  |  Frame {self.playback_frame_index + 1 if total else 0}/{total}  |  IN:{self.playback_in_frame} OUT:{self.playback_out_frame}",
+            fill=(230, 240, 250),
+            font=FONT_SM,
+        )
+        sx1, sy1, sx2, sy2 = bx1 + 14, by1 + 26, bx2 - 14, by2 - 8
+        draw.rectangle([(sx1, sy1), (sx2, sy2)], fill=(38, 44, 52), outline=(90, 90, 90), width=1)
+        if total > 0:
+            ratio = (self.playback_frame_index + 1) / float(total)
+            pw = max(6, int((sx2 - sx1) * max(0.0, min(1.0, ratio))))
+            draw.rectangle([(sx1 + 1, sy1 + 1), (min(sx2 - 1, sx1 + pw), sy2 - 1)], fill=(0, 170, 255))
+
+        if self.playback_inspector_open and clip:
+            draw.rectangle([(80, 360), (540, 466)], fill=(16, 16, 20), outline=(90, 150, 210), width=1)
+            draw.text((94, 370), f"CLIP INSPECTOR: {clip_name}", fill=(255, 255, 255), font=FONT_BOLD)
+            draw.text((94, 394), f"Brand: {clip.get('brand', 'RED2')} | Frames: {total}", fill=(200, 215, 230), font=FONT_SM)
+            draw.text((94, 416), f"Index: {clip.get('index_footer', '')[:58]}", fill=(170, 185, 200), font=FONT_TINY)
 
     def _draw_touch_reticle(self, draw: ImageDraw.ImageDraw, x: int, y: int, alpha: float):
         """Draw high-visibility touch feedback reticle and coordinate readout."""
