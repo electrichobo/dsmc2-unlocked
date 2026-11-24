@@ -38,8 +38,8 @@ jobs:
       AR_wasm32_unknown_unknown: llvm-ar
     steps:
       - uses: actions/checkout@v4
-      - name: clang + llvm-ar for the wasm32 C build
-        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      # clang + llvm-ar for the wasm32 C build; libudev for the native serialport backend
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
