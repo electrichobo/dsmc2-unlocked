@@ -52,10 +52,12 @@ pnpm build     # static site in dist/
 ```
 
 **No camera?** Open `http://localhost:5173/?mock-camera#/camera` on the dev
-server. Connect then opens a fake healthy DSMC2 shell that answers state,
-versions, rails, temperatures and lanes, so the self-test, readings and terminal
-can be exercised end to end. (It does not emulate the I²C devices or UCDs, so
-those rows fail.) The mock is never included in a production build.
+server. Connect then opens a fake DSMC2 shell built from the built-in reference
+body: every rail, temperature, lane, UCD and I²C device answers in range, so the
+self-test passes end to end and the readings and terminal work. Use
+`?mock-camera=fault` for a body with one rail 10% low and one I²C device
+missing, to see the failure display. The mock is never included in a
+production build.
 
 ## Publish
 
