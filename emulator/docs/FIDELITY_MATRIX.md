@@ -56,10 +56,20 @@ This matrix lists the fidelity level of each component in the emulator.
 - The initial stack top (`0x881D2690`), the heap ceiling and framebuffer windows (`0x8E200000`) all lie inside the physical 256 MB.
 - **Caveat**: Accesses at `0x90000000` and above do not fault in the emulator, but they cause a hardware Data Abort on physical hardware. Do not use non-faulting accesses above 256 MB as proof of hardware memory safety.
 
-### 2. Full-Boot Park (`0x80E9C368`) & Dispatch-Path Thread Harness
-- At the end of the default 45,000,000-instruction `boot()` budget, the CPU stops in `_tx_thread_schedule` (`0x80E9C368`, `SP = 0x814CAB14`, `CPSR = 0x60000053`), which spins waiting for a non-zero `_tx_thread_execute_ptr`.
-- At this point, `SystemInitThread` (`0x814CAD40`) is blocked on a ThreadX semaphore after its initial driver/CRT prefix. The IRQ-injection path in `step_slice()` and `boot_until()` does not call `_tx_thread_resume`, so suspended application threads (such as `thread_DRIVER_entry` at `0x8066C92C`) do not become ready during full-boot (`boot_until(0x8066C92C)` returns `False` from full-boot).
-- Full-boot therefore validates only the straight-line CRT and early driver-init prefix; globals populated later—such as `hw_cap` (`0x815811F4`)—still contain `0x00000000` at `0x80E9C368`.
+### 2. Boot depth: full application boot reached (`boot_to_application`)
+- **Updated (post PR #73–#77): the emulator now boots the full application.** `boot_to_application()` drives
+  a real ~113s boot through the board-bring-up barrier (`UI_BRINGUP_FLAGS_BARRIER` `0xC3300FFF`, `hw_cap`
+  populated), the SATA/media storage barrier, and the DSS/display + DSP/audio init batch, reaching the
+  `APPLICATION_FLAGS_BARRIER` (`0xDFBCFFFF`): the Driver thread completes its cascade, the Starter Thread
+  enters `run_application` (`0x80008CB4`) and **Camera State Manager is spawned**. `hw_cap` (`0x815811F4`)
+  is live, not `0x00000000`.
+- The earlier short `boot()` budget (45M insns) still parks in `_tx_thread_schedule` (`0x80E9C368`) before
+  late driver init — it validates only the straight-line CRT + early prefix. Use `boot_to_application()` (or
+  the staged `boot_to_*` helpers) for depth, not the short `boot()`.
+- Known remaining gap: the synthesized YAFFS2 image mounts but does not yet register file objects for the
+  `/data` CDB2 SQLite param DBs, so real RCP param GET/SET returns the firmware's prepare-fail code (`rc=0xC`)
+  rather than resolved values — see `DEPTH_ROADMAP.md`. The RCP control path itself runs end-to-end to the
+  SQLite layer on the booted app (the firmware's own `_cdb2_parameter_get_value` @`0x80080C34` executes).
 - **Dispatch-Path Harness (`cam.run_dispatch_harness`)**:
   To exercise `thread_DRIVER_entry` (`0x8066C92C`) or any individual worker/custom thread function without waiting on ThreadX synchronization:
   1. Call `cam.run_dispatch_harness(entry_pc=0x8066C92C)` (or pass a custom worker entry address and optional `camera_type` / `extra_stubs`).
