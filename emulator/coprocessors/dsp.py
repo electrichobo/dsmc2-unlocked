@@ -12,6 +12,7 @@ import io
 import wave
 from typing import Dict, Any, List, Optional, Tuple
 from collections import deque
+from emulator.core.bus import Device
 
 
 class TiC64xDsp:
@@ -286,3 +287,211 @@ class RAudioServer:
             ],
             "headphone_volume_pct": self.headphone_volume_pct
         }
+
+
+class OmapMailbox(Device):
+    """
+    OMAP3630 Inter-Processor Mailbox Controller (0x48094000, IRQ 26).
+
+    Models the 8-FIFO hardware mailbox block between ARM Cortex-A8 (MPU) and
+    IVA2.2 (TMS320C64x+ DSP) used by DSPLink 1.65 (`OMAP3530_halIntCtrl` @ 0x80EB63C0).
+    """
+
+    BASE_ADDR = 0x48094000
+    SIZE = 0x1000
+    IRQ = 26
+
+    REG_REVISION = 0x000
+    REG_SYSCONFIG = 0x010
+    REG_SYSSTATUS = 0x014
+
+    def __init__(self, intc=None, irq_num: int = IRQ):
+        self.intc = intc
+        self.irq_num = irq_num
+        self.revision = 0x00000020
+        self.sysconfig = 0x00000001
+        self.sysstatus = 0x00000001  # Bit 0: RESETDONE = 1
+        self.fifos: Dict[int, deque] = {m: deque(maxlen=4) for m in range(8)}
+        self.irqstatus: Dict[int, int] = {u: 0 for u in range(4)}
+        self.irqenable: Dict[int, int] = {u: 0 for u in range(4)}
+        self.regs: Dict[int, int] = {}
+
+    def _reset(self):
+        self.sysstatus = 0x00000001
+        for fifo in self.fifos.values():
+            fifo.clear()
+        for u in range(4):
+            self.irqstatus[u] = 0
+            self.irqenable[u] = 0
+        self.regs.clear()
+
+    def read(self, offset: int, size: int) -> int:
+        off = offset & ~0x3
+        if off == self.REG_REVISION:
+            return self.revision
+        if off == self.REG_SYSCONFIG:
+            return self.sysconfig
+        if off == self.REG_SYSSTATUS:
+            return self.sysstatus
+        if 0x040 <= off <= 0x05C:
+            m = (off - 0x040) >> 2
+            fifo = self.fifos.get(m)
+            return fifo.popleft() if fifo else 0
+        if 0x080 <= off <= 0x09C:
+            m = (off - 0x080) >> 2
+            fifo = self.fifos.get(m)
+            return 1 if (fifo is not None and len(fifo) >= 4) else 0
+        if 0x0C0 <= off <= 0x0DC:
+            m = (off - 0x0C0) >> 2
+            fifo = self.fifos.get(m)
+            return len(fifo) if fifo is not None else 0
+        if 0x100 <= off <= 0x11C:
+            idx = (off - 0x100) >> 2
+            u = idx >> 1
+            if (idx & 1) == 0:
+                return self.irqstatus.get(u, 0)
+            return self.irqenable.get(u, 0)
+        return self.regs.get(off, 0)
+
+    def write(self, offset: int, size: int, val: int):
+        off = offset & ~0x3
+        val &= 0xFFFFFFFF
+        if off == self.REG_SYSCONFIG:
+            self.sysconfig = val & ~0x2
+            if val & 0x2:  # SOFTRESET
+                self._reset()
+            return
+        if 0x040 <= off <= 0x05C:
+            m = (off - 0x040) >> 2
+            if m in self.fifos and len(self.fifos[m]) < 4:
+                self.fifos[m].append(val)
+            return
+        if 0x100 <= off <= 0x11C:
+            idx = (off - 0x100) >> 2
+            u = idx >> 1
+            if (idx & 1) == 0:
+                # MAILBOX_IRQSTATUS_u is write-1-to-clear
+                self.irqstatus[u] = self.irqstatus.get(u, 0) & ~val
+            else:
+                self.irqenable[u] = val
+            return
+        self.regs[off] = val
+
+
+class OmapIva2Mmu(Device):
+    """
+    OMAP3630 IVA2.2 Subsystem MMU Controller (0x5D000000).
+
+    Models the IVA2.2 MMU registers configured by DSPLink 1.65 (`OMAP3530_halMmuCtrl`
+    @ 0x80EB7148) when mapping `DSPIRAM`, `DSPL1PRAM`, `DSPL1DRAM`, `RESETCTRL`,
+    `DDR2`, `DSPLINKMEM`, and `POOLMEM`.
+    """
+
+    BASE_ADDR = 0x5D000000
+    SIZE = 0x1000
+
+    REG_REVISION = 0x000
+    REG_SYSCONFIG = 0x010
+    REG_SYSSTATUS = 0x014
+    REG_IRQSTATUS = 0x018
+    REG_IRQENABLE = 0x01C
+    REG_WALKING_ST = 0x040
+    REG_CNTL = 0x044
+    REG_FAULT_AD = 0x048
+    REG_TTB = 0x04C
+    REG_LOCK = 0x050
+    REG_LD_TLB = 0x054
+    REG_CAM = 0x058
+    REG_RAM = 0x05C
+    REG_GFLUSH = 0x060
+    REG_FLUSH_ENTRY = 0x064
+
+    def __init__(self):
+        self.revision = 0x00000015
+        self.sysconfig = 0x00000001
+        self.sysstatus = 0x00000001  # Bit 0: RESETDONE = 1
+        self.irqstatus = 0x00000000
+        self.irqenable = 0x00000000
+        self.cntl = 0x00000000
+        self.ttb = 0x00000000
+        self.lock = 0x00000000
+        self.cam = 0x00000000
+        self.ram = 0x00000000
+        self.tlb_entries: List[Tuple[int, int]] = []
+        self.regs: Dict[int, int] = {}
+
+    def _reset(self):
+        self.sysstatus = 0x00000001
+        self.irqstatus = 0x00000000
+        self.irqenable = 0x00000000
+        self.cntl = 0x00000000
+        self.ttb = 0x00000000
+        self.lock = 0x00000000
+        self.cam = 0x00000000
+        self.ram = 0x00000000
+        self.tlb_entries.clear()
+        self.regs.clear()
+
+    def read(self, offset: int, size: int) -> int:
+        off = offset & ~0x3
+        if off == self.REG_REVISION:
+            return self.revision
+        if off == self.REG_SYSCONFIG:
+            return self.sysconfig
+        if off == self.REG_SYSSTATUS:
+            return self.sysstatus
+        if off == self.REG_IRQSTATUS:
+            return self.irqstatus
+        if off == self.REG_IRQENABLE:
+            return self.irqenable
+        if off == self.REG_WALKING_ST:
+            return 0x00000000
+        if off == self.REG_CNTL:
+            return self.cntl
+        if off == self.REG_TTB:
+            return self.ttb
+        if off == self.REG_LOCK:
+            return self.lock
+        if off == self.REG_CAM:
+            return self.cam
+        if off == self.REG_RAM:
+            return self.ram
+        return self.regs.get(off, 0)
+
+    def write(self, offset: int, size: int, val: int):
+        off = offset & ~0x3
+        val &= 0xFFFFFFFF
+        if off == self.REG_SYSCONFIG:
+            self.sysconfig = val & ~0x2
+            if val & 0x2:  # SOFTRESET
+                self._reset()
+            return
+        if off == self.REG_IRQSTATUS:
+            self.irqstatus &= ~val
+            return
+        if off == self.REG_IRQENABLE:
+            self.irqenable = val
+            return
+        if off == self.REG_CNTL:
+            self.cntl = val
+            return
+        if off == self.REG_TTB:
+            self.ttb = val
+            return
+        if off == self.REG_LOCK:
+            self.lock = val
+            return
+        if off == self.REG_CAM:
+            self.cam = val
+            return
+        if off == self.REG_RAM:
+            self.ram = val
+            return
+        if off == self.REG_LD_TLB and (val & 0x1):
+            self.tlb_entries.append((self.cam, self.ram))
+            return
+        if off == self.REG_GFLUSH and (val & 0x1):
+            self.tlb_entries.clear()
+            return
+        self.regs[off] = val
+

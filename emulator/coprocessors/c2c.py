@@ -172,6 +172,112 @@ class CoprocessorSpiTarget(SpiTargetDevice):
         self._out = bytearray()
 
 
+class CsMuxSpiTarget:
+    """
+    GPIO-multiplexed SPI channel target for McSPI1 CH0 (`ISP1` target 7 vs `ISP2` target 8).
+
+    The firmware CS mux (`FUN_806D5500`) selects targets 7/8/9 on bus 0 channel 0 via
+    GPIO 76 (bank 3 pin 12) and GPIO 77 (bank 3 pin 13):
+      - GPIO76=0, GPIO77=1 -> target 7 (ts_isp1)
+      - GPIO76=1, GPIO77=0 -> target 8 (ts_isp2)
+    """
+
+    def __init__(self, targets_by_sel: Dict[Tuple[int, int], CoprocessorSpiTarget], gpio=None,
+                 fallback: Optional[CoprocessorSpiTarget] = None):
+        self.targets_by_sel = targets_by_sel
+        self.gpio = gpio
+        self.fallback = fallback
+
+    def _active(self) -> Optional[CoprocessorSpiTarget]:
+        if self.gpio and 3 in self.gpio:
+            out = self.gpio[3].dataout
+            g76 = (out >> 12) & 1
+            g77 = (out >> 13) & 1
+            if (g76, g77) in self.targets_by_sel:
+                return self.targets_by_sel[(g76, g77)]
+        return self.fallback
+
+    def transceive_byte(self, tx_byte: int) -> int:
+        tgt = self._active()
+        return tgt.transceive_byte(tx_byte) if tgt else 0x00
+
+    def transceive_word(self, tx_word: int) -> Optional[int]:
+        tgt = self._active()
+        return tgt.transceive_word(tx_word) if tgt else 0
+
+    def reset_frame(self) -> None:
+        for tgt in self.targets_by_sel.values():
+            tgt.reset_frame()
+        if self.fallback:
+            self.fallback.reset_frame()
+
+
+class IobXauiAhbDevice(Device):
+    """
+    GPMC CS2 AHB FPGA/IOB register window mapped at 0x1C000000 (size 0x04000000).
+
+    The firmware's `FUN_80727028` maps 0x8002xxxx / 0x8006xxxx / 0x8007xxxx / 0x800Axxxx /
+    0x800Bxxxx onto `(addr & ~0xFC000000) | 0x1C000000` (with bank selector written to
+    0x18000018). Models the XAUI PCS/link/PHY status registers polled by `FUN_809BCF60`,
+    `FUN_809BC3A8`, and `FUN_809BCD28` during `weapon_left_side_board_init`, plus the IOB
+    ready status registers at 0x000B0018/0x000B001C polled by `wait_for_iob_status`
+    (@0x807B3050, xsys_iob_tools.c) during `monitor_pipeline_init` (@0x8074C9E4).
+    """
+
+    BASE_ADDR = 0x1C000000
+    SIZE = 0x04000000  # Full GPMC CS2 FPGA/IOB window (0x1C000000..0x1FFFFFFF)
+
+    # IOB XAUI register low-16 offsets and link-up readback values
+    PCS_STATUS_OK = 0x03FFC02F     # +0x002C: all 4 XAUI lanes synced/aligned + link up
+    LINK_READY_BIT = 0x00200000    # +0x0010: bit 21 link up (bit 18 error clear)
+    LINK_ERR_MASK = 0x00040000
+    PHY_READY_BIT = 0x00100000     # +0x0248: bit 20 PHY locked/ready
+    IOB_STATUS_READY_MASK = 0x007FFFFF  # +0xB0018/+0xB001C: IOB readiness bits
+
+    def __init__(self, xaui_link_up: bool = True):
+        self.xaui_link_up = bool(xaui_link_up)
+        self.regs: Dict[int, int] = {
+            0x000B0018: self.IOB_STATUS_READY_MASK,
+            0x000B001C: self.IOB_STATUS_READY_MASK,
+        }
+        self._status_poll_toggle: Dict[int, bool] = {}
+
+    def _read_word(self, aligned_off: int) -> int:
+        val = self.regs.get(aligned_off, 0x00000000)
+        if 0x000B0000 <= aligned_off < 0x000B1000:
+            if not self.xaui_link_up:
+                return 0x00000000
+            if aligned_off == 0x000B0020:
+                return 0x00000004
+            cur = not self._status_poll_toggle.get(aligned_off, False)
+            self._status_poll_toggle[aligned_off] = cur
+            return 0xFFFFFFFF if cur else 0x00000000
+        reg = aligned_off & 0xFFFF
+        if self.xaui_link_up:
+            if reg == 0x002C:
+                return self.PCS_STATUS_OK
+            if reg == 0x0010:
+                return (val | self.LINK_READY_BIT) & ~self.LINK_ERR_MASK
+            if reg in (0x0068, 0x00BC):
+                return 0x00000000
+            if reg == 0x0248:
+                return val | self.PHY_READY_BIT
+        return val
+
+    def read(self, offset: int, size: int) -> int:
+        word = self._read_word(offset & ~0x3)
+        shift = (offset & 0x3) * 8
+        mask = (1 << (size * 8)) - 1
+        return (word >> shift) & mask
+
+    def write(self, offset: int, size: int, val: int):
+        aligned = offset & ~0x3
+        shift = (offset & 0x3) * 8
+        mask = ((1 << (size * 8)) - 1) << shift
+        cur = self.regs.get(aligned, 0x00000000)
+        self.regs[aligned] = ((cur & ~mask) | ((val << shift) & mask)) & 0xFFFFFFFF
+
+
 class IobMailboxDevice(Device):
     """
     GPMC AHB mailbox the IOB exposes as a memory-mapped slave at 0xA580_0000.
@@ -219,9 +325,18 @@ class CoprocessorTransport(Device):
     IOMAP_CHANNEL_LSB_FPGA = 6  # LSB-FPGA reached over iomap channel 6
 
     # LSB-FPGA real registers (sdk LSB_FPGA_CHARACTERIZED/NAMED): internal AXI 0x44A00000
-    # space + version at 0xE0000908. Seed bring-up values so driver reads see them.
+    # space + version at 0xE0000908 (and FW 0x8070EE88 reads 0xE0000904). Seed bring-up
+    # values so driver reads see them.
+    LSB_FPGA_VERSION_ALT_ADDR = 0xE0000904
+    LSB_FPGA_VERSION_ALT = 0x00030031  # major 3, rev 0x31
     LSB_FPGA_VERSION_ADDR = 0xE0000908
     LSB_FPGA_VERSION = 0x00000014      # rev 0x14 (unlocks low 0x44A0xxxx window)
+    LSB_FPGA_BITSTREAM_STAT_ADDR = 0xE00003FC
+    LSB_FPGA_BITSTREAM_READY = 0x81000000  # bit 31 done + bit 24 configured
+    LSB_FPGA_XAUI_STAT_ADDR = 0x40010008
+    LSB_FPGA_XAUI_READY = 0xC03007E0   # cap bits 0xC0300000 + XAUI ((0xFC << 3) = 0x7E0)
+    LSB_FPGA_ERR_LEN_ADDR = 0xC2000010
+    LSB_FPGA_ERR_CRC_ADDR = 0xC20000BC
 
     # Named target -> (mcspi_port_id, channel, spi_target_id). Ports/channels are the
     # emulator's McSPI wiring; the spi_target_id is the FW CS-mux selector.
@@ -233,14 +348,16 @@ class CoprocessorTransport(Device):
         "ts_fpga": (2, 0, IOMAP_CHANNEL_LSB_FPGA),
     }
 
-    def __init__(self, intc=None, mcspi: Optional[Dict[int, OmapMcspi]] = None):
+    def __init__(self, intc=None, mcspi: Optional[Dict[int, OmapMcspi]] = None, gpio=None):
         self.intc = intc
+        self.gpio = gpio
         self.spi_targets: Dict[str, CoprocessorSpiTarget] = {}
         self.mcspi_controllers: Dict[int, OmapMcspi] = {}
         self._init_spi_targets()
         self.mailbox = IobMailboxDevice(intc=intc)
+        self.iob_ahb = IobXauiAhbDevice(xaui_link_up=True)
         if mcspi:
-            self.bind_mcspi(mcspi)
+            self.bind_mcspi(mcspi, gpio=gpio)
 
     def _init_spi_targets(self):
         for name, (port_id, channel, target_id) in self.SPI_TARGET_MAP.items():
@@ -249,15 +366,39 @@ class CoprocessorTransport(Device):
                 spi_target_id=target_id, transport=self,
             )
             if name == "ts_fpga":
+                tgt.reg_set(self.LSB_FPGA_VERSION_ALT_ADDR, self.LSB_FPGA_VERSION_ALT)
                 tgt.reg_set(self.LSB_FPGA_VERSION_ADDR, self.LSB_FPGA_VERSION)
+                tgt.reg_set(self.LSB_FPGA_BITSTREAM_STAT_ADDR, self.LSB_FPGA_BITSTREAM_READY)
+                tgt.reg_set(self.LSB_FPGA_XAUI_STAT_ADDR, self.LSB_FPGA_XAUI_READY)
+                tgt.reg_set(self.LSB_FPGA_ERR_LEN_ADDR, 0x00000000)
+                tgt.reg_set(self.LSB_FPGA_ERR_CRC_ADDR, 0x00000000)
             self.spi_targets[name] = tgt
 
-    def bind_mcspi(self, mcspi_controllers: Dict[int, OmapMcspi]):
+    def bind_mcspi(self, mcspi_controllers: Dict[int, OmapMcspi], gpio=None):
         self.mcspi_controllers = mcspi_controllers
+        if gpio is not None:
+            self.gpio = gpio
         for name, target in self.spi_targets.items():
             ctrl = mcspi_controllers.get(target.port_id)
             if ctrl is not None:
                 ctrl.attach_target(target.channel, target)
+        # Firmware descriptor table @ 0x814743D8 routes SPI target 6 (LSB-FPGA) to
+        # McSPI1 (bus 0) channel 2, and targets 7/8 (ISP1/ISP2) to McSPI1 channel 0
+        # muxed by GPIO 76/77. Keep the legacy bindings above and also attach these FW paths.
+        mcspi1 = mcspi_controllers.get(1)
+        if mcspi1 is not None:
+            if "ts_fpga" in self.spi_targets:
+                mcspi1.attach_target(2, self.spi_targets["ts_fpga"])
+            if "ts_isp1" in self.spi_targets and "ts_isp2" in self.spi_targets:
+                mux = CsMuxSpiTarget(
+                    targets_by_sel={
+                        (0, 1): self.spi_targets["ts_isp1"],
+                        (1, 0): self.spi_targets["ts_isp2"],
+                    },
+                    gpio=self.gpio,
+                    fallback=self.spi_targets["ts_isp1"],
+                )
+                mcspi1.attach_target(0, mux)
 
     def _target(self, target_name: str) -> CoprocessorSpiTarget:
         tgt = self.spi_targets.get(target_name.strip().lower())

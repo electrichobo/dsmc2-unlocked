@@ -85,6 +85,7 @@ class SystemBus:
         self.fallback_warnings: List[Dict[str, Any]] = []
         self._warned_addresses = set()
         self.ram_regions: List[Tuple[int, int]] = []
+        self._extra_hook_ranges: set = set()
         self._init_memory_maps()
         self._install_bus_hooks()
 
@@ -126,6 +127,10 @@ class SystemBus:
         self.mu.mem_map(0x40000000, 0x00400000)
         self.add_ram_region(0x40000000, 0x00400000)
 
+        # 6. IVA2.2 Subsystem Memory (0x5C000000 - 0x5CFFFFFF) and IVA2.2 MMU Window (0x5D000000)
+        self.mu.mem_map(0x5C000000, 0x02000000)
+        self.add_ram_region(0x5C000000, 0x01000000)
+
     def add_ram_region(self, base_addr: int, size: int):
         """Register an address range backed by mapped RAM."""
         self.ram_regions.append((base_addr, size))
@@ -155,6 +160,15 @@ class SystemBus:
                 f"at 0x{base_addr:08X} (size=0x{size:X})"
             )
         self.devices[base_addr] = (size, device)
+        end_addr = base_addr + size - 1
+        # Devices inside 0x40000000..0x7FFFFFFF are covered by the primary bus hooks; attach
+        # scoped hooks for external MMIO windows (e.g., GPMC CS2 FPGA aperture @ 0x1C000000).
+        if not (0x40000000 <= base_addr and end_addr <= 0x7FFFFFFF) and base_addr < 0x80000000:
+            key = (base_addr, end_addr)
+            if key not in self._extra_hook_ranges and hasattr(self, "_hook_mem_read"):
+                self._extra_hook_ranges.add(key)
+                self.mu.hook_add(unicorn.UC_HOOK_MEM_READ, self._hook_mem_read, begin=base_addr, end=end_addr)
+                self.mu.hook_add(unicorn.UC_HOOK_MEM_WRITE, self._hook_mem_write, begin=base_addr, end=end_addr)
 
     def validate_trm_compliance(self) -> List[str]:
         """
@@ -272,6 +286,9 @@ class SystemBus:
                 pass
             self._record_unmapped_access(access_type, address, size, pc, value)
             return True
+
+        self._hook_mem_read = hook_mem_read
+        self._hook_mem_write = hook_mem_write
 
         # Intercept all peripheral and hardware register accesses (0x40000000..0x7fffffff)
         self.mu.hook_add(unicorn.UC_HOOK_MEM_READ, hook_mem_read, begin=0x40000000, end=0x7FFFFFFF)

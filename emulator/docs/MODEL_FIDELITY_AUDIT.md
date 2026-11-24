@@ -15,7 +15,7 @@ Legend for **Source**:
 - **SYNTHETIC (intentional)** — deliberately fake placeholder data (e.g. redacted serials),
   correct by design for a public clean-room emulator.
 
-Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
+Counts: **25 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synthetic-intentional**.
 
 ---
 
@@ -23,7 +23,8 @@ Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 
 | Model | What it claims | Source | Gaps |
 |---|---|---|---|
-| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, CS-mux target ids (ISP1=7, ISP2=8, IOB=iobspi, LSB-FPGA=iomap ch6); LSB-FPGA regs at real AXI `0x44A00000` space + version `0xE0000908`. | **FINDING** — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; memory `omap-iob-transport`. **Fixed in this PR** (was the invented 0xC2/0xA5 frame + REG_DEVICE_ID map). | Register *contents*/side-effects not modeled (reads return last-written or seeded value); no gating logic (rev<0x14 low-window block, XAUI-up high-window gate) yet; targets are register files, not live logic. |
+| `c2c.CoprocessorTransport` / `CoprocessorSpiTarget` / `CsMuxSpiTarget` | SPI register transport: byte frame `[0x81/0x01][addr u32][data u32]` + ACK `0x1F`, GPIO 76/77 CS-mux routing on `McSPI1` CH0 (`ISP1`=7, `ISP2`=8), `LSB-FPGA` on `McSPI1` CH2; LSB-FPGA regs at AXI `0x44A00000` + `0xE0000904=0x00030031`, `0xE0000908=0x00000014`, `0x40010008=0xC03007E0`. | **FINDING** (frame + CS-mux topology) + **ASSERTED** (seeded FPGA status bits) — `findings/hardware/COPROCESSOR_TRANSPORT.md`; `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`. | Register side-effects beyond XAUI/bring-up status bits not dynamically simulated. |
+| `c2c.IobXauiAhbDevice` | GPMC CS2 IOB/FPGA AHB window @`0x1C000000` (size `0x04000000`), mapped via `FUN_80727028`; serves XAUI link/PCS/PHY ready regs (`+0x0010`, `+0x002C`, `+0x0248`), ready flag at `+0xB0020=0x4`, and wait-for-set/clear handshake toggling across `0x000B0000..0x000B0FFF`. | **ASSERTED** (fixed/toggling status handshake at **FINDING**-identified offsets). | Models ready/handshake state statically rather than full live XAUI/IOB pipeline simulation. |
 | `c2c.IobMailboxDevice` | GPMC AHB IOB mailbox memory-slave @`0xA5800000`, separate from SPI. | **FINDING** — `COPROCESSOR_TRANSPORT.md` §1 (GPMC). **Added in this PR.** | Mailbox event/IRQ semantics (EVNT_MAILBOX_IOB0/1, ISP0/1/2) and descriptor format not modeled; plain word store. |
 | `c2c.IobDoorbellDevice` | Xtensa-local doorbell MMIO @`0x3FFE8000`/`0x4FFE8000`; +0x04 write fetches a 16-byte DDR descriptor (`0x800B0FFC`/`0x800B17FC`) and dispatches to the core. | **ASSERTED** (shape plausible; descriptor layout + the `handle_c2c_command` opcodes are invented). Decoupled from SPI in this PR. | Real doorbell register layout and descriptor schema unverified against fw; dispatched command set is asserted. |
 | `xtensa.Iob0Coprocessor` | SATA 3.0 link status, HDMI 1080p tx, STACCELERO accelerometer tilt. | **ASSERTED** — fabricated state (fixed accel vector, HDCP flag, tilt math). Topology contradicts findings (SATA controller is in the IOB and HBA0 goes via SATA3 FPGA; side-SATA is a Marvell serial bridge — memories `marvell-side-sata-bridge`, `dsmc2-two-sata-hbas-one-active`). | Not real Xtensa fw; `handle_c2c_command` opcodes (0x10/0x20/0x26) invented. Depth target: co-sim real `iob0` fw. |
@@ -34,6 +35,8 @@ Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 | `dsp.DspLinkIpc` | ARM↔DSP MSGQ shared-memory queues. | **ASSERTED** — generic deque IPC; message ids/format not from fw. | Real DSPLink MSGQ layout unverified. |
 | `dsp.CImagingServer` | Autofocus contrast curve, Haar face detection. | **ASSERTED** — Gaussian sharpness + hardcoded face box; demonstration only. | Not a real algorithm or server protocol. |
 | `dsp.RAudioServer` | 4-ch audio preamp/peak meter, PCM/WAV synth. | **ASSERTED** — synthesized tone/hum; plausible but not fw-derived. | Preamp/metering values invented. |
+| `dsp.OmapMailbox` | OMAP3630 Inter-Processor Mailbox @`0x48094000` (IRQ 26), 8 FIFOs, `SYSCONFIG`/`SYSSTATUS`, IRQ status/enable. | **TRM/DATASHEET** (SPRUGN4 ch.13) + fw DSPLink `OMAP3530_halIntCtrl` (`0x80EB63C0`). | Interrupt assertion back to DSP side not simulated. |
+| `dsp.OmapIva2Mmu` | OMAP3630 IVA2.2 MMU @`0x5D000000` (`MMU_SYSCONFIG`/`SYSSTATUS`, TTB, TLB load/flush) + `IVA2_MEM` @`0x5C000000`. | **TRM/DATASHEET** (SPRUGN4 ch.5) + fw DSPLink `OMAP3530_halMmuCtrl` (`0x80EB7148`). | Page-table translation not enforced for host-side DSP stub. |
 
 ## Devices (`emulator/devices/`)
 
@@ -41,12 +44,12 @@ Counts: **23 faithful** (FINDING or TRM/DATASHEET) · **7 asserted** · **2 synt
 |---|---|---|---|
 | `intc.OmapIntc` | OMAP3 MPU INTC @`0x48200000`, banks 0..2, MIR/ISR/PENDING. | **TRM/DATASHEET** (SPRUGN4). | — |
 | `prcm.OmapPrcm` | CM/PRM clock+reset @`0x48004000`/`0x48005000`, DPLL lock. | **TRM/DATASHEET** + fw addrs `0x80674A00`. | — |
-| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15. | **TRM/DATASHEET**. | — |
-| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/TX/RX; 8-bit byte path for the coprocessor frame. | **TRM/DATASHEET** (SPRUGN4 ch.20). **Byte-path added this PR** for the register frame. | Full DMA/FIFO-depth modes simplified; loopback default for unframed targets. |
-| `mcbsp.OmapMcBSP` | McBSP 2..5, DRR/DXR, SPCR DLB loopback. | **TRM/DATASHEET** + fw offsets (omap_regs.tsv). | — |
+| `sdma.OmapSdma` | 32-ch sDMA @`0x48056000`, CCR/CSR, IRQ 15; GPMC NAND prefetch stream + McSPI TX/RX byte-frame DMA. | **TRM/DATASHEET** + fw `spi_transfer` (`0x806D588C`). | Transfers complete instantaneously on CCR enable. |
+| `mcspi.OmapMcspi` | 4× McSPI, CHCONF/CHSTAT/CHCTRL/TX/RX; 8-bit byte path + `rx_dma_fifo` for sDMA transfers with sub-transfer phase preservation across `CHCTRL` toggles. | **TRM/DATASHEET** (SPRUGN4 ch.20). | Full FIFO-threshold pacing simplified; loopback default for unattached targets. |
+| `mcbsp.OmapMcBSP` | McBSP 1..5, DRR/DXR, SPCR DLB loopback. | **TRM/DATASHEET** + fw offsets (omap_regs.tsv). | — |
 | `gptimer.OmapGpTimer` | GPTimers 1..11, TISR/TCLR/TCRR; timer 2 → ThreadX tick. | **TRM/DATASHEET**. | — |
 | `uart.OmapUart` | 16550 UARTs 1-4, LSR/SSR, UART3 RCP, UART4 logs. | **TRM/DATASHEET** + fw role mapping. | — |
-| `i2c.OmapI2c` | I2C 1-3 master, XRDY/RRDY/ARDY, TWL4030 protect-key. | **TRM/DATASHEET**. | — |
+| `i2c.OmapI2c` | I2C 1-3 master, `BUF`/`BUFSTAT`, multi-chunk (>64B) `XRDY`/`RRDY`/`ARDY` interrupts, TWL4030 protect-key. | **TRM/DATASHEET**. | — |
 | `gpio.OmapGpio` | GPIO 1..6 dir/data/edge, pin callbacks, GPIO130 mux. | **TRM/DATASHEET** + fw pin roles. | — |
 | `gpmc.OmapGpmc` | GPMC + Micron MT29F8G08 NAND, geometry descriptor, backing store (program/read/erase), Micron on-die ECC feature (0x90) round-trip, Hamming ECC-result window. | **TRM/DATASHEET** + fw descriptor `0x81EF7824` + fw NAND driver (`_nand_read_sector` @0x8067ccc8, `_nand_set_internal_ecc` @0x8067b984, `_nand_set_feature`/`_nand_get_feature`). | NAND DMA source is modeled via the SDMA "instant 0xFF / dest fill" (`sdma.py`), not a true GPMC-prefetch-FIFO→DDR stream; GPMC Hamming ECC result not computed (on-die ECC path doesn't cross-check it). A fully mountable synthesized YAFFS2 image is NOT yet produced — see `nand_image.py`. |
 | `hdq_onewire.OmapHdq1Wire` | HDQ/1-Wire @`0x480B2000`; Maxim ROM cmds, CRC-8, MD5 salt, signature offsets. | **FINDING** — `findings/peripherals/ONEWIRE_SIGNATURE_AND_SENSOR_ID.md` (salt, record offsets). | Board ROM IDs/serials are synthetic (see below) — correct by design. |
@@ -89,21 +92,19 @@ source of truth.
    next layer. Source: `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`,
    `clean/lsb_fpga.c`, `iob.c`.
 
-   **This is the concrete milestone-2 blocker** (pinned down by `boot_to_ui_bringup` /
-   `test_ui_bringup.py`): past the NAND-FS mount, boot reaches the board-bring-up barrier
-   `wait_for_init_flags(0x03300FF7)` and stalls at init flags `0xC21003FF` — the four
-   board-dependent bits (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) never set
-   because the Boards child `weapon_boards_init` (@0x809B378C) AND-waits on six async board
-   workers and the LSB worker `weapon_left_side_board_init` (@0x809B5354) never completes: it
-   loops in the **XAUI link bring-up**, where `FUN_809BCF60` polls the IOB XAUI PCS status
-   through the AHB window `0x1C000000` (`FUN_80727028`: PCS @`0x1C02002C` must read `0x03FFC02F`,
-   RX-err counters @`…068`/`…0BC` read 0) and the LSB-FPGA regs via `fpga_read` (`0x40010008`
-   LinkUp/Aligned/Sync, `0xC2000010`, `0xC20000BC`). Making only that predicate return "link OK"
-   is **not** enough — the LSB worker still blocks earlier/elsewhere in `lsb_fpga_init` /
-   `lsb_fpga_xaui_phy_initx`, so the full live XAUI bring-up (ideally the IOB co-sim) is required.
-   Everything downstream — `run_application` → Camera State Manager → DSS framebuffer and the
-   firmware RCP server — is released only after the Driver thread finishes this cascade, so the
-   firmware-driven UI/DSS/RCP path is gated on this model.
+   **Milestone 1 (`0x03300FF7` board-bring-up barrier) — CLEARED** (verified by `boot_to_ui_bringup` /
+   `test_ui_bringup.py`): with OMAP sDMA McSPI transfers, GPIO-76/77 `CsMuxSpiTarget`, seeded
+   LSB-FPGA status/version registers on `McSPI1` CH2 (`0xE0000904=0x00030031`,
+   `0xE0000908=0x00000014`, `0x40010008=0xC03007E0`), `IobXauiAhbDevice` @`0x1C000000`, and
+   `slice_size=12_000` supplying sufficient GPTimer2 ticks for `Fan Init`, `weapon_boards_init`
+   (@0x809B378C) and `weapon_left_side_board_init` (@0x809B5354) complete: all four
+   board-dependent bits (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) set,
+   reaching `0xC3300FFF` and populating `hw_cap` (@0x815811F4) to `0x00041182`. Continuing past
+   `0xC3300FFF` (with `0x1C0B0018`/`0x1C0B001C` ready for `wait_for_iob_status` @0x807B3050)
+   advances through SATA (`0x4000000`), Media (`0x8000000`), IOB/ISP Binary Download (`0x1000`),
+   Monitor Pipeline (`0x2000`), HDMI (`0x4000`), and HDSDI (`0x8000`) to `0xCF30FFFF`.
+   **Milestone 2 (`0xCF3CF7FF` full driver cascade → `run_application` / `Camera State Manager`) — CLEARED** (verified by `boot_to_application` / `test_ui_bringup.py`):
+   with toggling IOB AHB status (`0x1C0B0000..0x1C0B0FFF`, `+0xB0020=0x4`), `EdidEeprom(0x50)` on `I2C2` and `I2C3`, `OmapMailbox` (`0x48094000`) + `OmapIva2Mmu` (`0x5D000000`) + `IVA2_MEM` (`0x5C000000`), and multi-chunk (>64B) Master TX in `OmapI2c`, `Driver thread` completes SATA (`0x4000000`), Media (`0x8000000`), IOB/ISP Binary Download (`0x1000`), Monitor Pipeline (`0x2000`), HDMI (`0x4000`), HDSDI (`0x8000`), Monitor Splash Screen, DSP (`0x40000`), Contiguous Media Space (`0x10000000`), Audio (`0x80000`), and Cal Load (`0x800000`) -> `0xDFBCFFFF`, then puts `0x81E53618` (@`0x8066D3C8`) so `Starter Thread` enters `run_application` (@`0x80008CB4`), creates `APP_SEMAPHORE` (@`0x814C6D1C`), and spawns `Camera State Manager`.
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),

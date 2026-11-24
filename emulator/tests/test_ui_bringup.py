@@ -1,22 +1,14 @@
 """
-Milestone 2 (UI / driver bring-up) depth probe: drive boot past the NAND-FS mount toward the
-UI/DSS/RCP bring-up and pin down the next blocker.
+Milestone 1 (UI / driver bring-up) verification: drive real boot past the NAND-FS mount
+and clear the board-bring-up barrier ``wait_for_init_flags(0x03300FF7)`` (@0x8066C7D8).
 
-After the filesystem mounts (milestone 3, init event flags ``0xC21000FF``) the Driver thread runs a
-second ``init_parallel`` cascade and blocks on the board-bring-up barrier
-``wait_for_init_flags(0x03300FF7)`` (@0x8066C7D8). Boot reaches ``0xC21003FF`` and then stalls on the
-four board-dependent bits -- Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000 -- because the
-Boards child ``weapon_boards_init`` (@0x809B378C) deadlocks: its six async board workers all run but
-the LSB worker ``weapon_left_side_board_init`` (@0x809B5354) never completes, stuck in the LSB-FPGA /
-IOB **XAUI link bring-up** (``FUN_809BCF60`` polling the XAUI PCS status it never sees go UP).
-
-Past this barrier lie ``run_application`` -> Camera State Manager -> UI / DSS framebuffer / firmware
-RCP server, all released only when the Driver thread finishes the cascade. Modelling the live XAUI
-link-up is the IOB/LSB-FPGA coprocessor model (fidelity audit ASSERTED stub) -- the next milestone.
-
-Source of truth: sdk findings/boot/BOOT_FLOW_MAP.md (init_parallel cascade + board barrier),
-RED research/docs/build/VBRAIN_DEPTH_DESIGN.md (milestone 2). This test documents the reached depth
-and the identified blocker so the regression is visible when the XAUI model lands.
+With OMAP sDMA McSPI transfers, GPIO-76/77 CS-mux routing, seeded LSB-FPGA status/version
+registers on McSPI1 CH2, and the GPMC CS2 IOB/XAUI AHB window (``IobXauiAhbDevice`` at
+0x1C000000..0x1FFFFFFF), ``weapon_boards_init`` (@0x809B378C), ``weapon_left_side_board_init``
+(@0x809B5354), and ``Fan Init`` (@0x809B2790) all complete when ``slice_size=12_000`` supplies
+sufficient GPTimer2 ticks. All four ``UI_BRINGUP_BOARD_BITS`` (Boards 0x400 | Fan 0x800 |
+XAUI 0x200000 | Mailbox 0x1000000) set -> ``0xC3300FFF`` and ``hw_cap`` (@0x815811F4) is populated
+to ``0x00041182``.
 """
 
 import pytest
@@ -28,42 +20,58 @@ pytestmark = requires_firmware
 
 @pytest.fixture(scope="module")
 def bringup():
-    """Boot once to the board-bring-up barrier (deep boot; reused across assertions)."""
+    """Boot once through the board-bring-up barrier (deep boot; reused across assertions)."""
     cam = Dsmc2Camera(workspace_root=".")
     cam.load_firmware()
-    return cam.boot_to_ui_bringup()
+    res = cam.boot_to_ui_bringup()
+    return cam, res
 
 
-def test_boot_reaches_board_bringup_barrier(bringup):
-    """Boot advances past the FS mount to the board-bring-up barrier, deterministically."""
-    res = bringup
-    # Everything the current peripheral models satisfy is set (RTC|FileX|CRYPT|NAND + driver
-    # cascade + HAL/Power); only the XAUI-blocked board bits remain clear.
+def test_boot_clears_board_bringup_barrier(bringup):
+    """Boot passes the 0x03300FF7 board-bring-up barrier and retains NAND-FS + early init bits."""
+    cam, res = bringup
+    assert res["barrier_passed"] is True
+    assert res["milestone"] == "ui_bringup"
+    assert (res["init_event_flags"] & Dsmc2Camera.UI_BRINGUP_FLAGS_BARRIER) == Dsmc2Camera.UI_BRINGUP_FLAGS_BARRIER
     assert res["init_event_flags"] == Dsmc2Camera.UI_BRINGUP_FLAGS_REACHABLE
-    # The NAND-FS mount (milestone 3 depth) is retained -- no regression.
+    # The NAND-FS mount (late-init depth) is retained -- no regression.
     assert res["init_event_flags"] & 0x8  # NAND FS
     assert res["init_event_flags"] & 0x7 == 0x7  # RTC|FileX|CRYPT
+    # Boards + Fan + XAUI + Mailbox all complete -> hw_cap populated.
+    assert cam.bus.read_u32(cam.fw(0x815811F4)) == 0x00041182
 
 
-def test_next_blocker_is_lsb_fpga_xaui(bringup):
-    """The barrier is blocked exactly on the four board-dependent bits (XAUI link bring-up)."""
-    res = bringup
-    assert res["barrier_passed"] is False
-    assert res["milestone"] == "board_bringup_barrier"
-    # Precisely Boards | Fan | XAUI | Mailbox -- all gated on the LSB XAUI link coming up.
-    assert res["blocked_board_bits"] == Dsmc2Camera.UI_BRINGUP_BOARD_BITS
-    assert res["missing_flags"] == Dsmc2Camera.UI_BRINGUP_BOARD_BITS
-    assert res["next_blocker"] is not None
-    assert "XAUI" in res["next_blocker"]
+def test_board_bringup_bits_cleared(bringup):
+    """All four UI_BRINGUP_BOARD_BITS (Boards|Fan|XAUI|Mailbox) are set with no blocker."""
+    _, res = bringup
+    assert res["missing_flags"] == 0
+    assert res["blocked_board_bits"] == 0
+    assert res["next_blocker"] is None
 
 
-def test_driver_thread_still_blocked_before_run_application(bringup):
-    """The Driver thread is event-flag blocked on the barrier; the UI app has not been released."""
-    res = bringup
+def test_driver_thread_past_barrier(bringup):
+    """Driver thread is active past the board barrier; Starter Thread awaits full 0xCF3CF7FF cascade."""
+    _, res = bringup
     names = {t["name"]: t for t in res["threads"]}
     driver = names.get("Driver thread")
-    assert driver is not None and driver["state"] == "EVENT_FLAG"
-    # The Starter Thread (thread_0_entry -> run_application) is still semaphore-blocked: the UI /
-    # DSS / RCP app is released only when the whole driver cascade completes.
+    assert driver is not None and driver["state"] != "EVENT_FLAG"
     starter = names.get("Starter Thread")
     assert starter is not None and starter["state"] == "SEMAPHORE"
+
+
+def test_boot_to_application_releases_starter_thread_and_csm(bringup):
+    """Milestone 2: full 0xCF3CF7FF cascade completes Driver thread and spawns Camera State Manager."""
+    cam, _ = bringup
+    app_res = cam.boot_to_application(_already_at_ui_bringup=True)
+    assert app_res["barrier_passed"] is True
+    assert app_res["milestone"] == "application_running"
+    assert (app_res["init_event_flags"] & Dsmc2Camera.APPLICATION_FLAGS_BARRIER) == Dsmc2Camera.APPLICATION_FLAGS_BARRIER
+    assert app_res["init_event_flags"] == Dsmc2Camera.APPLICATION_FLAGS_REACHABLE
+    assert app_res["driver_thread_completed"] is True
+    assert app_res["app_semaphore_created"] is True
+    assert app_res["camera_state_manager_spawned"] is True
+
+    names = {t["name"]: t for t in app_res["threads"]}
+    assert names["Driver thread"]["state"] == "COMPLETED"
+    assert "Camera State Manager" in names
+    assert cam.bus.read_u32(cam.fw(Dsmc2Camera.APP_SEMAPHORE_ADDR)) == Dsmc2Camera.SEMAPHORE_MAGIC

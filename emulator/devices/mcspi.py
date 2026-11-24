@@ -97,6 +97,7 @@ class OmapMcspi(Device):
         self.chctrl = [0] * self.NUM_CHANNELS
         self.tx = [0] * self.NUM_CHANNELS
         self.rx = [0] * self.NUM_CHANNELS
+        self.rx_dma_fifo = [bytearray() for _ in range(self.NUM_CHANNELS)]
 
         # Attached SPI targets per channel (0..3)
         self.targets: Dict[int, Any] = {}
@@ -107,6 +108,53 @@ class OmapMcspi(Device):
         """Attach an SPI target device to a chip-select channel (0..3)."""
         if 0 <= channel < self.NUM_CHANNELS:
             self.targets[channel] = target
+
+    def _clock_byte(self, ch_num: int, tx_byte: int) -> int:
+        """Clock one 8-bit SPI beat through the channel's attached target."""
+        target = self.targets.get(ch_num)
+        rx_resp = None
+        b = tx_byte & 0xFF
+        if target is not None:
+            if hasattr(target, "transceive_byte"):
+                rx_resp = target.transceive_byte(b)
+            if rx_resp is None and hasattr(target, "transceive_word"):
+                rx_resp = target.transceive_word(b)
+        if rx_resp is None and self.on_word_tx is not None:
+            rx_resp = self.on_word_tx(self.port_id, ch_num, b)
+        return (rx_resp if rx_resp is not None else b) & 0xFF
+
+    def dma_tx_bytes(self, ch_num: int, tx_bytes: bytes) -> None:
+        """Clock a DMA TX payload through an SPI channel and stage MISO bytes when RX is active."""
+        if not (0 <= ch_num < self.NUM_CHANNELS):
+            return
+        trm = (self.chconf[ch_num] >> 12) & 0x03  # 0=TX+RX, 1=RX-only, 2=TX-only
+        rx_stage = bytearray()
+        for b in tx_bytes:
+            rx_b = self._clock_byte(ch_num, b)
+            rx_stage.append(rx_b)
+            self.rx[ch_num] = rx_b
+        if trm != 0x02:
+            self.rx_dma_fifo[ch_num].extend(rx_stage)
+            self.chstat[ch_num] |= 0x01  # RXS = 1
+        self.chstat[ch_num] |= 0x06  # TXS = 1, EOT = 1
+
+    def dma_rx_bytes(self, ch_num: int, count: int) -> bytes:
+        """Drain `count` received MISO bytes for an sDMA RX transfer on `ch_num`."""
+        if not (0 <= ch_num < self.NUM_CHANNELS) or count <= 0:
+            return b""
+        fifo = self.rx_dma_fifo[ch_num]
+        if fifo:
+            out = bytes(fifo[:count])
+            del fifo[:count]
+            if len(out) < count:
+                out += bytes(self._clock_byte(ch_num, 0x00) for _ in range(count - len(out)))
+        else:
+            out = bytes(self._clock_byte(ch_num, 0x00) for _ in range(count))
+        if out:
+            self.rx[ch_num] = out[-1]
+        if not fifo:
+            self.chstat[ch_num] &= ~0x01
+        return out
 
     def read(self, offset: int, size: int) -> int:
         if offset == self.REG_REVISION:
@@ -176,7 +224,12 @@ class OmapMcspi(Device):
             elif reg_off == 0x04:  # MCSPI_CHSTAT
                 pass  # Read-only status
             elif reg_off == 0x08:  # MCSPI_CHCTRL
+                prev = self.chctrl[ch_num]
                 self.chctrl[ch_num] = val
+                # Sub-transfers inside a multi-part read toggle CHCTRL EN without releasing
+                # CS-mux/frame state, so clear leftover FIFO bytes but preserve target phase.
+                if (prev & 0x01) != (val & 0x01):
+                    self.rx_dma_fifo[ch_num].clear()
             elif reg_off == 0x0C:  # MCSPI_TX
                 self.tx[ch_num] = val
                 rx_resp = None

@@ -5,7 +5,7 @@ Supports OCP reset handshake, global configuration, interrupt enable/status,
 and channel configuration registers.
 """
 
-from typing import Dict
+from typing import Any, Dict, Optional, Tuple
 from emulator.core.bus import Device
 
 
@@ -37,10 +37,11 @@ class OmapSdma(Device):
     CHANNEL_STRIDE = 0x60
     CHANNEL_BASE = 0x80
 
-    def __init__(self, intc=None, cpu=None, gpmc=None):
+    def __init__(self, intc=None, cpu=None, gpmc=None, mcspi: Optional[Dict[int, Any]] = None):
         self.intc = intc
         self.cpu = cpu
         self.gpmc = gpmc  # GPMC model: NAND reads stream through its prefetch FIFO (not 0xFF fill)
+        self.mcspi = mcspi or {}
         self.revision = 0x00000040  # OMAP3 sDMA revision 4.0
         self.sysstatus = 0x00000001 # bit 0: RESETDONE = 1
         self.ocp_sysconfig = 0x00000015 # AUTOIDLE=1, SIDLEMODE=smart, MIDLEMODE=smart
@@ -79,6 +80,21 @@ class OmapSdma(Device):
 
         return self.generic_regs.get(offset, 0)
 
+    def _find_mcspi_channel(self, addr: int) -> Optional[Tuple[Any, int, str]]:
+        """Return `(mcspi_ctrl, channel, 'tx'|'rx')` if `addr` is an McSPI TX/RX FIFO register."""
+        for ctrl in self.mcspi.values():
+            ch_start = ctrl.base_addr + ctrl.CH_BASE
+            ch_end = ch_start + (ctrl.NUM_CHANNELS * ctrl.CH_STRIDE)
+            if ch_start <= addr < ch_end:
+                ch_off = addr - ch_start
+                ch_num = ch_off // ctrl.CH_STRIDE
+                reg_off = ch_off % ctrl.CH_STRIDE
+                if reg_off == 0x0C:
+                    return (ctrl, ch_num, "tx")
+                if reg_off == 0x10:
+                    return (ctrl, ch_num, "rx")
+        return None
+
     def write(self, offset: int, size: int, value: int):
         val = value & 0xFFFFFFFF
         if offset == self.REG_OCP_SYSCONFIG:
@@ -112,7 +128,7 @@ class OmapSdma(Device):
                 if reg_offset == 0x00: # DMA4_CCR (Channel Control)
                     self.channels[ch_num][reg_offset] = val
                     if val & 0x80: # Channel Enable
-                        # Complete transfer instantly for NAND / memory DMA
+                        # Complete transfer instantly for McSPI / NAND / memory DMA
                         if self.cpu and hasattr(self.cpu, "mu"):
                             cssa = self.channels[ch_num].get(0x1C, 0) # DMA4_CSSA (source)
                             cdsa = self.channels[ch_num].get(0x20, 0) # DMA4_CDSA (dest)
@@ -121,17 +137,47 @@ class OmapSdma(Device):
                             csdp = self.channels[ch_num].get(0x10, 0) # DMA4_CSDP
                             elem_size = 1 << (csdp & 3)
                             total_bytes = (cen if cen else 1) * (cfn if cfn else 1) * elem_size
-                            # The NAND read DMA sources from the GPMC CS0 window (0x10000000) with the
-                            # prefetch engine armed. Only THAT transfer drains the GPMC FIFO; every
-                            # other sDMA channel (FileX/media/memory) is left to the model's own
-                            # handling so it is not misrouted to the NAND FIFO -- gating on
-                            # prefetch_armed alone starved the FileX init DMA and dropped flag 0x2.
-                            is_nand_read = (
-                                self.gpmc is not None
-                                and self.gpmc.prefetch_armed
-                                and 0x10000000 <= cssa < 0x18000000
-                            )
-                            if total_bytes > 0 and 0x40000000 <= cdsa < 0x90000000:
+
+                            mcspi_tx = self._find_mcspi_channel(cdsa)
+                            mcspi_rx = self._find_mcspi_channel(cssa)
+
+                            if mcspi_tx is not None and mcspi_tx[2] == "tx" and total_bytes > 0:
+                                tx_ctrl, spi_ch, _ = mcspi_tx
+                                n = min(total_bytes, 65536)
+                                try:
+                                    src_amode = (val >> 12) & 0x03
+                                    if src_amode == 0:
+                                        unit = bytes(self.cpu.mu.mem_read(cssa, elem_size))
+                                        tx_payload = (unit * (n // elem_size))[:n]
+                                    else:
+                                        tx_payload = bytes(self.cpu.mu.mem_read(cssa, n))
+                                except Exception:
+                                    tx_payload = b"\x00" * n
+                                tx_ctrl.dma_tx_bytes(spi_ch, tx_payload)
+                            elif (
+                                mcspi_rx is not None
+                                and mcspi_rx[2] == "rx"
+                                and total_bytes > 0
+                                and 0x40000000 <= cdsa < 0x90000000
+                            ):
+                                rx_ctrl, spi_ch, _ = mcspi_rx
+                                n = min(total_bytes, 65536)
+                                payload = rx_ctrl.dma_rx_bytes(spi_ch, n)
+                                try:
+                                    self.cpu.mu.mem_write(cdsa, payload)
+                                except Exception:
+                                    pass
+                            elif total_bytes > 0 and 0x40000000 <= cdsa < 0x90000000:
+                                # The NAND read DMA sources from the GPMC CS0 window (0x10000000) with the
+                                # prefetch engine armed. Only THAT transfer drains the GPMC FIFO; every
+                                # other sDMA channel (FileX/media/memory) is left to the model's own
+                                # handling so it is not misrouted to the NAND FIFO -- gating on
+                                # prefetch_armed alone starved the FileX init DMA and dropped flag 0x2.
+                                is_nand_read = (
+                                    self.gpmc is not None
+                                    and self.gpmc.prefetch_armed
+                                    and 0x10000000 <= cssa < 0x18000000
+                                )
                                 if is_nand_read:
                                     n = min(total_bytes, 1 << 20)
                                     payload = self.gpmc.drain_prefetch(n)
