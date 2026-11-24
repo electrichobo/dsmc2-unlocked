@@ -76,6 +76,45 @@ PORT_BLOCK_SPAN = 0x1000            # register block size within a port (regs up
 _XAUI_PORT_BASES = (PORT_EXP1_OFF, PORT_MON0_OFF)
 
 
+# ---- SATA3-over-FPGA register block (shadow SATA registers in the IOB AHB window) ----------
+# The SATA3 driver (SATADriver.c) does NOT touch an OMAP AHCI controller: the DSMC2 main SATA
+# path is a shadow-register set that the LSB-FPGA presents in the same IOB AHB aperture, read
+# through ``FUN_80727028`` (@0x80727028). For an HBA whose pHBAInfo ``SATA3`` shadow flag
+# (hba[8]) is set -- HBA0 on the DSMC2, set by ``pHBAInfo`` @0x8069AF58 writing FPGA reg
+# 0xC2000074 then hba[8]=1 -- every register read is routed to a fixed shadow index:
+#
+#   SATA_ReadHBARegister(hba0, off) @0x8069A798  -> FUN_80727028(idx*4 + 0x800B0000)
+#       off 0x00 -> idx 0x1A0  (controller/"FPGA running" register)
+#   SATA_ReadPortRegister(dev, off) @0x8069AA38  -> FUN_80727028(idx*4 + 0x800B0000)
+#       off 0x28 -> idx 0x1AE  (PxSSTS -- AHCI SATA Status, DET/SPD/IPM)
+#
+# ``0x800B0000 & 0x3FFFFFF == 0x0B0000``, so the shadow block lands at window offset 0x0B0000.
+# Two reads gate the SATA/Media storage-init cascade (driverthread.c sata_init @0x80670504 /
+# media_init @0x8067060C):
+#   * SATA_WaitForFPGARunning @0x806ACD30 loops until SATA_ReadHBARegister(hba0,0) != 0
+#     (FPGA kick-started / running).
+#   * SATA_MediaPresent @0x806A2ACC (SATA3 branch, hba[8]!=0) returns "present" when
+#     PxSSTS has (v & 0xF0) != 0 (speed negotiated) AND (v & 0xF) == 3 (AHCI DET=3:
+#     device present + PHY communication established).  See the OMAP35x/AM/DM37xx TRM
+#     "SATA PxSSTS" field layout (DET[3:0], SPD[7:4], IPM[11:8]) -- the shadow register
+#     mirrors the standard AHCI Port x Serial ATA Status encoding.
+SATA_SHADOW_BLOCK_OFF = 0x0B0000        # 0x800B0000 & 0x3FFFFFF (SATA shadow-register base)
+SATA_SHADOW_BLOCK_SPAN = 0x0800         # covers idx 0x1A0..0x1B3 (0x680..0x6CC)
+# AHCI PxSSTS value for a present, Gen2-negotiated device:
+#   DET=0x3 (device present + PHY comm), SPD=0x2 (Gen2 3Gb/s), IPM=0x1 (active)  -> 0x00000123
+SATA_PXSSTS_PRESENT = 0x00000123
+# SATA_ReadHBARegister(hba0,0) != 0 == "FPGA running"; the FW writes 0x800B0680 to FPGA reg
+# 0x150 as the run pattern (SATA_InitializeFPGA @0x8069AE30), so present the same non-zero word.
+SATA_HBA_FPGA_RUNNING = 0x800B0680
+# Shadow-register-index -> value presented once the SATA3 FPGA link is up and media is present.
+# Index is (window_offset - 0x0B0000) >> 2.  Only the two gated indices are answered; any other
+# read in the block returns 0 (the FW only gates on these).
+_SATA_SHADOW_REGS: Dict[int, int] = {
+    0x1A0: SATA_HBA_FPGA_RUNNING,   # HBA controller reg 0 -- FPGA running / HBA alive
+    0x1AE: SATA_PXSSTS_PRESENT,     # PxSSTS -- DET=3 present, SPD=2 Gen2, IPM=1 active
+}
+
+
 # ---- FPGA-side (McSPI ch6) link-up register seeds, shared with the SPI transport -----------
 # 0x40010008: (v>>3 & 0xff) must == 0xFC  ->  0x7E0 gives (0x7E0>>3)&0xff = 0xFC
 FPGA_PCS_LINK_UP = 0x000007E0
@@ -96,8 +135,12 @@ class IobXauiWindow:
     them, exactly as a brought-up link would.
     """
 
-    def __init__(self, link_up: bool = True):
+    def __init__(self, link_up: bool = True, media_present: bool = True):
         self.link_up = link_up
+        # When True the SATA3 shadow block reports an attached, present SSD on HBA0/port0 so the
+        # SATA/Media storage-init cascade completes. False models an empty main media bay (the
+        # FW's "No media is present" branch -- a valid boot that still releases run_application).
+        self.media_present = media_present
         self.read_count = 0
         self.status_reads: Dict[int, int] = {}
 
@@ -109,17 +152,37 @@ class IobXauiWindow:
                 return base, window_offset - base
         return None, None
 
+    def _sata_idx(self, window_offset: int):
+        """Map a window offset to a SATA3 shadow-register index if it lands in the shadow block
+        (base 0x0B0000), else None. Index = (offset - base) >> 2."""
+        if SATA_SHADOW_BLOCK_OFF <= window_offset < SATA_SHADOW_BLOCK_OFF + SATA_SHADOW_BLOCK_SPAN:
+            return (window_offset - SATA_SHADOW_BLOCK_OFF) >> 2
+        return None
+
     def value_for(self, window_offset: int) -> int:
         """Return the link-up register value for an offset within the 0x1C000000 window.
 
-        Only the XAUI status registers of the two modelled port blocks (EXP1/MON0) are answered;
-        anything else reads 0 (handled as RAM by the caller via ``is_status_reg``)."""
+        Answers the two modelled XAUI port blocks (EXP1/MON0) and the SATA3 shadow-register
+        block; anything else reads 0 (handled as RAM by the caller via ``is_status_reg``)."""
+        sata_idx = self._sata_idx(window_offset)
+        if sata_idx is not None:
+            if not self.link_up:
+                return 0x00000000
+            val = _SATA_SHADOW_REGS.get(sata_idx, 0x00000000)
+            # PxSSTS reports "no device" (DET=0) when the main media bay is modelled empty; the
+            # HBA/FPGA-running register stays non-zero (controller is up regardless of media).
+            if sata_idx == 0x1AE and not self.media_present:
+                return 0x00000000
+            return val
         port_base, reg_off = self._reg_off(window_offset)
         if port_base is None or not self.link_up:
             return 0x00000000
         return _PORT_LINK_UP_REGS.get(reg_off, 0x00000000)
 
     def is_status_reg(self, window_offset: int) -> bool:
+        sata_idx = self._sata_idx(window_offset)
+        if sata_idx is not None:
+            return sata_idx in _SATA_SHADOW_REGS
         port_base, reg_off = self._reg_off(window_offset)
         return port_base is not None and reg_off in _PORT_LINK_UP_REGS
 

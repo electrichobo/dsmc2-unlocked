@@ -55,6 +55,7 @@ ASSERTED tuning note for the raw tach word and the exact part number — see its
 | `hdq_onewire` board data | 5 synthetic DSMC2 boards (LSB `131-0727`, RSB `131-0726`). | **SYNTHETIC (intentional)** — placeholder ROM IDs/serials; real serials are unit-identifying and must never be committed (per RED redaction rule). | By design; part numbers (`131-07xx`) are public-OK, suffixes faked. |
 | `cam_isp.OmapCamIsp` | OMAP Camera ISP @`0x480BC000` + SCM_ID `0x4830A000`. | **TRM/DATASHEET** + fw regs (omap_regs.tsv); DIE_ID synthetic. | — |
 | `iob_xaui.IobXauiWindow` | IOB XAUI AHB aperture @`0x1C000000`: presents an UP IOB↔LSB-FPGA XAUI link on the status words `lsb_fpga_report_xaui_status` (@0x809BCF64) polls via `FUN_80727028` — PCS `+0x2C`=`0x03FFC02F`, XAUI status `+0x10` (PHY-ready set / RX-fault clear), len-err `+0x68`=0, CRC-err `+0xBC`=0, PHY_CLK_CTRL `+0x248` PLL-ready — on both the EXP1 (win `0x20000`) and MON0 (win `0x60000`) port blocks. | **FINDING** — `findings/peripherals/LSB_FPGA_{CHARACTERIZED,NAMED}.md`; `clean/lsb_fpga.c` + `clean/weapon_left_side_board.c`; memory `omap-iob-transport`, `xaui-lane-sharing-sata-mon0`. Verified at the firmware predicate (`test_xaui_link.py`). | Register *state* only (the real link PHY/PCS bring-up is not simulated); the FPGA-side half (over `fpga_read(6,…)` → `ts_fpga`) requires the McSPI1-over-sDMA transport to complete (next milestone), so the LSB worker is not yet reached in a full boot. |
+| `iob_xaui.IobXauiWindow` (SATA3 shadow block) | Same aperture also carries the SATA3 shadow-register block at window off `0x0B0000` (stock base `0x800B0000`). The DSMC2 main SATA path has no OMAP AHCI controller — the LSB-FPGA presents shadow regs read through the same `FUN_80727028`. For HBA0 (pHBAInfo SATA3 flag `hba[8]=1`) `SATA_ReadHBARegister(hba0,0)` @0x8069A798 → idx `0x1A0` (off `0x0B0680`, non-zero = FPGA running) and `SATA_ReadPortRegister(dev,0x28)` @0x8069AA38 → idx `0x1AE` (off `0x0B06B8`, PxSSTS). With `media_present=False` PxSSTS reports DET=0 (empty bay), so `sata_init` @0x80670504 posts 0x04000000 and `media_init` @0x8067060C takes its "No media is present" success branch (log 0xa18) and posts 0x08000000 — the whole storage barrier 0x0C000000 crosses from the firmware's own code. | **FINDING (firmware-derived)** — register routing + predicates reverse-engineered from `RED_FW_COMPLETE.bin`: `SATADriver.c` `SATA_PhyConfig`@0x806A0E80, `SATA_MediaPresent`@0x806A2ACC ((v&0xF0)!=0 && (v&0xF)==3 = AHCI DET=3), `SATA_WaitForFPGARunning`@0x806ACD30, `SATA_ReadPortRegister`@0x8069AA38, `SATA_ReadHBARegister`@0x8069A798, `pHBAInfo`@0x8069AF58 (writes FPGA 0xC2000074 then hba[8]=1), `red_media_get_HBA_info`@0x800A0670, `red_media_init`@0x800A04FC; `FUN_80727028`@0x80727028 (`*((addr&0x3FFFFFF)|0x1C000000)`). PxSSTS field layout (DET[3:0]/SPD[7:4]/IPM[11:8]) per the OMAP35x/DM37xx TRM "SATA PxSSTS". memories `dsmc2-two-sata-hbas-one-active`, `marvell-side-sata-bridge`. Verified `test_dss_sata_shadow.py` + `test_run_application.py`. | **ASSERTED (one value)**: the "FPGA running" word `0x800B0680` presented at idx `0x1A0` is the pattern the FW *writes* to FPGA reg 0x150 (`SATA_InitializeFPGA`), reused as a plausible non-zero "alive" readback — only its non-zeroness is firmware-required, the exact bits are not an independently-read golden. An **attached** SSD (media_present=True path) is NOT modeled: `SATA_DevAttach`@0x806985E4 (SATA_HostInit/PortReset/IdentifyDevice — the AHCI command/FIS/PRDT engine + ATA IDENTIFY) is out of scope, so the emulator models an empty main bay (a valid card-less boot). |
 | `l4_interconnect` (`OmapL4Ap`/`OmapScm`) | L4 AP/Link Agent, SCM/PADCONF; `0x49000000` = L4-PER AP (Sonics S3220 `0x40000800`). | **TRM/DATASHEET** (Table 2-3/2-4). Correctly replaces the old synthetic C2C at `0x49000000`. | — |
 | `i2c_dsmc2_chips.Si5346ClockSynth` | Si5346 (`0x6C`) ISP clock synth, page map. | **FINDING** — `findings/peripherals/SI5346_CLOCK.md`; `reference/I2C_DEVICE_MAP.md`; memory `si5346-isp-clock`. | 378-entry register map not fully loaded; ACK-level only. |
 | `i2c_dsmc2_chips` (DAC7578, FT5x06) | DAC7578 (`0x49`/`0x4B`), FocalTech FT5x06 (`0x3E`). | **DATASHEET** + `reference/I2C_DEVICE_MAP.md` (IDs synthetic). | — |
@@ -131,16 +132,31 @@ source of truth.
    and the whole board-bring-up barrier passes; boot reaches `0xC3300FFF`.** Verified in
    `test_fan_tach.py` + `test_ui_bringup.py`.
 
-   **Next blocker (this PR's measured depth): SATA/Media storage init (0x0C000000).** Past the
-   board barrier the Driver thread (@0x8066C92C) dispatches two more `init_parallel` stages —
-   "SATA" (worker @0x80670504, completion bit 0x04000000) and "Media" (worker @0x8067060C,
-   completion bit 0x08000000) — then blocks at `wait_for_init_flags(0x0C000000)` (@0x8066D000 →
-   `wait_for_init_flags` @0x8066C7D8 → `red_event_flags_get` @0x8070E748) for both. Those storage-
-   init workers don't post their bits under the current models, so 0x04000000 / 0x08000000 stay
-   clear and `run_application` (Starter Thread @0x80008E24 → Camera State Manager → DSS framebuffer
-   + firmware RCP server) stays semaphore-blocked. The next milestone is the **SATA/AHCI + media
-   storage bring-up** (see `boot_to_run_application` / `test_run_application.py`). (The requested
-   0x0C000000 and its caller 0x8066D000 were captured from the running firmware.)
+   **SATA/Media storage barrier (0x0C000000) — now CROSSED (this PR).** Past the board barrier the
+   Driver thread (@0x8066C92C) dispatches "SATA" (worker @0x80670504, bit 0x04000000) and "Media"
+   (worker @0x8067060C, bit 0x08000000) and blocks at `wait_for_init_flags(0x0C000000)` (@0x8066D000
+   → `wait_for_init_flags` @0x8066C7D8 → `red_event_flags_get` @0x8070E748). The IOB-AHB SATA3
+   shadow-register model (`iob_xaui.IobXauiWindow`, off `0x0B0000`) presents an up FPGA/HBA link so
+   `sata_init` posts 0x04000000, and the main media bay is modelled empty (PxSSTS DET=0) so
+   `media_init` takes its own "No media is present" success branch and posts 0x08000000. **Both
+   bits now set from the firmware's own code; the storage barrier crosses.** The IOB/ISP binary
+   download (0x1000, deps Mailbox|XAUI) also completes. Verified `test_run_application.py` +
+   `test_dss_sata_shadow.py`.
+
+   **Next blocker (this PR's measured depth): DSS/display + DSP/audio init batch (0x000CE000).**
+   Past the storage barrier the Driver dispatches the display/DSP batch — Monitor Pipeline (0x2000,
+   `monitor_pipeline_init` @0x8074C9E4), HDMI (0x4000, @0x80748874), HDSDI (0x8000, @0x8074F38C),
+   DSP (0x40000, `dsp_init` @0x80670FFC), Audio (0x80000, @0x806712CC) — and blocks on its final
+   `wait_for_init_flags(0xCF3CF7FF)`. Under the current thread scheduler those init_parallel
+   children are not resumed after the IOB/ISP-download bit sets, so boot stalls at **0xCF301FFF**
+   (missing 0x000CE000) with the Driver parked in the ThreadX scheduler (~0x80EA4A94) and
+   `run_application` (Starter Thread @0x80008E24 → `run_application` @0x80008CB4 → "Camera State
+   Manager" thread → DSS framebuffer + firmware RCP server) still semaphore-blocked. The worker
+   bodies themselves complete (`monitor_pipeline_init`/`dsp_init` return 1), so the next milestone
+   is the **thread-scheduler resume of the display-batch `init_parallel` children** — once the
+   Camera State Manager spawns, the DSS DISPC framebuffer init and the firmware RCP TCP server come
+   up. (The dependency graph, requested barriers and stall PC were captured from the running
+   firmware via `run_dispatch_harness`.)
 
 3. **Subsystem register models to verify/upgrade from ASSERTED → FINDING**: the SATA HBA0/
    HBA1 topology (AHCI HBA0 via SATA3-FPGA + side Marvell serial "W<reg><data>" bridge),
