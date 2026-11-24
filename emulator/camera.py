@@ -1334,6 +1334,35 @@ class Dsmc2Camera:
             "wait_barriers": waits,
         }
 
+    def call_function(
+        self,
+        entry_pc: int,
+        args: Optional[List[int]] = None,
+        scratch_sp: int = 0x881D0000,
+        max_instructions: int = 5_000_000,
+        step_size: int = 50_000,
+    ) -> int:
+        """Call a firmware function directly (AAPCS) and return r0.
+
+        Sets r0..r3 from ``args`` (first four, AAPCS register args), the stack pointer to
+        ``scratch_sp`` (a scratch DDR region above the live app region), and ``lr`` to the
+        ThreadX idle-loop entry (``IDLE_LOOP_ENTRY`` 0x80E9C368) as a return sentinel, then
+        executes until the function returns to that sentinel. Addresses are stock 7.4.1
+        (translated through the address map). Intended for probing an already-reached boot
+        state (e.g. after ``boot_to_application``) by invoking a leaf/short firmware routine
+        in place; not safe for routines that block on a ThreadX primitive (mutex/semaphore
+        get), which the single-threaded direct call cannot resume.
+        """
+        args = args or []
+        for i, a in enumerate(args[:4]):
+            self.cpu.set_r(i, a & 0xFFFFFFFF)
+        sentinel = self.fw(self.IDLE_LOOP_ENTRY)
+        self.cpu.sp = scratch_sp
+        self.cpu.lr = sentinel
+        self.cpu.pc = self.fw(int(entry_pc))
+        self.boot_until(sentinel, max_instructions=max_instructions, step_size=step_size)
+        return self.cpu.get_r(0)
+
     def add_pc_hook(
         self,
         addr: int,
