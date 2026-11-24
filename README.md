@@ -114,7 +114,8 @@ The platform is reverse-engineered end to end. What is already done and document
 
 ## Quickstart — the tools
 
-**No install: the [DSMC Workbench](web/)** runs the same tools in Chrome or Edge.
+**No install: open the [DSMC Workbench](https://radosek.github.io/dsmc2-unlocked/)**
+([source](web/)). It runs the same tools in the browser.
 It decodes and triages logs, opens firmware downloads (DSMC2, DSMC1 and RED ONE),
 reads and builds presets, and runs the `dsmcdbg` self-test on a camera over
 WebSerial. Everything runs in the browser tab; no file leaves the computer.

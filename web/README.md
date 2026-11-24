@@ -1,5 +1,7 @@
 # DSMC Workbench
 
+**Live: <https://radosek.github.io/dsmc2-unlocked/>**
+
 The browser front-end for this repository's tools. It runs entirely in the tab:
 the Rust crates are compiled to WebAssembly and no file or camera data is ever
 uploaded. Serial access uses WebSerial, so the Camera page needs Chrome or Edge
