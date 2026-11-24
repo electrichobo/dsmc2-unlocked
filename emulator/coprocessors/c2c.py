@@ -236,13 +236,60 @@ class IobXauiAhbDevice(Device):
 
     def __init__(self, xaui_link_up: bool = True):
         self.xaui_link_up = bool(xaui_link_up)
+        self.sata_media_present: bool = True
+        self.sata_shadow_sregs_enabled: bool = False
         self.regs: Dict[int, int] = {
             0x000B0018: self.IOB_STATUS_READY_MASK,
             0x000B001C: self.IOB_STATUS_READY_MASK,
+            0x000B06CC: 0x0000000C,
         }
         self._status_poll_toggle: Dict[int, bool] = {}
 
+    def _read_sata_ahci_reg(self, aligned_off: int) -> Optional[int]:
+        """Serve HBA0 SATA3-FPGA / AHCI direct (0x5006xxxx/0x5007xxxx) and shadow SREGs (0xB0680..)."""
+        px_ssts = 0x00000133 if self.sata_media_present else 0x00000000  # Gen3 6.0Gbps, DET=3
+        direct_ahci_map = {
+            0x00060000: 0x4034FF00,  # AHCI CAP
+            0x00060004: 0x80000000,  # AHCI GHC (AE=1)
+            0x00060008: 0x00000000,  # AHCI IS
+            0x0006000C: 0x00000001,  # AHCI PI (Port 0 implemented)
+            0x00060010: 0x00010300,  # AHCI VS (v1.3)
+            0x00060118: 0x00014017,  # PxCMD
+            0x00060120: 0x00000050,  # PxTFD (DRDY|DSC)
+            0x00060128: px_ssts,     # PxSSTS
+            0x00060130: 0x00000000,  # PxSERR
+            0x00060134: 0x00000000,  # PxSACT
+            0x00060138: 0x00000000,  # PxCI
+            0x00070010: 0x00000000 if self.sata_media_present else 0x00000004,
+        }
+        if aligned_off in direct_ahci_map:
+            return direct_ahci_map[aligned_off]
+        if not self.sata_shadow_sregs_enabled:
+            return None
+        shadow_sreg_map = {
+            # Shadow SREGs @ 0x800B0680..0x800B06CC (SATADriver.c idx 0x1A0..0x1B3)
+            0x000B0680: 0x4034FF00,
+            0x000B0684: 0x80000000,
+            0x000B0688: 0x00000000,
+            0x000B068C: 0x00000001,
+            0x000B0690: 0x00010300,
+            0x000B06B0: 0x00014017,
+            0x000B06B4: 0x00000050,
+            0x000B06B8: px_ssts,
+            0x000B06C0: 0x00000000,
+            0x000B06C4: 0x00000000,
+            0x000B06C8: 0x00000000,
+        }
+        if aligned_off in shadow_sreg_map:
+            return shadow_sreg_map[aligned_off]
+        if aligned_off == 0x000B06CC:
+            return self.regs.get(0x000B06CC, 0x0000000C)
+        return None
+
     def _read_word(self, aligned_off: int) -> int:
+        sata_val = self._read_sata_ahci_reg(aligned_off)
+        if sata_val is not None:
+            return sata_val
         val = self.regs.get(aligned_off, 0x00000000)
         if 0x000B0000 <= aligned_off < 0x000B1000:
             if not self.xaui_link_up:
@@ -335,6 +382,8 @@ class CoprocessorTransport(Device):
     LSB_FPGA_BITSTREAM_READY = 0x81000000  # bit 31 done + bit 24 configured
     LSB_FPGA_XAUI_STAT_ADDR = 0x40010008
     LSB_FPGA_XAUI_READY = 0xC03007E0   # cap bits 0xC0300000 + XAUI ((0xFC << 3) = 0x7E0)
+    LSB_FPGA_SSD_DETECT_ADDR = 0x44A0000C  # bit 18 (0x40000) clear => SSD present
+    LSB_FPGA_SIDE_SATA_CTRL_ADDR = 0xC2000074
     LSB_FPGA_ERR_LEN_ADDR = 0xC2000010
     LSB_FPGA_ERR_CRC_ADDR = 0xC20000BC
 
@@ -356,6 +405,7 @@ class CoprocessorTransport(Device):
         self._init_spi_targets()
         self.mailbox = IobMailboxDevice(intc=intc)
         self.iob_ahb = IobXauiAhbDevice(xaui_link_up=True)
+        self.side_sata_bridge = MarvellSideSataBridge()
         if mcspi:
             self.bind_mcspi(mcspi, gpio=gpio)
 
@@ -370,9 +420,23 @@ class CoprocessorTransport(Device):
                 tgt.reg_set(self.LSB_FPGA_VERSION_ADDR, self.LSB_FPGA_VERSION)
                 tgt.reg_set(self.LSB_FPGA_BITSTREAM_STAT_ADDR, self.LSB_FPGA_BITSTREAM_READY)
                 tgt.reg_set(self.LSB_FPGA_XAUI_STAT_ADDR, self.LSB_FPGA_XAUI_READY)
+                tgt.reg_set(self.LSB_FPGA_SSD_DETECT_ADDR, 0x00000000)
+                tgt.reg_set(self.LSB_FPGA_SIDE_SATA_CTRL_ADDR, 0x00000001)
                 tgt.reg_set(self.LSB_FPGA_ERR_LEN_ADDR, 0x00000000)
                 tgt.reg_set(self.LSB_FPGA_ERR_CRC_ADDR, 0x00000000)
             self.spi_targets[name] = tgt
+
+    def set_ssd_present(self, present: bool) -> None:
+        """Update HBA0 SATA3 PxSSTS + LSB-FPGA SSD detect bit 18 (0x44A0000C)."""
+        p = bool(present)
+        self.iob_ahb.sata_shadow_sregs_enabled = True
+        self.iob_ahb.sata_media_present = p
+        self.side_sata_bridge.media_present = p
+        fpga = self.spi_targets.get("ts_fpga")
+        if fpga is not None:
+            cur = fpga.reg_get(self.LSB_FPGA_SSD_DETECT_ADDR)
+            new_val = (cur & ~0x00040000) if p else (cur | 0x00040000)
+            fpga.reg_set(self.LSB_FPGA_SSD_DETECT_ADDR, new_val)
 
     def bind_mcspi(self, mcspi_controllers: Dict[int, OmapMcspi], gpio=None):
         self.mcspi_controllers = mcspi_controllers
@@ -507,3 +571,45 @@ class IobDoorbellDevice(Device):
                     self.coprocessor.handle_c2c_command(cmd, [arg0, arg1, arg2])
             except Exception:
                 pass
+
+
+class MarvellSideSataBridge:
+    """
+    Side-SATA Marvell serial register bridge + Silicon Motion SM2246EN MINI-MAG identity.
+
+    Accepts the `"W<reg:04X><data:08X>"` / `"R<reg:04X>"` command framing used on the
+    HBA1 side-SATA serial bridge and exposes ATA IDENTIFY / SMART log `0x90` metadata.
+    """
+
+    def __init__(self, model: str = "RED MINI-MAG 512GB", controller: str = "SM2246EN"):
+        self.model = model
+        self.controller = controller
+        self.media_present: bool = True
+        self.regs: Dict[int, int] = {
+            0x0000: 0x1B4B9230,  # Marvell bridge vendor/device ID
+            0x0004: 0x00000133,  # SATA Gen3 link status
+        }
+
+    def execute_serial_command(self, cmd: str) -> str:
+        """Handle Marvell `'W<reg:04X><data:08X>'` or `'R<reg:04X>'` bridge command."""
+        s = cmd.strip().upper()
+        if s.startswith("W") and len(s) >= 13:
+            reg = int(s[1:5], 16)
+            val = int(s[5:13], 16)
+            self.regs[reg] = val & 0xFFFFFFFF
+            return "OK"
+        if s.startswith("R") and len(s) >= 5:
+            reg = int(s[1:5], 16)
+            val = self.regs.get(reg, 0x00000133 if reg == 0x0004 and self.media_present else 0)
+            return f"{val:08X}"
+        return "ERR"
+
+    def get_smart_log_90(self) -> Dict[str, Any]:
+        return {
+            "controller": self.controller,
+            "model": self.model,
+            "media_present": self.media_present,
+            "auth_signature": "RED_SM2246EN_SMART90_OK",
+            "health_pct": 100,
+        }
+

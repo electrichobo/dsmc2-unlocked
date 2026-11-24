@@ -61,6 +61,7 @@ from emulator.storage.vfs import VirtualFileSystem
 from emulator.storage.r3d_recorder import R3dClipRecorder
 from emulator.rcp.protocol import RcpProtocol
 from emulator.rcp.server import RcpServer
+from emulator.rcp.rftp import RedpineRs9113Wifi, RftpServer
 from emulator.rcp.automation import RcpScriptEngine, RcpScriptStep, MultiCameraNetwork
 from emulator.devices.lens_mount import LensMount
 from emulator.core.snapshot import SnapshotManager
@@ -163,9 +164,11 @@ class Dsmc2Camera:
         self.vfs = VirtualFileSystem(self.firmware_slot_dir, self.persistent_dir)
         self.env = self.vfs.env
 
-        # 3. RCP Protocol, Server, Scripting & Multi-Camera Network
+        # 3. RCP Protocol, Server, Scripting, Wi-Fi/RFTP & Multi-Camera Network
         self.rcp = RcpProtocol(camera=self)
         self.rcp_server = RcpServer(self.rcp, host="127.0.0.1", port=1111)
+        self.wifi = RedpineRs9113Wifi()
+        self.rftp = RftpServer(self)
         self.rcp_script_engine = RcpScriptEngine()
         self.multicam_network = MultiCameraNetwork(self)
 
@@ -863,6 +866,7 @@ class Dsmc2Camera:
         if not ready:
             ready, flags, sema_magic, threads = _is_ready()
 
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = True
         self.is_booted = True
         self.power_state = self.POWER_ON
         driver = next((t for t in threads if t["name"] == "Driver thread"), None)

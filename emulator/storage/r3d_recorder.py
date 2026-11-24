@@ -8,6 +8,7 @@ clip naming conventions (e.g. A001_C001_0101AB_001.RDC),
 import os
 import struct
 import time
+import zlib
 import threading
 from typing import Dict, Any, List, Optional
 
@@ -26,6 +27,7 @@ class R3dClipRecorder:
         self.storage_root = os.path.abspath(storage_root)
         self.media_dir = os.path.join(self.storage_root, "persistent_store", "media")
         os.makedirs(self.media_dir, exist_ok=True)
+        self.udf_image_path = os.path.join(self.media_dir, "minimag_udf.img")
 
         # Media Reel State
         self.camera_letter = "A"
@@ -49,6 +51,7 @@ class R3dClipRecorder:
         # Lock and worker thread
         self._lock = threading.RLock()
         self._worker: Optional[threading.Thread] = None
+        self._write_udf_volume_header()
 
     @property
     def record_state(self) -> int:
@@ -202,6 +205,8 @@ class R3dClipRecorder:
             self.clip_number = 1
             self.used_space_mb = 12.0 # Minimal filesystem overhead
             self.is_media_mounted = True
+            self._sync_hardware_media_state(True)
+            self._write_udf_volume_header()
 
             if hasattr(self.camera, "rcp"):
                 self.camera.rcp.state["media_remaining_percent"] = str(self.media_remaining_percent)
@@ -218,6 +223,7 @@ class R3dClipRecorder:
             if self.is_recording:
                 self.stop_recording()
             self.is_media_mounted = False
+            self._sync_hardware_media_state(False)
             if hasattr(self.camera, "rcp"):
                 self.camera.rcp.state["media_remaining_percent"] = "0"
             if hasattr(self.camera, "log_system"):
@@ -228,11 +234,61 @@ class R3dClipRecorder:
         """Mount virtual RED MINI-MAG."""
         with self._lock:
             self.is_media_mounted = True
+            self._sync_hardware_media_state(True)
+            self._write_udf_volume_header()
             if hasattr(self.camera, "rcp"):
                 self.camera.rcp.state["media_remaining_percent"] = str(self.media_remaining_percent)
             if hasattr(self.camera, "log_system"):
                 self.camera.log_system(f"[MEDIA] RED MINI-MAG {int(self.MEDIA_CAPACITY_GB)}GB mounted on SATA0.")
             return True
+
+    def _sync_hardware_media_state(self, mounted: bool) -> None:
+        if hasattr(self.camera, "c2c") and self.camera.c2c is not None:
+            self.camera.c2c.set_ssd_present(mounted)
+        if hasattr(self.camera, "iob0") and self.camera.iob0 is not None:
+            self.camera.iob0.sata_link_up = bool(mounted)
+
+    def _write_udf_volume_header(self) -> None:
+        """Create/refresh ECMA-167 / UDF 2.01 volume descriptor image on virtual MINI-MAG."""
+        img_size = 64 * 1024  # 32 x 2048B sectors
+        buf = bytearray(img_size)
+        # Volume Recognition Sequence starting at byte 32768 (sector 16)
+        buf[0x8000:0x8007] = b"\x00BEA01\x01"
+        buf[0x8800:0x8807] = b"\x00NSR02\x01"
+        buf[0x9000:0x9007] = b"\x00TEA01\x01"
+        # Primary Volume Descriptor summary at sector 32 (offset 0x10000 - within 64KB -> sector 20)
+        pvd_off = 20 * 2048
+        meta = (
+            f"UDF2.01;VOL_ID=RED_MINIMAG;REEL={self.current_reel_id};"
+            f"CAP_GB={int(self.MEDIA_CAPACITY_GB)};FILESYSTEM=UDF"
+        ).encode("ascii")
+        struct.pack_into(">4sI", buf, pvd_off, b"PVD1", len(meta))
+        buf[pvd_off + 8:pvd_off + 8 + len(meta)] = meta
+        with open(self.udf_image_path, "wb") as f:
+            f.write(buf)
+
+    def verify_udf_filesystem(self) -> Dict[str, Any]:
+        """Verify ECMA-167 / UDF 2.01 volume descriptors and return health summary."""
+        if not os.path.isfile(self.udf_image_path):
+            self._write_udf_volume_header()
+        with open(self.udf_image_path, "rb") as f:
+            data = f.read()
+        has_bea = data[0x8001:0x8006] == b"BEA01"
+        has_nsr = data[0x8801:0x8806] == b"NSR02"
+        has_tea = data[0x9001:0x9006] == b"TEA01"
+        valid = self.is_media_mounted and has_bea and has_nsr and has_tea and (b"VOL_ID=RED_MINIMAG" in data)
+        if hasattr(self.camera, "log_system"):
+            self.camera.log_system(
+                f"[MEDIA] UDF verify: {'VALID' if valid else 'INVALID'} (ECMA-167 NSR02, Reel {self.current_reel_id})"
+            )
+        return {
+            "valid": valid,
+            "filesystem": "UDF 2.01 (ECMA-167)",
+            "volume_id": "RED_MINIMAG",
+            "reel_id": self.current_reel_id,
+            "clip_count": len(self.list_clips()),
+            "udf_image_path": self.udf_image_path,
+        }
 
     def list_clips(self) -> List[Dict[str, Any]]:
         """Scan media directory and return list of recorded clips with full metadata."""
@@ -305,22 +361,191 @@ class R3dClipRecorder:
             # 3. 'mdat' header (Media Data Atom)
             f.write(struct.pack(">I4s", 0, b"mdat")) # 0 = runs to EOF or updated later
 
-    def _finalize_r3d_file(self, path: str, clip_name: str, total_frames: int, clip_mb: float):
-        """Finalize .R3D file by padding simulated raw wavelet frames and updating footer."""
+    def _finalize_r3d_file(
+        self,
+        path: str,
+        clip_name: str,
+        total_frames: int,
+        clip_mb: float,
+        frame_payloads: Optional[List[bytes]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Finalize .R3D file with dual-ISP wavelet-encoded frames, IOB0 SATA DMA, and `r3di` index."""
+        encoded_frames: List[Dict[str, Any]] = []
         if not path or not os.path.exists(path):
-            return
+            return encoded_frames
 
-        with open(path, "ab") as f:
-            # Append simulated wavelet frame markers
+        isp1 = getattr(self.camera, "isp1", None)
+        isp2 = getattr(self.camera, "isp2", None)
+        iob0 = getattr(self.camera, "iob0", None)
+        rcp = getattr(self.camera, "rcp", None)
+        ratio = "8:1"
+        if rcp and "8:1" in str(rcp.state.get("record_file_format", "8:1")):
+            ratio = "8:1"
+
+        frame_offsets: List[int] = []
+        with open(path, "r+b") as f:
+            f.seek(0, os.SEEK_END)
             for i in range(min(total_frames, 64)):
-                frame_hdr = struct.pack(">4sII", b"REDf", i, 65536) # Frame box
-                f.write(frame_hdr)
-                f.write(b"\x00" * 512) # Frame payload chunk
+                if frame_payloads and i < len(frame_payloads):
+                    raw_frame = frame_payloads[i]
+                else:
+                    pattern = bytes(((i * 31 + j) & 0xFF) for j in range(256))
+                    raw_frame = pattern * 32  # 8192-byte synthetic Bayer sensor frame
 
-            # Write R3D footer index
-            footer_data = f"INDEX_EOF;FRAMES={total_frames};SIZE_MB={clip_mb:.2f};STATUS=FINAL".encode("utf-8")
+                isp = isp2 if (i % 2 == 1 and isp2 is not None) else isp1
+                if isp is not None:
+                    comp = isp.compress_frame(raw_frame, ratio=ratio)
+                    comp_size = comp["compressed_size_bytes"]
+                    g1_crc = comp["slice_crcs"]["G1"]
+                    b_crc = comp["slice_crcs"]["B"]
+                    r_crc = comp["slice_crcs"]["R"]
+                    g2_crc = comp["slice_crcs"]["G2"]
+                    frame_crc = comp["crc32"]
+                else:
+                    comp_size = max(64, len(raw_frame) // 8)
+                    g1_crc = zlib.crc32(b"G1" + raw_frame[:100]) & 0xFFFFFFFF
+                    b_crc = zlib.crc32(b"B" + raw_frame[100:200]) & 0xFFFFFFFF
+                    r_crc = zlib.crc32(b"R" + raw_frame[200:300]) & 0xFFFFFFFF
+                    g2_crc = zlib.crc32(b"G2" + raw_frame[300:400]) & 0xFFFFFFFF
+                    frame_crc = zlib.crc32(raw_frame[:comp_size]) & 0xFFFFFFFF
+
+                if iob0 is not None:
+                    iob0.record_frame_dma(comp_size)
+
+                wavelet_bytes = raw_frame[:comp_size]
+                box_size = 8 + 28 + len(wavelet_bytes)
+                frame_offsets.append(f.tell())
+                f.write(struct.pack(">I4s", box_size, b"REDf"))
+                f.write(struct.pack(">IIIIIII", i, comp_size, g1_crc, b_crc, r_crc, g2_crc, frame_crc))
+                f.write(wavelet_bytes)
+
+                encoded_frames.append({
+                    "frame_index": i,
+                    "compressed_size": comp_size,
+                    "slice_crcs": {"G1": g1_crc, "B": b_crc, "R": r_crc, "G2": g2_crc},
+                    "crc32": frame_crc,
+                })
+
+            offsets_str = ",".join(str(o) for o in frame_offsets)
+            footer_data = (
+                f"INDEX_EOF;FRAMES={total_frames};SIZE_MB={clip_mb:.2f};OFFSETS={offsets_str};STATUS=FINAL"
+            ).encode("utf-8")
             f.write(struct.pack(">I4s", len(footer_data) + 8, b"r3di"))
             f.write(footer_data)
+
+        return encoded_frames
+
+    def record_clip_frames(
+        self,
+        num_frames: int = 5,
+        raw_frames: Optional[List[bytes]] = None,
+    ) -> Dict[str, Any]:
+        """Deterministically record an exact N-frame .R3D clip through ISP1/ISP2 and IOB0 SATA DMA."""
+        with self._lock:
+            if not self.is_media_mounted:
+                raise RuntimeError("No RED MINI-MAG mounted")
+            n = max(1, int(num_frames))
+            clip_id = f"{self.current_reel_id}_C{self.clip_number:03d}_{self.camera_id_code}_001"
+            reel_dir = os.path.join(self.media_dir, f"{self.current_reel_id}_{self.camera_id_code}")
+            rdc_dir = os.path.join(reel_dir, f"{clip_id}.RDC")
+            os.makedirs(rdc_dir, exist_ok=True)
+
+            r3d_path = os.path.join(rdc_dir, f"{clip_id}.R3D")
+            rmd_path = os.path.join(rdc_dir, f"{clip_id}.RMD")
+            rtn_path = os.path.join(rdc_dir, f"{clip_id}.rtn")
+            with open(rtn_path, "wb") as f:
+                f.write(b"RED_THUMBNAIL_STREAM_CACHE_V2\x00")
+
+            fps_val = float(self.camera.rcp.state.get("frame_rate", "24.00")) if hasattr(self.camera, "rcp") else 24.0
+            base_min = (self.clip_number * 3) % 60
+            start_tc = f"01:{base_min:02d}:00:00"
+            secs = n // max(1, int(fps_val))
+            rem = n % max(1, int(fps_val))
+            end_tc = f"01:{base_min + (secs // 60):02d}:{secs % 60:02d}:{rem:02d}"
+
+            self._write_initial_r3d_file(r3d_path, clip_id)
+            clip_mb = (n / max(1.0, fps_val)) * self.DATA_RATE_MB_PER_SEC
+            encoded = self._finalize_r3d_file(r3d_path, clip_id, n, clip_mb, frame_payloads=raw_frames)
+            self._write_rmd_sidecar(rmd_path, clip_id, n, start_tc, end_tc)
+
+            self.used_space_mb += clip_mb
+            self.record_frames = n
+            self.clip_number += 1
+            if hasattr(self.camera, "rcp"):
+                self.camera.rcp.state["record_state"] = "0"
+                self.camera.rcp.state["media_remaining_percent"] = str(self.media_remaining_percent)
+            return {
+                "clip_name": clip_id,
+                "rdc_dir": rdc_dir,
+                "r3d_path": r3d_path,
+                "rmd_path": rmd_path,
+                "frames_recorded": len(encoded),
+                "frames": encoded,
+                "size_bytes": os.path.getsize(r3d_path),
+            }
+
+    def inspect_r3d_clip(self, clip_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Parse a recorded .R3D container (ftyp/rdxm/REDf frames/r3di) and .RMD sidecar."""
+        clips = self.list_clips()
+        if not clips:
+            return None
+        clip = next((c for c in clips if c["clip_name"] == clip_name), clips[-1]) if clip_name else clips[-1]
+        r3d_path = clip["r3d_path"]
+        if not os.path.isfile(r3d_path):
+            return None
+
+        frames: List[Dict[str, Any]] = []
+        brand = ""
+        rdxm_meta = ""
+        index_footer = ""
+        with open(r3d_path, "rb") as f:
+            total_size = os.path.getsize(r3d_path)
+            while f.tell() + 8 <= total_size:
+                box_sz, box_type = struct.unpack(">I4s", f.read(8))
+                if box_type == b"mdat" and box_sz == 0:
+                    continue
+                if box_sz < 8:
+                    break
+                payload = f.read(box_sz - 8)
+                if box_type == b"ftyp" and len(payload) >= 4:
+                    brand = payload[:4].decode("ascii", errors="ignore")
+                elif box_type == b"rdxm":
+                    rdxm_meta = payload.decode("utf-8", errors="ignore")
+                elif box_type == b"REDf" and len(payload) >= 28:
+                    idx, csz, g1, b, r, g2, fcrc = struct.unpack(">IIIIIII", payload[:28])
+                    frames.append({
+                        "frame_index": idx,
+                        "compressed_size": csz,
+                        "slice_crcs": {"G1": g1, "B": b, "R": r, "G2": g2},
+                        "crc32": fcrc,
+                    })
+                elif box_type == b"r3di":
+                    index_footer = payload.decode("utf-8", errors="ignore")
+
+        return {
+            "clip_name": clip["clip_name"],
+            "r3d_path": r3d_path,
+            "rmd_path": clip["rmd_path"],
+            "brand": brand,
+            "rdxm_meta": rdxm_meta,
+            "frame_count": len(frames),
+            "frames": frames,
+            "index_footer": index_footer,
+            "rmd_metadata": clip.get("rmd_metadata", ""),
+        }
+
+    def delete_last_clip(self) -> Optional[str]:
+        """Delete the most recently recorded clip folder (.RDC)."""
+        clips = self.list_clips()
+        if not clips:
+            return None
+        last = clips[-1]
+        import shutil
+        if os.path.isdir(last["rdc_dir"]):
+            shutil.rmtree(last["rdc_dir"], ignore_errors=True)
+        if hasattr(self.camera, "log_system"):
+            self.camera.log_system(f"[MEDIA] Deleted clip {last['clip_name']}.RDC")
+        return last["clip_name"]
 
     def _write_rmd_sidecar(self, path: str, clip_name: str, total_frames: int, start_tc: str, end_tc: str):
         """Generate authentic RED .RMD XML sidecar containing full camera, exposure, and lens metadata."""
