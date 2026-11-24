@@ -229,15 +229,23 @@ class IobXauiAhbDevice(Device):
 
     # IOB XAUI register low-16 offsets and link-up readback values
     PCS_STATUS_OK = 0x03FFC02F     # +0x002C: all 4 XAUI lanes synced/aligned + link up
-    LINK_READY_BIT = 0x00200000    # +0x0010: bit 21 link up (bit 18 error clear)
+    LINK_READY_BIT = 0x20000000    # +0x0010: bit 29 PHY ready (bit 18 RX-fault clear)
     LINK_ERR_MASK = 0x00040000
     PHY_READY_BIT = 0x00100000     # +0x0248: bit 20 PHY locked/ready
     IOB_STATUS_READY_MASK = 0x007FFFFF  # +0xB0018/+0xB001C: IOB readiness bits
 
-    def __init__(self, xaui_link_up: bool = True):
+    def __init__(
+        self,
+        xaui_link_up: bool = True,
+        sata_media_present: bool = False,
+        iob_status_handshake_enabled: bool = True,
+        xaui_window: Optional[Any] = None,
+    ):
         self.xaui_link_up = bool(xaui_link_up)
-        self.sata_media_present: bool = True
+        self.sata_media_present: bool = bool(sata_media_present)
         self.sata_shadow_sregs_enabled: bool = False
+        self.iob_status_handshake_enabled: bool = bool(iob_status_handshake_enabled)
+        self.xaui_window = xaui_window
         self.regs: Dict[int, int] = {
             0x000B0018: self.IOB_STATUS_READY_MASK,
             0x000B001C: self.IOB_STATUS_READY_MASK,
@@ -248,6 +256,15 @@ class IobXauiAhbDevice(Device):
     def _read_sata_ahci_reg(self, aligned_off: int) -> Optional[int]:
         """Serve HBA0 SATA3-FPGA / AHCI direct (0x5006xxxx/0x5007xxxx) and shadow SREGs (0xB0680..)."""
         px_ssts = 0x00000133 if self.sata_media_present else 0x00000000  # Gen3 6.0Gbps, DET=3
+        if not self.sata_shadow_sregs_enabled:
+            # Before full SATA3/AHCI mode is enabled, expose only the firmware's two gated
+            # SATA3 shadow indices (0x1A0 @ 0xB0680 and 0x1AE @ 0xB06B8) so boot_to_run_application
+            # sees FPGA-running when xaui_link_up and PxSSTS=0 (empty bay) when not media_present.
+            if aligned_off == 0x000B0680:
+                return 0x800B0680 if self.xaui_link_up else 0x00000000
+            if aligned_off == 0x000B06B8:
+                return px_ssts if self.xaui_link_up else 0x00000000
+            return None
         direct_ahci_map = {
             0x00060000: 0x4034FF00,  # AHCI CAP
             0x00060004: 0x80000000,  # AHCI GHC (AE=1)
@@ -264,8 +281,6 @@ class IobXauiAhbDevice(Device):
         }
         if aligned_off in direct_ahci_map:
             return direct_ahci_map[aligned_off]
-        if not self.sata_shadow_sregs_enabled:
-            return None
         shadow_sreg_map = {
             # Shadow SREGs @ 0x800B0680..0x800B06CC (SATADriver.c idx 0x1A0..0x1B3)
             0x000B0680: 0x4034FF00,
@@ -292,7 +307,7 @@ class IobXauiAhbDevice(Device):
             return sata_val
         val = self.regs.get(aligned_off, 0x00000000)
         if 0x000B0000 <= aligned_off < 0x000B1000:
-            if not self.xaui_link_up:
+            if not self.xaui_link_up or not self.iob_status_handshake_enabled:
                 return 0x00000000
             if aligned_off == 0x000B0020:
                 return 0x00000004
@@ -312,7 +327,15 @@ class IobXauiAhbDevice(Device):
         return val
 
     def read(self, offset: int, size: int) -> int:
-        word = self._read_word(offset & ~0x3)
+        aligned_off = offset & ~0x3
+        if self.xaui_window is not None:
+            self.xaui_window.read_count += 1
+            if self.xaui_window.is_status_reg(aligned_off):
+                reg_off = aligned_off & 0xFFFF
+                self.xaui_window.status_reads[reg_off] = (
+                    self.xaui_window.status_reads.get(reg_off, 0) + 1
+                )
+        word = self._read_word(aligned_off)
         shift = (offset & 0x3) * 8
         mask = (1 << (size * 8)) - 1
         return (word >> shift) & mask
@@ -381,20 +404,32 @@ class CoprocessorTransport(Device):
     LSB_FPGA_BITSTREAM_STAT_ADDR = 0xE00003FC
     LSB_FPGA_BITSTREAM_READY = 0x81000000  # bit 31 done + bit 24 configured
     LSB_FPGA_XAUI_STAT_ADDR = 0x40010008
-    LSB_FPGA_XAUI_READY = 0xC03007E0   # cap bits 0xC0300000 + XAUI ((0xFC << 3) = 0x7E0)
+    LSB_FPGA_XAUI_READY = 0x000007E0   # XAUI PCS link-up ((0xFC << 3) = 0x7E0)
     LSB_FPGA_SSD_DETECT_ADDR = 0x44A0000C  # bit 18 (0x40000) clear => SSD present
     LSB_FPGA_SIDE_SATA_CTRL_ADDR = 0xC2000074
     LSB_FPGA_ERR_LEN_ADDR = 0xC2000010
     LSB_FPGA_ERR_CRC_ADDR = 0xC20000BC
 
+    # LSB-FPGA XAUI link-status registers read by lsb_fpga_report_xaui_status (@0x809BCF64)
+    # over fpga_read(6, addr) -> FUN_809ba680: present an UP link so the firmware's own
+    # left-side-board bring-up (weapon_left_side_board_init @0x809B5358) completes. Values and
+    # provenance live in devices/iob_xaui.py (FPGA_LINK_UP_REGS), shared so the IOB AHB-window
+    # and the FPGA-SPI halves of the link agree.
+
     # Named target -> (mcspi_port_id, channel, spi_target_id). Ports/channels are the
     # emulator's McSPI wiring; the spi_target_id is the FW CS-mux selector.
+    # ts_fpga: the LSB-FPGA (iomap channel 6 / CS-mux target 6) is driven over McSPI1
+    # channel 2 -- verified by tracing the firmware's fpga_read(6,...) -> FUN_806d50c0 ->
+    # spi_write_wait_for_ack_then_read, which programs MCSPI1 (0x48098000) CH2CONF @0x54 /
+    # CH2CTRL @0x5C (memory `omap-iob-transport` "ISP1=t7 ISP2=t8 IOB=iobspi FPGA via CS mux";
+    # #70's "McSPI1-ch2"). Binding it here lets the firmware's own frame reach the seeded
+    # link-up registers.
     SPI_TARGET_MAP: Dict[str, Tuple[int, int, int]] = {
         "ts_isp1": (1, 0, SPI_TARGET_ISP1),
         "ts_isp2": (1, 1, SPI_TARGET_ISP2),
         "ts_iob0": (3, 0, SPI_TARGET_IOB),
         "ts_iob1": (3, 1, SPI_TARGET_IOB_SLAVE),
-        "ts_fpga": (2, 0, IOMAP_CHANNEL_LSB_FPGA),
+        "ts_fpga": (1, 2, IOMAP_CHANNEL_LSB_FPGA),
     }
 
     def __init__(self, intc=None, mcspi: Optional[Dict[int, OmapMcspi]] = None, gpio=None):
@@ -418,12 +453,13 @@ class CoprocessorTransport(Device):
             if name == "ts_fpga":
                 tgt.reg_set(self.LSB_FPGA_VERSION_ALT_ADDR, self.LSB_FPGA_VERSION_ALT)
                 tgt.reg_set(self.LSB_FPGA_VERSION_ADDR, self.LSB_FPGA_VERSION)
+                # Seed the XAUI link-up status regs (fpga side of the IOB<->LSB-FPGA link).
+                from emulator.devices.iob_xaui import FPGA_LINK_UP_REGS
+                for addr, val in FPGA_LINK_UP_REGS.items():
+                    tgt.reg_set(addr, val)
                 tgt.reg_set(self.LSB_FPGA_BITSTREAM_STAT_ADDR, self.LSB_FPGA_BITSTREAM_READY)
-                tgt.reg_set(self.LSB_FPGA_XAUI_STAT_ADDR, self.LSB_FPGA_XAUI_READY)
                 tgt.reg_set(self.LSB_FPGA_SSD_DETECT_ADDR, 0x00000000)
                 tgt.reg_set(self.LSB_FPGA_SIDE_SATA_CTRL_ADDR, 0x00000001)
-                tgt.reg_set(self.LSB_FPGA_ERR_LEN_ADDR, 0x00000000)
-                tgt.reg_set(self.LSB_FPGA_ERR_CRC_ADDR, 0x00000000)
             self.spi_targets[name] = tgt
 
     def set_ssd_present(self, present: bool) -> None:

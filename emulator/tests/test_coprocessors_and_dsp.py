@@ -193,7 +193,7 @@ def test_mcspi_sdma_tx_rx_and_chctrl_subtransfers(camera):
     for reg_addr, expected in (
         (0xE0000904, 0x00030031),
         (0xE0000908, 0x00000014),
-        (0x40010008, 0xC03007E0),
+        (0x40010008, 0x000007E0),
     ):
         camera.c2c.spi_targets["ts_fpga"].reset_frame()
         camera.bus.write_mem(tx_cmd_buf, bytes([0x01]) + reg_addr.to_bytes(4, "little"))
@@ -268,7 +268,7 @@ def test_cs_mux_spi_target_gpio_routing(camera):
 def test_iob_xaui_ahb_device_window(camera):
     """Verify IobXauiAhbDevice (0x1C000000..0x1FFFFFFF) serves XAUI link and IOB status handshake."""
     assert camera.bus.read_u32(0x1C02002C) == 0x03FFC02F
-    assert camera.bus.read_u32(0x1C020010) == 0x00200000
+    assert camera.bus.read_u32(0x1C020010) == 0x20000000
     assert (camera.bus.read_u32(0x1C020248) & (1 << 20)) != 0
     assert camera.bus.read_u32(0x1C020068) == 0
     assert camera.bus.read_u32(0x1C0200BC) == 0

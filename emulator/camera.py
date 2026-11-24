@@ -29,6 +29,7 @@ from emulator.devices.sdma import OmapSdma
 from emulator.devices.mcspi import OmapMcspi, MCSPI_MAP
 from emulator.devices.mcbsp import OmapMcBSP, MCBSP_MAP
 from emulator.devices.cam_isp import OmapCamIsp
+from emulator.devices.iob_xaui import IobXauiWindow
 from emulator.devices.hdq_onewire import OmapHdq1Wire
 from emulator.devices.i2c_ucd import (
     UcdPowerSequencer,
@@ -42,6 +43,7 @@ from emulator.devices.i2c_dsmc2_chips import (
     FocalTechTouch,
     FixedIdI2cDevice,
 )
+from emulator.devices.i2c_fan_controller import MaxFanController
 from emulator.devices.l4_interconnect import OmapL4Ap, OmapScm, OmapScmId, OmapPrm, OmapSdrc
 from emulator.devices.accessory_bus import AccessoryBus, ModuleDescriptor
 from emulator.devices.rig_manager import RigManager, ConnectorPosition
@@ -88,6 +90,21 @@ class Dsmc2Camera:
     TX_THREAD_CURRENT_PTR = 0x8149CE60
     TX_THREAD_EXECUTE_PTR = 0x8149DDE8
 
+    # Fan tachometer speed-test (temp_hal_weapon.c). HAL_Temp_SpeedTest spins the BRAIN fan up at
+    # full PWM, then calls tx_thread_sleep(0x1770 = 6000 ticks) to wait for mechanical spin-up
+    # before sampling the tachometer. That 6000-ms wait is a real hardware spin-up delay: in the
+    # emulator's compressed tick model (one GPTimer2 OVF per scheduler slice) 6000 ThreadX ticks
+    # never accrue within a practical boot, so the fan worker's sleep never returns and the Fan
+    # init-event bit 0x800 never sets. The sleep-compression hook below clamps the spin-up sleep
+    # *only when it is issued from inside HAL_Temp_SpeedTest* to a few ticks, so the fan worker
+    # proceeds to the tach read (which the MaxFanController model answers) and completes. The
+    # firmware still runs the full start/sleep/read/classify sequence; only the spin-up duration
+    # is time-compressed, exactly as the tick cadence already compresses every other timed wait.
+    HAL_TEMP_SPEEDTEST_ENTRY = 0x809B061C   # push {..} true entry
+    HAL_TEMP_SPEEDTEST_RET   = 0x809B08BC   # ldm sp,{..,pc} epilogue (speed test body end)
+    TX_THREAD_SLEEP_ENTRY    = 0x80E9E32C   # tx_thread_sleep (r0 = tick count)
+    FAN_SPINUP_SLEEP_TICKS   = 4            # compressed spin-up wait (ticks) in the emulator
+
     # ThreadX TCBs this build creates by 1G instructions (static .data/.bss objects)
     TCB_ADDRS = (0x8149D494, 0x814CAD40, 0x827109B0, 0x82710CA0, 0x81E51F5C, 0x814C6B28)
 
@@ -120,28 +137,33 @@ class Dsmc2Camera:
     # findings/boot/BOOT_FLOW_MAP.md): UART 0x40, Load System Config 0x80, HAL Power 0x100,
     # Power 0x200, Boards 0x400, Fan 0x800, ASIC Memory Map 0x100000, XAUI 0x200000,
     # Mailbox 0x1000000, HAL SYS_ID 0x2000000, HW Cap 0x40000000, Module Cap 0x80000000.
-    # With OMAP sDMA McSPI transfers, GPIO-76/77 CS-mux routing (CsMuxSpiTarget), seeded
-    # LSB-FPGA registers on McSPI1 CH2, and the IOB/XAUI AHB window at 0x1C000000
-    # (IobXauiAhbDevice), ``weapon_boards_init`` (@0x809B378C), ``weapon_left_side_board_init``
-    # (@0x809B5354), and ``Fan Init`` (@0x809B2790) all complete: all four UI_BRINGUP_BOARD_BITS
+    # With peripheral-synchronised McSPI1-over-sDMA, GPIO-76/77 CS-mux routing, seeded LSB-FPGA
+    # status/version registers on McSPI1 CH2, ``MaxFanController`` @ I2C1 0x4D + fan-tach spin-up
+    # sleep compression, and the IOB/XAUI AHB window at 0x1C000000 (``IobXauiAhbDevice`` backed by
+    # ``IobXauiWindow``), ``weapon_boards_init`` (@0x809B378C), ``weapon_left_side_board_init``
+    # (@0x809B5354), and ``fan_init`` (@0x8067049C) all complete: all four UI_BRINGUP_BOARD_BITS
     # (Boards 0x400 | Fan 0x800 | XAUI 0x200000 | Mailbox 0x1000000) set, satisfying
     # ``UI_BRINGUP_FLAGS_BARRIER`` at 0xC3300FFF and populating ``hw_cap`` (@0x815811F4) to
-    # 0x00041182. Continuing past 0xC3300FFF advances through SATA (0x4000000), Media
-    # (0x8000000), IOB/ISP Binary Download (0x1000), Monitor Pipeline (0x2000), HDMI (0x4000),
-    # and HDSDI (0x8000) to 0xCF30FFFF; the next Milestone 2 frontier toward 0xCF3CF7FF /
-    # ``run_application`` is ``dsp_init`` (@0x80670FFC, bit 0x40000).
+    # 0x00041182.
     UI_BRINGUP_FLAGS_BARRIER = 0x03300FF7
-    UI_BRINGUP_FLAGS_REACHABLE = 0xC3300FFF   # satisfies UI_BRINGUP_FLAGS_BARRIER (hw_cap populated)
-    UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (board-bring-up bits)
+    UI_BRINGUP_FLAGS_REACHABLE = 0xC3300FFF   # board barrier now fully satisfied (Fan 0x800 set)
+    UI_BRINGUP_BOARD_BITS = 0x01200C00        # Boards | Fan | XAUI | Mailbox (board-dependent bits)
 
-    # Milestone 2 ("application running"): after clearing UI_BRINGUP_FLAGS_BARRIER, the Driver
-    # thread drives SATA (0x4000000), Media (0x8000000), IOB/ISP Binary Download (0x1000),
-    # Monitor Pipeline (0x2000), HDMI (0x4000), HDSDI (0x8000), Monitor Splash Screen,
-    # DSP (0x40000), Contiguous Media Space (0x10000000), and Audio (0x80000) to satisfy
-    # ``wait_for_init_flags(0xCF3CF7FF)`` (@0x8066D360), runs Cal Load (0x800000) -> 0xDFBCFFFF,
-    # and puts semaphore 0x81E53618 (@0x8066D3C8) to release Starter Thread (``thread_0_entry``
-    # @0x80008E24 -> ``run_application`` @0x80008CB4), which creates ``APP_SEMAPHORE``
-    # (@0x814C6D1C) and spawns ``Camera State Manager`` (@0x8048D534).
+    # Storage-init stage constants (``boot_to_run_application`` probe).
+    RUN_APP_FLAGS_BARRIER = 0x0C000000        # SATA 0x04000000 | Media 0x08000000
+    RUN_APP_SATA_BIT = 0x04000000
+    RUN_APP_MEDIA_BIT = 0x08000000
+    DSS_DISPLAY_FLAGS = 0x000CE000            # MonitorPipeline|HDMI|HDSDI|DSP|Audio
+    DSS_IOB_ISP_DOWNLOAD_BIT = 0x00001000     # IOB/ISP binary download (deps met, completes)
+
+    # Milestone 2 ("application running"): with ``iob_status_handshake_enabled=True`` and finer
+    # ThreadX timer cadence (``slice_size=12_000``), the Driver thread drives SATA (0x4000000),
+    # Media (0x8000000), IOB/ISP Binary Download (0x1000), Monitor Pipeline (0x2000), HDMI
+    # (0x4000), HDSDI (0x8000), Monitor Splash Screen, DSP (0x40000), Contiguous Media Space
+    # (0x10000000), and Audio (0x80000) to satisfy ``wait_for_init_flags(0xCF3CF7FF)`` (@0x8066D360),
+    # runs Cal Load (0x800000) -> 0xDFBCFFFF, and puts semaphore 0x81E53618 (@0x8066D3C8) to release
+    # Starter Thread (``thread_0_entry`` @0x80008E24 -> ``run_application`` @0x80008CB4), which
+    # creates ``APP_SEMAPHORE`` (@0x814C6D1C) and spawns ``Camera State Manager`` (@0x8048D534).
     APPLICATION_FLAGS_BARRIER = 0xCF3CF7FF
     APPLICATION_FLAGS_REACHABLE = 0xDFBCFFFF
     APP_SEMAPHORE_ADDR = 0x814C6D1C
@@ -250,6 +272,88 @@ class Dsmc2Camera:
 
         self._idle_wake_hook_handle = self.cpu.mu.hook_add(unicorn.UC_HOOK_CODE, _idle_wake_hook, None, idle, idle)
 
+    def _install_iob_xaui_hook(self):
+        """Serve the IOB XAUI AHB aperture (0x1C000000) link-status words from IobXauiWindow.
+
+        The aperture sits below the bus device-hook window (0x40000000..0x7FFFFFFF), so a bus
+        Device would never be invoked for it. This dedicated MEM_READ hook answers the XAUI
+        PCS/PHY status offsets the firmware polls (FUN_80727028), overwriting the backing RAM
+        with the link-up value for the beat; all other reads keep the RAM contents. Writes into
+        the window fall through to RAM.
+        """
+        win = self.iob_xaui
+
+        def _xaui_read_hook(uc, access, address, size, value, user_data):
+            off = address - 0x1C000000
+            if not win.is_status_reg(off):
+                return
+            val = win.read(off, size)
+            try:
+                if size == 1:
+                    uc.mem_write(address, bytes([val & 0xFF]))
+                elif size == 2:
+                    uc.mem_write(address, struct.pack("<H", val & 0xFFFF))
+                else:
+                    uc.mem_write(address, struct.pack("<I", val & 0xFFFFFFFF))
+            except Exception:
+                pass
+
+        self._iob_xaui_hook_handle = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_MEM_READ, _xaui_read_hook, None, 0x1C000000, 0x1C0FFFFF
+        )
+
+    def _install_fan_spinup_hook(self):
+        """Compress the fan-tachometer spin-up sleep inside ``HAL_Temp_SpeedTest``.
+
+        ``HAL_Temp_SpeedTest`` (@0x809B061C) starts the BRAIN fan at full PWM, then calls
+        ``tx_thread_sleep(6000)`` (@0x80E9E32C) to wait ~6 s for the fan to reach speed before it
+        samples the tachometer (``fan_tach_read`` @0x809B18B0 -> ``fan_tach_regread`` @0x809B750C,
+        answered by ``MaxFanController`` @ I2C1 0x4D). In the emulator's compressed tick model a
+        6000-tick ThreadX sleep never expires within a practical boot, so the fan worker strands and
+        the Fan init-event bit 0x800 never sets.
+
+        This hook tracks whether the CPU is executing inside the ``HAL_Temp_SpeedTest`` body and,
+        when ``tx_thread_sleep`` is entered from there, clamps its tick argument (r0) to
+        ``FAN_SPINUP_SLEEP_TICKS``. The firmware still performs the start -> sleep -> tach-read ->
+        classify sequence unchanged; only the spin-up *duration* is compressed, which is the same
+        modeling decision the one-OVF-per-slice tick cadence already makes for every timed wait.
+        All addresses go through ``self.fw()`` so the hook is correct under a relinked
+        (``--addr-map``) image as well as the stock layout.
+        """
+        for h in ("_fan_spinup_enter_h", "_fan_spinup_exit_h", "_fan_spinup_sleep_h"):
+            handle = getattr(self, h, None)
+            if handle is not None:
+                try:
+                    self.cpu.mu.hook_del(handle)
+                except Exception:
+                    pass
+            setattr(self, h, None)
+
+        st_entry = self.fw(self.HAL_TEMP_SPEEDTEST_ENTRY)
+        st_ret = self.fw(self.HAL_TEMP_SPEEDTEST_RET)
+        sleep_entry = self.fw(self.TX_THREAD_SLEEP_ENTRY)
+        clamp = self.FAN_SPINUP_SLEEP_TICKS
+        state = self._fan_spinup_active  # one-element list, survives across slices
+
+        def _enter(uc, address, size, user_data):
+            state[0] = True
+
+        def _exit(uc, address, size, user_data):
+            state[0] = False
+
+        def _sleep(uc, address, size, user_data):
+            if state[0]:
+                r0 = uc.reg_read(unicorn.arm_const.UC_ARM_REG_R0)
+                if r0 > clamp:
+                    uc.reg_write(unicorn.arm_const.UC_ARM_REG_R0, clamp)
+
+        self._fan_spinup_enter_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _enter, None, st_entry, st_entry)
+        self._fan_spinup_exit_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _exit, None, st_ret, st_ret)
+        self._fan_spinup_sleep_h = self.cpu.mu.hook_add(
+            unicorn.UC_HOOK_CODE, _sleep, None, sleep_entry, sleep_entry)
+
     def _init_hardware(self):
         """Cleanly initialize or re-initialize SoC hardware, registers, and memory mappings."""
         # Save previous log lines if re-initializing
@@ -325,14 +429,22 @@ class Dsmc2Camera:
         self.ucd_iob_idx.rails = self.ucd_iob.rails
 
         # I2C1: Power Management (TWL4030 @ 0x48), Thermal (TMP411 @ 0x4C), LED Driver (0x45),
-        #       IOB PMBus UCD9090 index entry (0x7C), RSB Fan Driver (0x4D), RSB OLPF Expander (0x38)
+        #       IOB PMBus UCD9090 index entry (0x7C), BRAIN Fan Controller (MAX6639-class @ 0x4D),
+        #       RSB OLPF Expander (0x38)
         self.pmic = Twl4030Pmic(0x48)
         self.thermal = Tmp411Thermal(0x4C)
+        # BRAIN fan controller (MAX6639-class dual-channel PWM/tach). The firmware's thermal/fan
+        # HAL (temp_hal_weapon.c) drives it over I2C1 @ 0x4D: fan_init (@0x8067049C) ->
+        # HAL_Temp_Fan_Control_Init (@0x809B09A8) -> detect_fan_type (@0x809B08C4) ->
+        # HAL_Temp_SpeedTest (@0x809B061C), which spins the fan up and reads its tachometer. The
+        # model answers the tach-count registers so the measured RPM lands in the firmware's valid
+        # band and the Fan init-event bit 0x800 sets. (See MODEL_FIDELITY_AUDIT.md "Fan tach".)
+        self.fan_controller = MaxFanController(0x4D)
         self.i2c[1].attach_slave(I2cSlave(0x45))
         self.i2c[1].attach_slave(self.pmic)
         self.i2c[1].attach_slave(self.thermal)
         self.i2c[1].attach_slave(self.ucd_iob_idx)
-        self.i2c[1].attach_slave(FixedIdI2cDevice(0x4D, "RSB_FAN", 0x01))
+        self.i2c[1].attach_slave(self.fan_controller)
         self.i2c[1].attach_slave(FixedIdI2cDevice(0x38, "RSB_OLPF", 0x00))
         self.i2c[1].attach_slave(Twl4030Pmic(0x49))
         self.i2c[1].attach_slave(Twl4030Pmic(0x4A))
@@ -404,6 +516,13 @@ class Dsmc2Camera:
         self.cpu.uc.mem_map(0x18000000, 0x10000)
         self.bus.add_ram_region(0x18000000, 0x10000)
         self.cpu.uc.mem_map(0x1C000000, 0x04000000)
+        # IobXauiWindow state tracker coupled to c2c.iob_ahb (0x1C000000..0x1FFFFFFF via SystemBus).
+        self.iob_xaui = IobXauiWindow(link_up=True, media_present=False)
+
+        # Fan tach spin-up sleep compression (HAL_Temp_SpeedTest). The one-element list tracks
+        # whether the CPU is inside HAL_Temp_SpeedTest; it must exist before the hook installs.
+        self._fan_spinup_active = [False]
+        self._install_fan_spinup_hook()
 
         # 10c. Multichannel SPI Controllers (McSPI 1..4)
         self.mcspi: Dict[int, OmapMcspi] = {}
@@ -415,6 +534,7 @@ class Dsmc2Camera:
         # 10b. System DMA (sDMA Controller @ 0x48056000)
         self.sdma = OmapSdma(intc=self.intc, cpu=self.cpu, gpmc=self.gpmc, mcspi=self.mcspi)
         self.bus.register_device(OmapSdma.BASE_ADDR, OmapSdma.SIZE, self.sdma)
+        self.sdma.bind_mcspi(self.mcspi)
 
         # 10d. Multi-Channel Buffered Serial Ports (McBSP 2..5), HDQ / 1-Wire & OMAP Camera ISP
         self.mcbsp: Dict[int, OmapMcBSP] = {}
@@ -435,6 +555,8 @@ class Dsmc2Camera:
         # AHB mailbox @0xA5800000 and GPMC CS2 XAUI window @0x1C000000 are separate devices.
         # Note: 0x49000000 is L4-PER AP.
         self.c2c = CoprocessorTransport(intc=self.intc, mcspi=self.mcspi, gpio=self.gpio)
+        self.c2c.iob_ahb.xaui_window = self.iob_xaui
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
         self.bus.register_device(IobMailboxDevice.BASE_ADDR, IobMailboxDevice.SIZE, self.c2c.mailbox)
         self.bus.register_device(self.c2c.iob_ahb.BASE_ADDR, self.c2c.iob_ahb.SIZE, self.c2c.iob_ahb)
 
@@ -741,25 +863,24 @@ class Dsmc2Camera:
     def boot_to_ui_bringup(
         self,
         max_instructions: int = 300_000_000,
-        slice_size: int = 12_000,
+        slice_size: int = 200_000,
         _already_booted: bool = False,
     ) -> Dict[str, Any]:
         """Drive boot past the NAND-FS mount and clear the board-bring-up barrier.
 
         After ``boot_to_late_init`` reaches the filesystem mount (init event flags
         ``0xC21000FF``: RTC|FileX|CRYPT|NAND + the HW/Module-cap cascade), the Driver thread runs a
-        second ``init_parallel`` cascade and waits on the board-bring-up barrier
-        ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``). With McSPI OMAP sDMA
-        transfers, GPIO-76/77 CS-mux routing, seeded LSB-FPGA status/version registers on McSPI1
-        CH2, and ``IobXauiAhbDevice`` at 0x1C000000..0x1FFFFFFF, ``weapon_boards_init``
-        (@0x809B378C), ``weapon_left_side_board_init`` (@0x809B5354), and ``Fan Init`` (@0x809B2790)
-        all complete when ``slice_size=12_000`` supplies sufficient GPTimer2 ticks (~184.92M
-        instructions past ``boot_to_late_init``).
+        second ``init_parallel`` cascade and blocks on the board-bring-up barrier
+        ``wait_for_init_flags(0x03300FF7)`` (``UI_BRINGUP_FLAGS_BARRIER``).
 
-        All four board-dependent bits (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000)
-        set, reaching ``0xC3300FFF`` (``barrier_passed=True``, ``milestone="ui_bringup"``,
-        ``missing_flags=0``, ``blocked_board_bits=0``) and populating ``hw_cap`` (@0x815811F4).
+        With peripheral-synchronised McSPI1-over-sDMA, GPIO-76/77 CS-mux routing, seeded LSB-FPGA
+        status/version regs on McSPI1 CH2, ``MaxFanController`` @ I2C1 0x4D with fan spin-up
+        sleep compression, and the IOB/XAUI AHB window at 0x1C000000, all four board-dependent bits
+        (Boards 0x400, Fan 0x800, XAUI 0x200000, Mailbox 0x1000000) set, reaching ``0xC3300FFF``.
         """
+        self.c2c.iob_ahb.iob_status_handshake_enabled = False
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
         if not _already_booted:
             # boot_to_late_init already drives through the FS mount to ~0xC21000FF.
             self.boot_to_late_init()
@@ -784,6 +905,12 @@ class Dsmc2Camera:
         barrier_passed = (flags & barrier) == barrier
         missing = barrier & ~flags
         blocked_boards = missing & self.UI_BRINGUP_BOARD_BITS
+        # The IOB/LSB-FPGA XAUI link model is installed and presents an UP link on the status
+        # words the firmware's ``lsb_fpga_report_xaui_status`` (@0x809BCF64) polls -- the IOB
+        # AHB window (``IobXauiWindow`` @0x1C000000) answers the PCS/PHY status registers, and
+        # the FPGA-side link regs are seeded on the ``ts_fpga`` SPI target. ``xaui_link_modeled``
+        # reports that the model is present and (for the IOB-window half) was reached this boot.
+        xaui_window_reached = self.iob_xaui.read_count > 0
         return {
             "milestone": "ui_bringup" if barrier_passed else "board_bringup_barrier",
             "barrier_passed": barrier_passed,
@@ -791,20 +918,137 @@ class Dsmc2Camera:
             "ui_bringup_instructions": done,
             "total_instructions": self.instruction_count,
             "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
-            # The four board-dependent bits still clear at the barrier (0 once the XAUI link
-            # bring-up is modelled). Non-zero here identifies the current blocker.
+            # The four board-dependent bits still clear at the barrier. Non-zero here identifies
+            # the current blocker.
             "missing_flags": missing,
             "blocked_board_bits": blocked_boards,
-            # Human-readable identification of the next blocker for the depth roadmap.
+            # The XAUI link-up register model is installed (IobXauiWindow + ts_fpga seeds).
+            "xaui_link_modeled": True,
+            "xaui_window_reached": xaui_window_reached,
+            # The peripheral-synchronised McSPI1-over-sDMA coprocessor transport is modelled, so the
+            # board workers run: Boards/XAUI/Mailbox now set (the LSB worker reaches and passes the
+            # XAUI link check against the installed link-up model). Count of SPI frames clocked over
+            # sDMA this boot (non-zero => the transport carried the board-init SPI reads).
+            "spi_over_sdma_frames": getattr(self.sdma, "spi_dma_transfers", 0),
+            # The fan controller + spin-up model is installed: the fan tach speed test now measures
+            # a valid RPM and Fan 0x800 sets, so the whole board barrier passes (0xC3300FFF).
+            "fan_tach_modeled": True,
+            # Human-readable identification of the next blocker for the depth roadmap. The board
+            # barrier (incl. Fan 0x800) now passes; the next blocker is the post-barrier SATA/Media
+            # storage init, reported in full by ``boot_to_run_application``.
             "next_blocker": (
-                None if barrier_passed else
-                "weapon_left_side_board_init (@0x809B5354) stalls in LSB-FPGA/IOB XAUI link "
-                "bring-up: FUN_809BCF60 never reports link UP (IOB AHB XAUI PCS status @0x1C02002C "
-                "+ fpga_read 0x40010008); Boards/Fan/XAUI/Mailbox init-flags never set, so "
-                "run_application (UI/DSS/RCP) is never released. Needs the IOB/LSB-FPGA XAUI "
-                "coprocessor model (next milestone)."
+                "board bring-up now completes fully (Boards 0x400, Fan 0x800, XAUI 0x200000, "
+                "Mailbox 0x1000000 all set; init event flags reach 0xC3300FFF). The Driver thread "
+                "(@0x8066C92C) then dispatches the SATA/Media init_parallel stages and blocks on "
+                "wait_for_init_flags(0x0C000000) (@0x8066D000) for the SATA (0x04000000) and Media "
+                "(0x08000000) completion bits. Next milestone: SATA/AHCI + media storage bring-up "
+                "(see boot_to_run_application)."
+                if barrier_passed else
+                "board bring-up incomplete: missing board bits 0x%X still clear at the barrier." % blocked_boards
             ),
             "threads": self.get_threads(),
+        }
+
+    def boot_to_run_application(
+        self,
+        max_instructions: int = 220_000_000,
+        slice_size: int = 200_000,
+    ) -> Dict[str, Any]:
+        """Drive boot across the storage-init barrier toward ``run_application`` and pin the blocker."""
+        # Reach the board barrier first (Fan included) via the existing depth probe.
+        self.boot_to_ui_bringup()
+
+        self.c2c.iob_ahb.iob_status_handshake_enabled = False
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
+
+        barrier = self.RUN_APP_FLAGS_BARRIER
+        done = 0
+        flags = self.init_event_flags()
+        while done < max_instructions and (flags & barrier) != barrier:
+            self._deliver_idle_irq()
+            try:
+                self.cpu.run(self.cpu.pc, 0, count=slice_size)
+            except Exception:
+                pass
+            done += slice_size
+            self.instruction_count += slice_size
+            self._tick_timers()
+            flags = self.init_event_flags()
+
+        # Storage barrier crossed: keep driving so the IOB/ISP-download + DSS/display batch can
+        # dispatch, and detect where it stalls. The loop stops once no new init bit has set for a
+        # stall window (the display-batch dispatch gap) or the display batch is fully up.
+        barrier_passed = (flags & barrier) == barrier
+        post_target = self.DSS_DISPLAY_FLAGS | self.DSS_IOB_ISP_DOWNLOAD_BIT
+        if barrier_passed:
+            last_flags = flags
+            stall = 0
+            post_done = 0
+            post_budget = min(60_000_000, max_instructions)
+            while post_done < post_budget and (flags & post_target) != post_target and stall < 120:
+                self._deliver_idle_irq()
+                try:
+                    self.cpu.run(self.cpu.pc, 0, count=slice_size)
+                except Exception:
+                    pass
+                post_done += slice_size
+                self.instruction_count += slice_size
+                self._tick_timers()
+                flags = self.init_event_flags()
+                if flags != last_flags:
+                    last_flags = flags
+                    stall = 0
+                else:
+                    stall += 1
+
+        self.is_booted = True
+        self.power_state = self.POWER_ON
+        flags = self.init_event_flags()
+        missing = barrier & ~flags
+        threads = self.get_threads()
+        names = {t["name"]: t for t in threads}
+        starter = names.get("Starter Thread")
+        iob_isp_set = bool(flags & self.DSS_IOB_ISP_DOWNLOAD_BIT)
+        display_missing = self.DSS_DISPLAY_FLAGS & ~flags
+        return {
+            "milestone": "run_application" if barrier_passed else "storage_init_barrier",
+            "barrier_passed": barrier_passed,
+            "init_event_flags": flags,
+            # The board barrier (incl. Fan) is passed on entry; confirm it is retained.
+            "board_barrier_passed": (flags & self.UI_BRINGUP_FLAGS_BARRIER) == self.UI_BRINGUP_FLAGS_BARRIER,
+            "fan_bit_set": bool(flags & 0x800),
+            "run_app_instructions": done,
+            "total_instructions": self.instruction_count,
+            "pc": f"0x{self.to_stock(self.cpu.pc):08X}",
+            # Storage bits now set; this stays 0 once the barrier passes.
+            "missing_flags": missing,
+            "sata_bit_set": bool(flags & self.RUN_APP_SATA_BIT),
+            "media_bit_set": bool(flags & self.RUN_APP_MEDIA_BIT),
+            # The IOB/ISP binary download (post-storage, deps Mailbox|XAUI) also completes.
+            "iob_isp_download_bit_set": iob_isp_set,
+            # The DSS/display + DSP/audio init batch that gates the final 0xCF3CF7FF wait.
+            "display_bits_missing": display_missing,
+            # run_application (the Starter Thread) releases only when the Driver's final wait passes.
+            "run_application_released": bool(starter is not None and starter["state"] != "SEMAPHORE"),
+            "next_blocker": (
+                "storage-init barrier crossed (SATA 0x04000000 + Media 0x08000000 set from the "
+                "firmware's own sata_init @0x80670504 / media_init @0x8067060C code paths via the "
+                "IOB-AHB SATA3 shadow-register model). The IOB/ISP binary download (0x1000) also "
+                "completes. The Driver thread (@0x8066C92C) then dispatches the DSS/display + DSP/"
+                "audio init_parallel batch -- Monitor Pipeline (0x2000 @0x8074C9E4), HDMI (0x4000), "
+                "HDSDI (0x8000), DSP (0x40000 @0x80670FFC), Audio (0x80000) -- and blocks on its "
+                "final wait_for_init_flags(0xCF3CF7FF). Under the current thread scheduler those "
+                "display-batch init_parallel children are not resumed after the IOB/ISP-download "
+                "bit sets, so boot stalls at 0x%08X (missing 0x%08X) with the Driver parked in the "
+                "ThreadX scheduler (~0x80EA4A94) and run_application (Starter Thread @0x80008E24) "
+                "still semaphore-blocked. Next milestone: DSS/DSP display-init batch dispatch."
+                % (flags, display_missing)
+                if barrier_passed else
+                "board bring-up complete (0xC3300FFF, Fan 0x800 set) but the SATA/Media storage "
+                "barrier 0x0C000000 did not cross (missing 0x%08X)." % missing
+            ),
+            "threads": threads,
         }
 
     def boot_to_application(
@@ -826,7 +1070,11 @@ class Dsmc2Camera:
         ``Camera State Manager``.
         """
         if not _already_at_ui_bringup:
-            self.boot_to_ui_bringup(slice_size=slice_size)
+            self.boot_to_ui_bringup()
+
+        self.c2c.iob_ahb.iob_status_handshake_enabled = True
+        self.c2c.iob_ahb.sata_shadow_sregs_enabled = False
+        self.c2c.iob_ahb.sata_media_present = self.iob_xaui.media_present
 
         barrier = self.APPLICATION_FLAGS_BARRIER
         app_sema_addr = self.fw(self.APP_SEMAPHORE_ADDR)

@@ -123,6 +123,34 @@ class OmapMcspi(Device):
             rx_resp = self.on_word_tx(self.port_id, ch_num, b)
         return (rx_resp if rx_resp is not None else b) & 0xFF
 
+    # --- channel FIFO register addresses (for the sDMA peripheral-synchronised path) ---
+    def tx_fifo_addr(self, channel: int) -> int:
+        return self.base_addr + self.CH_BASE + channel * self.CH_STRIDE + 0x0C
+
+    def rx_fifo_addr(self, channel: int) -> int:
+        return self.base_addr + self.CH_BASE + channel * self.CH_STRIDE + 0x10
+
+    def channel_for_tx_fifo(self, addr: int) -> Optional[int]:
+        for ch in range(self.NUM_CHANNELS):
+            if addr == self.tx_fifo_addr(ch):
+                return ch
+        return None
+
+    def channel_for_rx_fifo(self, addr: int) -> Optional[int]:
+        for ch in range(self.NUM_CHANNELS):
+            if addr == self.rx_fifo_addr(ch):
+                return ch
+        return None
+
+    def dma_transceive_byte(self, channel: int, tx_byte: int) -> int:
+        """Clock one SPI byte through the channel's attached target for a DMA beat."""
+        b = tx_byte & 0xFF
+        rx = self._clock_byte(channel, b)
+        self.tx[channel] = b
+        self.rx[channel] = rx & 0xFF
+        self.chstat[channel] |= 0x07  # RXS | TXS | EOT
+        return rx & 0xFF
+
     def dma_tx_bytes(self, ch_num: int, tx_bytes: bytes) -> None:
         """Clock a DMA TX payload through an SPI channel and stage MISO bytes when RX is active."""
         if not (0 <= ch_num < self.NUM_CHANNELS):
