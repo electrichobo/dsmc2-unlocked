@@ -22,19 +22,21 @@ Fidelity is tracked honestly in `MODEL_FIDELITY_AUDIT.md` / `FIDELITY_MATRIX.md`
   `build_default_xtensa_blobs()`) stages directory + multi-block file objects onto `/image2` (block 605)
   with block-incrementing `seqNumber` tags, so the real firmware's `yaffs_Scan` registers `/image2/cdb2/factory.db`,
   `/image2/isp/{dram,iram}.bin`, `/image2/iob0/{dram,iram}.bin`, and `/image2/iob1/{dram,iram}.bin`.
-* **Priority 2 — Real-FW CDB2 SQLite GET/SET (`emulator/tests/test_rcp_realfw.py`, `emulator/camera.py`) — CLEARED:**
+* **Priority 2 — Real-FW CDB2 SQLite GET/SET/RESET & SATA Media Probe (`emulator/tests/test_rcp_realfw.py`, `emulator/camera.py`) — CLEARED:**
   With `/image2/cdb2/factory.db` mounted, `cdb2_init` (`@0x8007FB58`) compiles all prepared SQLite statements
-  (`DAT_814CD3A0` ATTACH, `DAT_814CD3D8` GET, `DAT_814CD3D4` SET != 0), `_cdb2_parameter_get_value` (`@0x80080C34`)
-  executes real SQLite lookups (`rc=0`), and `cdb2_parameter_set_uint32` / `_cdb2_parameter_set_value` persists
-  overrides into `/data/cdb2/user.db` (`fw_cdb2_get_uint32` / `fw_cdb2_set_uint32` round-trip verified).
-* **Priority 3 / Collaborator Tips (`trace_probe.py`, `xtensa.py`, `sidekick.py`) — CLEARED (substrate):**
+  (`DAT_814CD3A0` ATTACH, `DAT_814CD3D8` GET, `DAT_814CD3D4` SET, `DAT_814CD3C4` DELETE != 0),
+  `fw_cdb2_get_uint32` / `fw_cdb2_set_uint32` / `fw_cdb2_reset_param` / `fw_cdb2_reset_to_factory_defaults`
+  execute real SQLite queries/overrides/resets against `/data/cdb2/user.db` (`rc=0`), and `fw_sata_media_present`
+  drives stock `red_media_init` (`@0x800A04FC`) + `SATA_MediaPresent` (`@0x806A2ACC`) against `IobXauiWindow` PxSSTS.
+* **Priority 3 / Collaborator Tips (`trace_probe.py`, `xtensa.py`, `sidekick.py`) — CLEARED:**
   - **Tip 1 (`emulator/core/trace_probe.py`)**: Zero-overhead per-PC/IRQ `TraceProbe` captures milestone and IRQ
     events during emulation and generates `HwPatchDescriptor` records (displaced 32-bit ARM instruction + `B` hook
     + 6-word stolen-instruction trampoline) for real-HW deployment.
-  - **Tip 2 (`emulator/coprocessors/xtensa.py`, `emulator/devices/sidekick.py`)**: `Dsmc2Camera._install_asic_upload_hooks()`
-    observes the real firmware reading `/image2/{isp,iob0,iob1}/{dram,iram}.bin` and writing segments to
-    `0x3FFE0000`/`0x40000000` (and IOB1's `0x4FFE0000`/`0x4FFF0000` aperture) + reset release into `XtensaCore`;
-    `SidekickMcu` models the self-contained Sidekick MCU core + rotary/button peripherals + 220x176 OLED status display.
+  - **Tip 2 (`emulator/coprocessors/xtensa.py`, `emulator/devices/sidekick.py`, `emulator/ui/web.py`)**:
+    `Dsmc2Camera._install_asic_upload_hooks()` observes the real firmware reading `/image2/{isp,iob0,iob1}/{dram,iram}.bin`,
+    writing segments into `XtensaCore`, and executing decoded Tensilica Xtensa LX instructions (`ENTRY`, `L32R`, `MOVI.N`,
+    `S32I.N`, `L32I.N`, `ADDI`, `WSR`/`RSR`, `RETW.N`, `CALL`/`J`) upon reset release; `SidekickMcu` bridges rotary/button
+    events over RCP2 + `UART3` RX IRQ 74 and serves a live 220 × 176 OLED via Web Studio (`/api/sidekick/*`).
 
 ## The hard frontier (the real difficulty, per collaborator Daniel)
 Getting raw image data INTO and BETWEEN the ASICs: compression + SATA medium via IOB/FPGA. DSMC has

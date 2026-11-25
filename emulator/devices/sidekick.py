@@ -8,8 +8,12 @@ Models the RED DSMC2 Sidekick side-handle controller as a self-contained MCU tar
   - Deterministic RCP/telemetry frame queue between Sidekick and Brain
 """
 
+import io
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
+from PIL import Image
+
+from emulator.rcp.wire import build_packet, CMD_SET
 
 
 # Compact 5x7 uppercase/digit bitmap font for legible 220x176 monochrome OLED rendering.
@@ -97,6 +101,9 @@ class SidekickMcu:
         self.framebuffer = bytearray(self.OLED_WIDTH * self.OLED_HEIGHT)
         self.button_history: List[str] = []
         self.tx_frames: Deque[str] = deque(maxlen=64)
+        self.rx_frames: Deque[str] = deque(maxlen=64)
+        self.last_rcp2_packet: Optional[str] = None
+        self._camera = None
 
         self.menu_page_idx = 0
         self.telemetry: Dict[str, Any] = {
@@ -118,6 +125,11 @@ class SidekickMcu:
         """Advance Sidekick MCU execution cycles."""
         self.cycles += max(1, int(cycles))
 
+    def attach_camera(self, cam) -> None:
+        """Bind Sidekick serial/telemetry link to ``Dsmc2Camera`` and sync initial OLED state."""
+        self._camera = cam
+        self.sync_from_camera(cam)
+
     def press_button(self, button: str) -> Dict[str, Any]:
         """Inject a Sidekick physical button or rotary detent event."""
         btn = button.strip().upper()
@@ -127,6 +139,7 @@ class SidekickMcu:
         self.step(250)
 
         cmd_emitted: Optional[str] = None
+        rcp2_param: Optional[Tuple[str, str]] = None
         if btn == "MENU":
             self.menu_page_idx = (self.menu_page_idx + 1) % len(self.MENU_PAGES)
             cmd_emitted = f"PAGE:{self.active_page}"
@@ -145,20 +158,44 @@ class SidekickMcu:
                 new_idx = max(0, min(len(self.ISO_STEPS) - 1, idx + delta))
                 self.telemetry["iso"] = self.ISO_STEPS[new_idx]
                 cmd_emitted = f"$S:ISO:{self.telemetry['iso']}"
+                rcp2_param = ("ISO", str(self.telemetry["iso"]))
             elif page == "KELVIN":
                 self.telemetry["kelvin"] = max(
                     1700, min(10000, int(self.telemetry["kelvin"]) + delta * 100)
                 )
                 cmd_emitted = f"$S:COLTEMP:{self.telemetry['kelvin']}"
+                rcp2_param = ("COLTEMP", str(self.telemetry["kelvin"]))
         elif btn == "ENTER":
             cmd_emitted = f"CONFIRM:{self.active_page}"
         else:
             cmd_emitted = f"KEY:{btn}"
 
-        if cmd_emitted:
+        if rcp2_param is not None:
+            pname, pval = rcp2_param
+            pkt_bytes = build_packet(CMD_SET, pname, [pval], source="SK")
+            pkt_str = pkt_bytes.decode("ascii").strip()
+            self.last_rcp2_packet = pkt_str
+            self.tx_frames.append(pkt_str)
+            if self._camera is not None:
+                uarts = getattr(self._camera, "uarts", None)
+                if isinstance(uarts, dict) and 3 in uarts:
+                    uarts[3].write_rx(pkt_bytes)
+                rcp = getattr(self._camera, "rcp", None)
+                if rcp is not None:
+                    resp = rcp.process_command(pkt_str)
+                    if resp:
+                        self.rx_frames.append(resp)
+                    self.sync_from_camera(self._camera)
+        elif cmd_emitted:
             self.tx_frames.append(cmd_emitted)
+
         self.render_oled_status()
-        return {"button": btn, "active_page": self.active_page, "cmd": cmd_emitted}
+        return {
+            "button": btn,
+            "active_page": self.active_page,
+            "cmd": cmd_emitted,
+            "rcp2_packet": self.last_rcp2_packet if rcp2_param else None,
+        }
 
     def sync_from_camera(self, cam) -> None:
         """Pull camera UI / RCP state into Sidekick telemetry and refresh OLED."""
@@ -219,6 +256,13 @@ class SidekickMcu:
         )
         return self.framebuffer
 
+    def render_oled_png_bytes(self) -> bytes:
+        """Encode the 220x176 monochrome OLED framebuffer as PNG bytes."""
+        img = Image.frombytes("L", (self.OLED_WIDTH, self.OLED_HEIGHT), bytes(self.framebuffer))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
     def get_status(self) -> Dict[str, Any]:
         lit_pixels = sum(1 for px in self.framebuffer if px > 0)
         return {
@@ -232,5 +276,7 @@ class SidekickMcu:
             "oled_lit_pixels": lit_pixels,
             "button_count": len(self.button_history),
             "last_cmd": self.tx_frames[-1] if self.tx_frames else None,
+            "last_rcp2_packet": self.last_rcp2_packet,
+            "rx_count": len(self.rx_frames),
             "telemetry": dict(self.telemetry),
         }

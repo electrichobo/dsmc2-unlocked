@@ -181,6 +181,14 @@ class Dsmc2Camera:
     CDB2_ATTACH_STMT_ADDR = 0x814CD3A0
     CDB2_SET_STMT_ADDR = 0x814CD3D4
     CDB2_GET_STMT_ADDR = 0x814CD3D8
+    CDB2_DELETE_STMT_ADDR = 0x814CD3C4     # "DELETE FROM user.parameters WHERE name = ?"
+    CDB2_PARAM_RESET_ADDR = 0x80082700     # cdb2_parameter_reset_value(name)
+    CDB2_FACTORY_RESET_ADDR = 0x80080974   # cdb2_reset_to_factory_defaults()
+
+    # SATA / media probes (stock 7.4.1)
+    RED_MEDIA_INIT_ADDR = 0x800A04FC
+    RED_MEDIA_GET_DEVICE_ADDR = 0x800A06F4  # red_media_get_device(hba, port)
+    SATA_MEDIA_PRESENT_ADDR = 0x806A2ACC    # SATA_MediaPresent(dev, retries, log)
 
     # Real-FW ASIC Xtensa binary upload functions (stock 7.4.1)
     ISP_LOAD_EMBEDDED_ADDR = 0x80664D18
@@ -227,6 +235,7 @@ class Dsmc2Camera:
 
         # 7. Sidekick MCU + 220x176 Monochrome OLED & Rotary Controls
         self.sidekick = SidekickMcu()
+        self.sidekick.attach_camera(self)
         self._active_iob_upload_core: Optional[int] = None
         self._asic_hook_handles: List[int] = []
         self.trace_probe: Optional[TraceProbe] = None
@@ -1949,6 +1958,47 @@ class Dsmc2Camera:
             self.CDB2_SET_VALUE_ADDR,
             [arg_name, arg_type, val_buf],
             max_instructions=max_instructions,
+        )
+
+    def fw_cdb2_reset_param(self, param_name: str, max_instructions: int = 1_500_000) -> int:
+        """Invoke stock ``cdb2_parameter_reset_value`` (@0x80082700): drop the user override."""
+        arg_name = 0x881C0000
+        self.bus.write_mem(self.fw(arg_name), param_name.encode("ascii") + b"\x00")
+        return self.call_function(
+            self.CDB2_PARAM_RESET_ADDR, [arg_name], max_instructions=max_instructions
+        )
+
+    def fw_cdb2_reset_to_factory_defaults(self, max_instructions: int = 4_000_000) -> int:
+        """Invoke stock ``cdb2_reset_to_factory_defaults`` (@0x80080974).
+
+        Closes CDB2, unlinks ``/data/cdb2/user.db`` and re-runs ``cdb2_init``.
+        """
+        return self.call_function(
+            self.CDB2_FACTORY_RESET_ADDR, [], max_instructions=max_instructions
+        )
+
+    def fw_sata_media_present(
+        self, media_present: Optional[bool] = None, max_instructions: int = 1_500_000
+    ) -> int:
+        """Ask the stock ``SATA_MediaPresent`` (@0x806A2ACC) whether HBA0/port0 has media.
+
+        ``media_present`` (if given) first updates the IOB XAUI shadow PxSSTS the firmware reads.
+        """
+        if media_present is not None:
+            self.iob_xaui.media_present = bool(media_present)
+            self.c2c.iob_ahb.sata_media_present = bool(media_present)
+        dev = self.call_function(
+            self.RED_MEDIA_GET_DEVICE_ADDR, [0, 0], max_instructions=max_instructions
+        )
+        if dev == 0 or self.bus.read_mem(dev, 1)[0] == 0:
+            self.call_function(self.RED_MEDIA_INIT_ADDR, [], max_instructions=3_000_000)
+            dev = self.call_function(
+                self.RED_MEDIA_GET_DEVICE_ADDR, [0, 0], max_instructions=max_instructions
+            )
+        if dev == 0:
+            raise RuntimeError("red_media_get_device(0, 0) returned NULL (media layer not initialised)")
+        return self.call_function(
+            self.SATA_MEDIA_PRESENT_ADDR, [dev, 0, 0], max_instructions=max_instructions
         )
 
     def install_trace_probe(

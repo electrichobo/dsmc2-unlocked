@@ -125,11 +125,13 @@ def test_xtensa_upload_segment_tracks_iram_and_dram(tmp_path):
 
     status = cam.isp1.get_status()
     assert status["launched_by_fw"] is True
-    assert status["state"] == "RUNNING"
+    assert status["state"] in ("RUNNING", "IDLE")
     assert status["dram_uploaded_bytes"] == len(blobs["isp"]["dram.bin"])
     assert status["iram_uploaded_bytes"] == len(blobs["isp"]["iram.bin"])
     assert bytes(cam.isp1.iram[:12]) == b"ISP_IRAM_741"
     assert bytes(cam.isp1.dram[:12]) == b"ISP_DRAM_741"
+    assert status["real_instructions_retired"] >= 5
+    assert cam.isp1.mmio_writes.get(0x3FFE8000) == 1
 
 
 def test_sidekick_mcu_controls_and_oled(tmp_path):
@@ -142,8 +144,17 @@ def test_sidekick_mcu_controls_and_oled(tmp_path):
     before_pixels = bytes(sk.framebuffer)
     res_rot = sk.press_button("ROTARY_CW")
     assert res_rot["cmd"] == "$S:ISO:1000"
+    assert res_rot["rcp2_packet"] is not None
+    assert "ISO:1000" in res_rot["rcp2_packet"]
+    # Verify RCP2 bridge updated UART3 RX queue and synced back from camera RCP state
+    assert len(cam.uarts[3].rx_queue) > 0
+    assert cam.rcp.state["iso"] == "1000"
     assert sk.telemetry["iso"] == 1000
+    assert len(sk.rx_frames) >= 1
     assert bytes(sk.framebuffer) != before_pixels
+
+    png = sk.render_oled_png_bytes()
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
 
     res_menu = sk.press_button("MENU")
     assert res_menu["active_page"] == "ISO"
@@ -152,6 +163,65 @@ def test_sidekick_mcu_controls_and_oled(tmp_path):
     cam.rcp.state["iso"] = "1600"
     sk.sync_from_camera(cam)
     assert sk.telemetry["iso"] == 1600
+
+
+def test_xtensa_real_fw_binaries_execute_lx_instructions(tmp_path):
+    slot_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "firmware_store",
+        "unpacked",
+        "scarlet_w_7_4_1",
+        "slot",
+    )
+    isp_iram = os.path.join(slot_dir, "isp", "iram.bin")
+    isp_dram = os.path.join(slot_dir, "isp", "dram.bin")
+    iob0_iram = os.path.join(slot_dir, "iob0", "iram.bin")
+    iob0_dram = os.path.join(slot_dir, "iob0", "dram.bin")
+    if not (os.path.exists(isp_iram) and os.path.exists(iob0_iram)):
+        pytest.skip("requires unpacked Scarlet-W Xtensa binaries")
+
+    cam = Dsmc2Camera(str(tmp_path))
+    assert cam.isp1.load_binaries(isp_iram, isp_dram) is True
+    cam.isp1.release_reset()
+    assert cam.isp1.real_instructions_retired >= 4
+    assert cam.isp1.last_decoded_mnemonic != "NONE"
+
+    assert cam.iob0.load_binaries(iob0_iram, iob0_dram) is True
+    cam.iob0.release_reset()
+    assert cam.iob0.real_instructions_retired >= 2
+
+
+def test_sidekick_web_studio_api(tmp_path):
+    import json
+    import threading
+    import urllib.request
+    from emulator.ui.web import WebStudio, ThreadedHTTPServer, create_handler, find_free_port
+
+    port = find_free_port(8950)
+    studio = WebStudio(str(tmp_path), host="127.0.0.1", port=port)
+    handler = create_handler(studio)
+    server = ThreadedHTTPServer(("127.0.0.1", port), handler)
+    srv = threading.Thread(target=server.serve_forever, daemon=True)
+    srv.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        st = json.loads(urllib.request.urlopen(base + "/api/sidekick/status").read().decode())
+        assert st["oled_resolution"] == "220x176"
+
+        req = urllib.request.Request(
+            base + "/api/sidekick/button",
+            data=json.dumps({"button": "ROTARY_CW"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        btn_res = json.loads(urllib.request.urlopen(req).read().decode())
+        assert btn_res["status"] == "ok"
+        assert btn_res["sidekick"]["telemetry"]["iso"] == 1000
+
+        png = urllib.request.urlopen(base + "/api/sidekick/oled.png").read()
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        server.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +277,27 @@ def test_live_fw_cdb2_get_and_set_roundtrip(booted_late_init):
     assert rc_get == 0
     assert new_val == 1
 
+    # Single-parameter reset drops the user.db override back to factory default (0)
+    assert cam.fw_cdb2_reset_param("DEBUG_ENABLE_SHELL") == 0
+    rc_rst, rst_val = cam.fw_cdb2_get_uint32("DEBUG_ENABLE_SHELL")
+    assert rc_rst == 0
+    assert rst_val == 0
+
+    # Full factory-defaults reset unlinks /data/cdb2/user.db and re-compiles CDB2 cleanly
+    assert cam.fw_cdb2_set_uint32("COMM_IP_ADDRESS", 0x0A000001) == 0
+    assert cam.fw_cdb2_reset_to_factory_defaults() == 0
+    rc_ip2, ip_val2 = cam.fw_cdb2_get_uint32("COMM_IP_ADDRESS")
+    assert rc_ip2 == 0
+    assert ip_val2 == 168430090
+
+
+@requires_firmware
+def test_live_fw_sata_media_present_probe(booted_late_init):
+    cam, _ = booted_late_init
+    assert cam.fw_sata_media_present(True) == 1
+    assert cam.fw_sata_media_present(False) == 0
+    assert cam.fw_sata_media_present(True) == 1
+
 
 @requires_firmware
 def test_live_fw_asic_xtensa_upload(booted_late_init):
@@ -221,9 +312,13 @@ def test_live_fw_asic_xtensa_upload(booted_late_init):
     assert cam.isp1.iram_uploaded_bytes >= 64
     assert cam.isp1.dram_uploaded_bytes >= 64
     assert cam.isp1.launched_by_fw is True
+    assert cam.isp1.real_instructions_retired >= 5
+    assert cam.isp1.mmio_writes.get(0x3FFE8000) == 1
     assert cam.iob0.iram_uploaded_bytes >= 64
     assert cam.iob0.dram_uploaded_bytes >= 64
     assert cam.iob0.launched_by_fw is True
+    assert cam.iob0.real_instructions_retired >= 5
     assert cam.iob1.iram_uploaded_bytes >= 64
     assert cam.iob1.dram_uploaded_bytes >= 64
     assert cam.iob1.launched_by_fw is True
+    assert cam.iob1.real_instructions_retired >= 5

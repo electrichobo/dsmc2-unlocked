@@ -317,22 +317,39 @@ def build_minimal_factory_db_blob() -> bytes:
 
 
 def build_default_xtensa_blobs() -> Dict[str, Dict[str, bytes]]:
-    """Build compact synthetic Xtensa IRAM/DRAM binary images for ``/image2/{isp,iob0,iob1}``.
+    """Build compact executable Xtensa IRAM/DRAM binary images for ``/image2/{isp,iob0,iob1}``.
 
-    Provides clean, recognizable 64-byte payloads (nop-padded reset vectors and segment tags)
-    so the real firmware's ``isp_load_from_embedded`` and ``iob_load_from_embedded`` routines
-    open real YAFFS2 files from ``/image2`` and push bytes into the emulated Xtensa cores.
+    Produces valid 64-byte payloads whose DRAM descriptor table (words 3/4/7 matching the
+    shipped binaries) points ``release_reset()`` to a real 16-byte Xtensa LX routine at
+    ``IRAM + 0x10`` (``ENTRY a1, 32; L32R a2, 0x3FFE8000; MOVI.N a3, 1; S32I.N a3, a2, 0;
+    MOVI.N a2, 0; RETW.N``) that writes a ready status word to C2C doorbell ``0x3FFE8000``.
     """
-    def _make_blob(tag: bytes) -> bytes:
-        hdr = bytearray(64)
-        hdr[:len(tag)] = tag[:16]
-        struct.pack_into("<II", hdr, 16, 0x0000F020, 0x0000F020)  # Xtensa NOP/ret vector placeholder
-        return bytes(hdr)
+    # Little-endian Xtensa LX sequence placed at IRAM+0x10 (PC = 0x40000010):
+    #   +0x10: 36 41 00   ENTRY  a1, 32
+    #   +0x13: 21 FE FF   L32R   a2, [0x4000000C]   ; literal 0x3FFE8000 (-2 words from 0x40000014)
+    #   +0x16: 0C 13      MOVI.N a3, 1              ; a3 = 1
+    #   +0x18: 39 02      S32I.N a3, a2, 0          ; *(0x3FFE8000) = 1
+    #   +0x1A: 0C 02      MOVI.N a2, 0              ; a2 = 0
+    #   +0x1C: 1D F0      RETW.N                    ; windowed return
+    _XTENSA_ENTRY_ROUTINE = bytes.fromhex("36410021feff0c1339020c021df0")
+
+    def _make_pair(prefix: bytes) -> Dict[str, bytes]:
+        dram = bytearray(64)
+        dram[:12] = prefix[:12].ljust(12, b"\x00")
+        struct.pack_into("<I", dram, 12, 0x40000010)  # dram[3]: IRAM entry address
+        struct.pack_into("<I", dram, 16, 0x00040020)  # dram[4]: initial PS (WOE=1, UM=1)
+        struct.pack_into("<I", dram, 28, 0x3FFE8000)  # dram[7]: C2C doorbell MMIO base
+
+        iram = bytearray(64)
+        iram[:12] = prefix.replace(b"DRAM", b"IRAM")[:12].ljust(12, b"\x00")
+        struct.pack_into("<I", iram, 12, 0x3FFE8000)  # +0x0C: literal pool constant for L32R
+        iram[16 : 16 + len(_XTENSA_ENTRY_ROUTINE)] = _XTENSA_ENTRY_ROUTINE
+        return {"dram.bin": bytes(dram), "iram.bin": bytes(iram)}
 
     return {
-        "isp": {"dram.bin": _make_blob(b"ISP_DRAM_741"), "iram.bin": _make_blob(b"ISP_IRAM_741")},
-        "iob0": {"dram.bin": _make_blob(b"IOB0_DRAM_741"), "iram.bin": _make_blob(b"IOB0_IRAM_741")},
-        "iob1": {"dram.bin": _make_blob(b"IOB1_DRAM_741"), "iram.bin": _make_blob(b"IOB1_IRAM_741")},
+        "isp": _make_pair(b"ISP_DRAM_741"),
+        "iob0": _make_pair(b"IOB0_DRAM_74"),
+        "iob1": _make_pair(b"IOB1_DRAM_74"),
     }
 
 
