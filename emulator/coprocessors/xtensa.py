@@ -8,7 +8,7 @@ import os
 import math
 import zlib
 import struct
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Callable, List, Optional, Tuple
 
 
 class XtensaCore:
@@ -60,6 +60,7 @@ class XtensaCore:
         self.dram_uploaded_bytes = 0
         self.launched_by_fw = False
         self.upload_log: List[Tuple[int, int]] = []
+        self.on_mmio_write: Optional[Callable[[int, int, int], None]] = None
 
     @staticmethod
     def _sign_extend(val: int, bits: int) -> int:
@@ -89,6 +90,8 @@ class XtensaCore:
             struct.pack_into("<I", self.iram, off, val)
         if not (self.DRAM_BASE <= addr < self.DRAM_BASE + self.DRAM_SIZE) or (0x3FFE8000 <= addr < 0x3FFE9000):
             self.mmio_writes[addr] = val
+            if self.on_mmio_write is not None and 0x3FFE8000 <= addr < 0x3FFE9000:
+                self.on_mmio_write(self.core_id, addr, val)
 
     def decode_and_step(self) -> str:
         """Decode and execute one real Tensilica Xtensa LX instruction at ``self.pc``."""
@@ -243,6 +246,18 @@ class XtensaCore:
                 elif op2 == 3 and op1 == 0:  # XOR
                     self.regs[r] = self.regs[s] ^ self.regs[t]
                     mnemonic = "XOR"
+                elif op2 in (0, 1) and op1 == 1:  # SLLI
+                    sa = 32 - ((op2 & 1) << 4 | s)
+                    self.regs[r] = (self.regs[t] << (sa & 0x1F)) & 0xFFFFFFFF
+                    mnemonic = "SLLI"
+                elif op2 == 4 and op1 == 1:  # SRLI
+                    self.regs[r] = (self.regs[t] & 0xFFFFFFFF) >> (s & 0xF)
+                    mnemonic = "SRLI"
+                elif op2 in (4, 5):  # EXTUI
+                    shift = ((op1 & 1) << 4) | s
+                    mask = (1 << (op2 + 1)) - 1
+                    self.regs[r] = (self.regs[t] >> shift) & mask
+                    mnemonic = "EXTUI"
             elif op0 == 5:  # CALL4 / CALL8 / CALL12
                 off18 = self._sign_extend((insn24 >> 6) & 0x3FFFF, 18) << 2
                 target = (((self.pc >> 2) << 2) + off18 + 4) & 0xFFFFFFFF
@@ -256,6 +271,32 @@ class XtensaCore:
                 if self.IRAM_BASE <= target < self.IRAM_BASE + self.IRAM_SIZE:
                     next_pc = target
                 mnemonic = "J"
+            elif op0 == 6 and (b0 & 0x3F) in (0x16, 0x26, 0x36):  # BZ / BEQZ / BNEZ
+                kind = (r >> 2) & 0x3
+                imm12 = self._sign_extend((insn24 >> 12) & 0xFFF, 12)
+                cond = (self.regs[s] == 0) if kind == 0 else (self.regs[s] != 0)
+                if cond:
+                    target = (self.pc + imm12 + 4) & 0xFFFFFFFF
+                    if self.IRAM_BASE <= target < self.IRAM_BASE + self.IRAM_SIZE:
+                        next_pc = target
+                mnemonic = "BEQZ" if kind == 0 else "BNEZ"
+            elif op0 == 7:  # BEQ / BNE / BLT / BGE / BLTU / BGEU
+                imm8s = self._sign_extend(imm8, 8)
+                vs, vt = self.regs[s], self.regs[t]
+                ss, st = self._sign_extend(vs, 32), self._sign_extend(vt, 32)
+                cond = (
+                    (vs == vt) if r == 1 else
+                    (vs != vt) if r == 9 else
+                    (ss < st) if r == 2 else
+                    (ss >= st) if r == 10 else
+                    (vs < vt) if r == 3 else
+                    (vs >= vt) if r == 11 else False
+                )
+                if cond:
+                    target = (self.pc + imm8s + 4) & 0xFFFFFFFF
+                    if self.IRAM_BASE <= target < self.IRAM_BASE + self.IRAM_SIZE:
+                        next_pc = target
+                mnemonic = "BCOND"
 
             self.pc = next_pc
 
@@ -349,7 +390,11 @@ class XtensaCore:
         return (word ^ 0xA5A50000) & 0xFFFFFFFF
 
     def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
-        """Process structured C2C command packet."""
+        """Process structured C2C command packet and trigger Xtensa MMIO doorbell ACK."""
+        self.write_u32(0x3FFE8010, cmd & 0xFFFFFFFF)
+        self.write_u32(0x3FFE8014, payload[0] & 0xFFFFFFFF if payload else 0)
+        self.step(4)
+        self.write_u32(0x3FFE8000, 0x00020000 | (cmd & 0xFF))
         return [0x00000000] # Default Success ACK
 
     def get_status(self) -> Dict[str, Any]:
@@ -432,6 +477,7 @@ class Iob0Coprocessor(XtensaCore):
 
     def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
         """Handle C2C storage or display commands."""
+        super().handle_c2c_command(cmd, payload)
         if cmd == 0x10: # Query SATA Status
             return [0x01 if self.sata_link_up else 0x00, self.sata_dma_frames_written]
         elif cmd == 0x20: # Query Tilt
@@ -496,12 +542,6 @@ class Iob1Coprocessor(XtensaCore):
         self.user_defects: List[Tuple[int, int]] = []
         self.pixels_corrected_total = 0
 
-    def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
-        """Handle C2C calibration and defect table commands."""
-        if cmd == 0x30 or cmd == 0x31:
-            return [0x00000000]
-        return [0x00000000]
-
     def run_black_shading(self, sensor_temp_c: float = 39.0, exposure: str = "1/48") -> Dict[str, Any]:
         """
         Execute full sensor dark-level calibration.
@@ -534,7 +574,9 @@ class Iob1Coprocessor(XtensaCore):
         return total_defects
 
     def handle_c2c_command(self, cmd: int, payload: List[int]) -> List[int]:
-        if cmd == 0x30: # Trigger Black Shading
+        """Handle C2C black shading calibration commands."""
+        super().handle_c2c_command(cmd, payload)
+        if cmd == 0x30:  # Trigger Black Shading
             t_c = payload[0] if payload else 39
             res = self.run_black_shading(float(t_c))
             return [0x01, res["defects_masked"]]

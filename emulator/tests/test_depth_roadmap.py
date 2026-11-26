@@ -300,6 +300,43 @@ def test_live_fw_sata_media_present_probe(booted_late_init):
 
 
 @requires_firmware
+def test_live_fw_cdb2_preset_inspect_and_apply(booted_late_init):
+    cam, _ = booted_late_init
+    assert cam.fw_cdb2_preset_has_param("cinema", "ISO_SPEED") is True
+    assert cam.fw_cdb2_preset_has_param("cinema", "NONEXISTENT_PARAM") is False
+
+    # Reset DEBUG_ENABLE_SHELL to 0, then apply /image2/cdb2/presets/cinema.preset (sets it to 1)
+    assert cam.fw_cdb2_reset_param("DEBUG_ENABLE_SHELL") == 0
+    rc_pre, val_pre = cam.fw_cdb2_get_uint32("DEBUG_ENABLE_SHELL")
+    assert rc_pre == 0 and val_pre == 0
+
+    rc_apply = cam.fw_cdb2_apply_preset("cinema")
+    assert rc_apply == 0
+    rc_post, val_post = cam.fw_cdb2_get_uint32("DEBUG_ENABLE_SHELL")
+    assert rc_post == 0 and val_post == 1
+    assert cam.fw_cdb2_reset_param("DEBUG_ENABLE_SHELL") == 0
+
+
+@requires_firmware
+def test_live_fw_sata_host_init_and_port_reset(booted_late_init):
+    cam, _ = booted_late_init
+    res = cam.fw_sata_host_and_port_init()
+    assert res["dev_ptr"] != 0
+    assert res["hba_ptr"] != 0
+    assert res["host_init_rc"] == 0
+    assert res["port_reset_rc"] == 0
+
+
+def test_xtensa_c2c_doorbell_bridges_to_iob_xaui_window(tmp_path):
+    cam = Dsmc2Camera(str(tmp_path))
+    assert cam.iob_xaui.xtensa_ack_count == 0
+    cam.iob0.handle_c2c_command(0x26, [0x01])
+    assert cam.iob_xaui.xtensa_ack_count == 1
+    assert cam.iob_xaui.value_for(0x0B0018) == 0x00020000
+    assert cam.iob0.mmio_writes[0x3FFE8000] == 0x00020026
+
+
+@requires_firmware
 def test_live_fw_asic_xtensa_upload(booted_late_init):
     cam, _ = booted_late_init
     # Trigger real firmware's isp_load_from_embedded & iob_load_from_embedded directly

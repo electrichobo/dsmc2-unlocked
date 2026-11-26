@@ -38,7 +38,7 @@ import os
 import sqlite3
 import struct
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 PAGE_SIZE = 2048
 SPARE_SIZE = 64
@@ -301,16 +301,64 @@ def build_minimal_factory_db_blob() -> bytes:
             "msg DEFAULT NULL, param DEFAULT NULL, msg_type DEFAULT NULL, "
             "hw_cap DEFAULT NULL, user_mappable DEFAULT 1)"
         )
-        for name, ptype, val, rcp_name in _DEFAULT_FACTORY_PARAMS:
+        for idx, (name, ptype, val, rcp_name) in enumerate(_DEFAULT_FACTORY_PARAMS, start=1):
             db.execute(
-                "INSERT INTO parameters(name, type, default_value, rcp_name) VALUES (?,?,?,?)",
-                (name, ptype, val, rcp_name),
+                "INSERT INTO parameters(name, type, msg_type, default_value, apply_order, rcp_name) "
+                "VALUES (?,?,?,?,?,?)",
+                (name, ptype, ptype, val, idx, rcp_name),
             )
         db.commit()
         db.close()
         with open(tmp_path, "rb") as f:
             _CACHED_FACTORY_DB_BLOB = f.read()
         return _CACHED_FACTORY_DB_BLOB
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+_CACHED_DEFAULT_PRESET_BLOB: Optional[bytes] = None
+
+
+def build_default_preset_db_blob(overrides: Optional[Dict[str, Any]] = None) -> bytes:
+    """Build a compact SQLite 3 preset database for ``/image2/cdb2/presets/cinema.preset``.
+
+    Schema matches ``_cdb2_process_preset`` (@0x80084404): ``parameters(name UNIQUE, value)``
+    and ``info(version, delete_after_apply, has_pin_whitelist, has_version_whitelist,
+    has_camera_type_whitelist)``.
+    """
+    global _CACHED_DEFAULT_PRESET_BLOB
+    if overrides is None and _CACHED_DEFAULT_PRESET_BLOB is not None:
+        return _CACHED_DEFAULT_PRESET_BLOB
+
+    rows = (
+        overrides
+        if overrides is not None
+        else {"ISO_SPEED": 1600, "COLOR_TEMPERATURE": 3200, "DEBUG_ENABLE_SHELL": 1}
+    )
+    fd, tmp_path = tempfile.mkstemp(suffix=".preset")
+    os.close(fd)
+    os.unlink(tmp_path)
+    try:
+        db = sqlite3.connect(tmp_path)
+        db.execute("PRAGMA legacy_file_format = ON;")
+        db.execute("PRAGMA page_size = 1024;")
+        db.execute("PRAGMA journal_mode = OFF;")
+        db.execute("CREATE TABLE parameters(name UNIQUE, value);")
+        db.execute(
+            "CREATE TABLE info(version, delete_after_apply, has_pin_whitelist, "
+            "has_version_whitelist, has_camera_type_whitelist);"
+        )
+        db.execute("INSERT INTO info VALUES(17, 0, 0, 0, 0);")
+        for pname, pval in rows.items():
+            db.execute("INSERT INTO parameters(name, value) VALUES (?, ?)", (pname, pval))
+        db.commit()
+        db.close()
+        with open(tmp_path, "rb") as f:
+            blob = f.read()
+        if overrides is None:
+            _CACHED_DEFAULT_PRESET_BLOB = blob
+        return blob
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -354,59 +402,63 @@ def build_default_xtensa_blobs() -> Dict[str, Dict[str, bytes]]:
 
 
 def build_yaffs_tree_chunks(
-    tree: Dict[str, Dict[str, bytes]],
+    tree: Dict[str, Any],
     seq_base: int = 0x00001000,
     first_obj_id: int = YAFFS_FIRST_FREE_OBJECTID + 1,
 ) -> List[Tuple[int, bytes, bytes]]:
-    """Serialize a two-level directory/file tree into YAFFS2 ``(rel_page, data, spare)`` chunks.
+    """Serialize a nested directory/file tree into YAFFS2 ``(rel_page, data, spare)`` chunks.
 
-    Each block advances ``seq = seq_base + (rel_page // PAGES_PER_BLOCK)`` so multi-block
-    files pass ``queryNANDBlock`` and scan into full-length YAFFS2 file objects.
+    Supports arbitrary subdirectory nesting (dict -> directory, bytes -> file). Each block
+    advances ``seq = seq_base + (rel_page // PAGES_PER_BLOCK)`` so multi-block files pass
+    ``queryNANDBlock`` and scan into full-length YAFFS2 file objects.
     """
     chunks: List[Tuple[int, bytes, bytes]] = []
-    rel_page = 0
-    next_obj_id = first_obj_id
+    state = {"rel_page": 0, "next_obj_id": first_obj_id}
 
-    for dir_name, files in tree.items():
-        dir_id = next_obj_id
-        next_obj_id += 1
-        seq = seq_base + (rel_page // PAGES_PER_BLOCK)
-        hdr_d = _build_obj_header(YAFFS_OBJECT_TYPE_DIRECTORY, YAFFS_OBJECTID_ROOT, dir_name, 0)
-        tags_d = _pack_tags2(
-            seq,
-            (dir_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_DIRECTORY << 28),
-            0x80000000 | (YAFFS_OBJECTID_ROOT & 0x0FFFFFFF),
-            0,
-        )
-        chunks.append((rel_page, hdr_d, _make_spare(tags_d)))
-        rel_page += 1
-
-        for fname, blob in files.items():
-            file_id = next_obj_id
-            next_obj_id += 1
+    def _emit_entries(parent_id: int, entries: Dict[str, Any]) -> None:
+        for name, val in entries.items():
+            obj_id = state["next_obj_id"]
+            state["next_obj_id"] += 1
+            rel_page = state["rel_page"]
             seq = seq_base + (rel_page // PAGES_PER_BLOCK)
-            hdr_f = _build_obj_header(YAFFS_OBJECT_TYPE_FILE, dir_id, fname, len(blob))
-            tags_f = _pack_tags2(
-                seq,
-                (file_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_FILE << 28),
-                0x80000000 | (dir_id & 0x0FFFFFFF),
-                len(blob),
-            )
-            chunks.append((rel_page, hdr_f, _make_spare(tags_f)))
-            rel_page += 1
 
-            offset = 0
-            chunk_id = 1
-            while offset < len(blob):
-                piece = blob[offset : offset + PAGE_SIZE]
-                data = piece + b"\xFF" * (PAGE_SIZE - len(piece))
-                seq = seq_base + (rel_page // PAGES_PER_BLOCK)
-                tags = _pack_tags2(seq, file_id, chunk_id, len(piece))
-                chunks.append((rel_page, data, _make_spare(tags)))
-                rel_page += 1
-                chunk_id += 1
-                offset += PAGE_SIZE
+            if isinstance(val, dict):
+                hdr_d = _build_obj_header(YAFFS_OBJECT_TYPE_DIRECTORY, parent_id, name, 0)
+                tags_d = _pack_tags2(
+                    seq,
+                    (obj_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_DIRECTORY << 28),
+                    0x80000000 | (parent_id & 0x0FFFFFFF),
+                    0,
+                )
+                chunks.append((rel_page, hdr_d, _make_spare(tags_d)))
+                state["rel_page"] += 1
+                _emit_entries(obj_id, val)
+            else:
+                blob = val
+                hdr_f = _build_obj_header(YAFFS_OBJECT_TYPE_FILE, parent_id, name, len(blob))
+                tags_f = _pack_tags2(
+                    seq,
+                    (obj_id & 0x0FFFFFFF) | (YAFFS_OBJECT_TYPE_FILE << 28),
+                    0x80000000 | (parent_id & 0x0FFFFFFF),
+                    len(blob),
+                )
+                chunks.append((rel_page, hdr_f, _make_spare(tags_f)))
+                state["rel_page"] += 1
 
+                offset = 0
+                chunk_id = 1
+                while offset < len(blob):
+                    piece = blob[offset : offset + PAGE_SIZE]
+                    data = piece + b"\xFF" * (PAGE_SIZE - len(piece))
+                    rp = state["rel_page"]
+                    seq = seq_base + (rp // PAGES_PER_BLOCK)
+                    tags = _pack_tags2(seq, obj_id, chunk_id, len(piece))
+                    chunks.append((rp, data, _make_spare(tags)))
+                    state["rel_page"] += 1
+                    chunk_id += 1
+                    offset += PAGE_SIZE
+
+    _emit_entries(YAFFS_OBJECTID_ROOT, tree)
     return chunks
 
 
@@ -416,12 +468,15 @@ def write_image_partition(
     factory_db_bytes: Optional[bytes] = None,
     include_xtensa_blobs: bool = False,
 ) -> Dict[str, int]:
-    """Program ``/image2`` (active slot 0) with ``cdb2/factory.db`` and optional Xtensa blobs."""
-    tree: Dict[str, Dict[str, bytes]] = {
+    """Program ``/image2`` (active slot 0) with ``cdb2/factory.db``, presets & Xtensa blobs."""
+    tree: Dict[str, Any] = {
         "cdb2": {
             "factory.db": (
                 factory_db_bytes if factory_db_bytes is not None else build_minimal_factory_db_blob()
-            )
+            ),
+            "presets": {
+                "cinema.preset": build_default_preset_db_blob(),
+            },
         }
     }
     if include_xtensa_blobs:
